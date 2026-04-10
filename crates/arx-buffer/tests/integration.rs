@@ -130,6 +130,58 @@ fn large_buffer_is_tree_shaped_not_linear() {
 }
 
 #[test]
+fn stress_many_edits_with_tracked_properties() {
+    // A pseudo-random walk of insertions and deletions with a RearSticky
+    // property attached at a point we track through the edit history. The
+    // property's range should always land on the same chunk of text we
+    // originally tagged.
+    let mut buf = Buffer::from_str(BufferId(1), "ANCHOR middle text");
+    buf.properties_mut()
+        .ensure_layer("marks", AdjustmentPolicy::TrackEdits)
+        .insert(Interval::new(
+            0..6,
+            PropertyValue::Flag,
+            StickyBehavior::RearSticky,
+        ));
+
+    // 200 small edits that avoid the anchor region.
+    let mut cursor = buf.len_bytes();
+    for i in 0..200u32 {
+        // Alternate appending and mid-body insertions, all past the anchor.
+        let edit_pos = if i % 3 == 0 {
+            cursor
+        } else {
+            // Insert just after the anchor.
+            6 + (i as usize % 3)
+        };
+        let snippet = match i % 4 {
+            0 => "x",
+            1 => "yy",
+            2 => "zzz",
+            _ => " ",
+        };
+        let pos = edit_pos.min(buf.len_bytes());
+        buf.edit(pos..pos, snippet, EditOrigin::System);
+        cursor = buf.len_bytes();
+    }
+
+    // The interval should still cover "ANCHOR" (6 bytes of anchor text).
+    let iv = buf
+        .properties()
+        .layer("marks")
+        .unwrap()
+        .tree()
+        .iter()
+        .next()
+        .expect("anchor interval still present");
+    assert_eq!(iv.range.end - iv.range.start, 6);
+    assert_eq!(buf.rope().slice_to_string(iv.range.clone()), "ANCHOR");
+
+    // And the buffer version reflects every edit.
+    assert_eq!(buf.version(), 200);
+}
+
+#[test]
 fn property_flags_propagate_for_read_only_and_agent_edits() {
     let mut map = PropertyMap::new();
     let layer = map.ensure_layer("edits", AdjustmentPolicy::TrackEdits);

@@ -135,7 +135,7 @@ impl Buffer {
     }
 
     pub fn text(&self) -> String {
-        self.rope.to_string()
+        self.rope.text()
     }
 
     /// Take an `O(1)` snapshot of the buffer at its current version.
@@ -209,7 +209,7 @@ impl BufferSnapshot {
     }
 
     pub fn text(&self) -> String {
-        self.rope.to_string()
+        self.rope.text()
     }
 
     /// Materialise a byte range into a freshly allocated string.
@@ -220,19 +220,34 @@ impl BufferSnapshot {
     /// Extract the full text of line `line` (0-indexed), without its
     /// trailing newline. Out-of-range requests return an empty string.
     pub fn line(&self, line: usize) -> String {
-        if line >= self.rope.len_lines() {
+        let line_count = self.rope.len_lines();
+        if line >= line_count {
             return String::new();
         }
         let start = self.rope.line_to_byte(line);
-        let end = if line + 1 >= self.rope.len_lines() {
+        let end = if line + 1 >= line_count {
             self.rope.len_bytes()
         } else {
-            // Exclude the trailing newline.
-            self.rope.line_to_byte(line + 1).saturating_sub(1)
+            // line_to_byte(line + 1) points at the byte *after* the newline
+            // that terminates `line`; strip the newline to match the
+            // conventional "line text without separator" semantics.
+            self.rope.line_to_byte(line + 1) - 1
         };
         self.rope.slice_to_string(start..end)
     }
 }
+
+// Thread-safety: both types compose only `Send + Sync` building blocks, but
+// let's make that a compile-time guarantee future refactors can't break.
+#[cfg(test)]
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+    assert_send::<Buffer>();
+    assert_sync::<Buffer>();
+    assert_send::<BufferSnapshot>();
+    assert_sync::<BufferSnapshot>();
+};
 
 #[cfg(test)]
 mod tests {

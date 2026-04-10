@@ -180,6 +180,14 @@ fn concat_nodes(left: Arc<Node>, right: Arc<Node>) -> Arc<Node> {
     branch_of(left, right)
 }
 
+/// Split a rope's underlying root at a byte offset, returning the two new
+/// root `Arc<Node>`s without wrapping them in a [`Rope`] or rebalancing.
+/// Used by [`Rope::edit`] to avoid redundant rebalances between the split
+/// and concat steps.
+fn split_raw(node: &Arc<Node>, offset: usize) -> (Arc<Node>, Arc<Node>) {
+    split_node(node, offset)
+}
+
 /// Split a subtree at a byte offset. Both halves preserve structural
 /// sharing with the original where possible.
 fn split_node(node: &Arc<Node>, offset: usize) -> (Arc<Node>, Arc<Node>) {
@@ -245,15 +253,70 @@ fn byte_to_char(node: &Node, offset: usize) -> usize {
 
 /// Walk to the line break count at a given byte offset, i.e. the 0-indexed
 /// line number containing that byte (line N means "after N newlines").
+///
+/// This operates at the byte level — `offset` does *not* need to be on a
+/// UTF-8 character boundary, because we only look for `\n`.
 fn byte_to_line(node: &Node, offset: usize) -> usize {
     match node {
-        Node::Leaf(l) => l.text[..offset].bytes().filter(|&b| b == b'\n').count(),
+        #[allow(clippy::naive_bytecount)] // no external deps in arx-buffer
+        Node::Leaf(l) => l.text.as_bytes()[..offset]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count(),
         Node::Branch(b) => {
             let left_bytes = b.left.bytes();
             if offset <= left_bytes {
                 byte_to_line(&b.left, offset)
             } else {
                 b.left.summary().line_breaks + byte_to_line(&b.right, offset - left_bytes)
+            }
+        }
+    }
+}
+
+/// Check whether a byte offset falls on a UTF-8 character boundary.
+///
+/// Offset 0 and offset `len_bytes()` are always boundaries. Anything in
+/// between requires descending into the leaf that owns the offset.
+fn is_boundary_in(node: &Node, offset: usize) -> bool {
+    match node {
+        Node::Leaf(l) => l.text.is_char_boundary(offset),
+        Node::Branch(b) => {
+            let left_bytes = b.left.bytes();
+            if offset <= left_bytes {
+                is_boundary_in(&b.left, offset)
+            } else {
+                is_boundary_in(&b.right, offset - left_bytes)
+            }
+        }
+    }
+}
+
+/// Append the substring `[start, end)` to `out`, walking the tree in-order
+/// and visiting only leaves that overlap the range.
+fn slice_walk(node: &Node, start: usize, end: usize, out: &mut String) {
+    if start >= end {
+        return;
+    }
+    match node {
+        Node::Leaf(l) => {
+            let s = start.min(l.text.len());
+            let e = end.min(l.text.len());
+            debug_assert!(
+                l.text.is_char_boundary(s) && l.text.is_char_boundary(e),
+                "slice_walk: non-boundary leaf slice {s}..{e}"
+            );
+            out.push_str(&l.text[s..e]);
+        }
+        Node::Branch(b) => {
+            let left_bytes = b.left.bytes();
+            if start < left_bytes {
+                slice_walk(&b.left, start, end.min(left_bytes), out);
+            }
+            if end > left_bytes {
+                let new_start = start.saturating_sub(left_bytes);
+                let new_end = end - left_bytes;
+                slice_walk(&b.right, new_start, new_end, out);
             }
         }
     }
@@ -408,17 +471,16 @@ impl Rope {
     }
 
     /// Split the rope at a byte offset. Both halves share structure with
-    /// `self`.
+    /// `self`. Panics if `byte_offset` is not on a UTF-8 character boundary.
     pub fn split(&self, byte_offset: usize) -> (Rope, Rope) {
+        let len = self.len_bytes();
+        assert!(byte_offset <= len, "split offset {byte_offset} > len {len}");
         assert!(
-            byte_offset <= self.len_bytes(),
-            "split offset out of bounds"
+            self.is_char_boundary(byte_offset),
+            "split offset {byte_offset} is not on a UTF-8 character boundary"
         );
         let (l, r) = split_node(&self.root, byte_offset);
-        (
-            Rope { root: l }.maybe_rebalance(),
-            Rope { root: r }.maybe_rebalance(),
-        )
+        Rope { root: l }.maybe_rebalance_both(Rope { root: r })
     }
 
     /// Concatenate another rope to the end of this one.
@@ -430,24 +492,52 @@ impl Rope {
     }
 
     /// Replace the bytes in `range` with `text`, returning a new rope.
+    ///
+    /// Panics if `range` is inverted, out of bounds, or does not fall on
+    /// UTF-8 character boundaries.
     pub fn edit(&self, range: ByteRange, text: &str) -> Rope {
         let len = self.len_bytes();
-        assert!(range.start <= range.end, "inverted edit range");
-        assert!(range.end <= len, "edit range out of bounds");
-        let (left, rest) = self.split(range.start);
-        let (_, right) = rest.split(range.end - range.start);
-        left.concat(Rope::from_str(text)).concat(right)
+        assert!(range.start <= range.end, "inverted edit range {range:?}");
+        assert!(range.end <= len, "edit range {range:?} out of bounds (len={len})");
+        assert!(
+            self.is_char_boundary(range.start),
+            "edit range start {} is not on a UTF-8 character boundary",
+            range.start
+        );
+        assert!(
+            self.is_char_boundary(range.end),
+            "edit range end {} is not on a UTF-8 character boundary",
+            range.end
+        );
+
+        // Use the non-rebalancing internals and rebalance once at the end.
+        let (left, rest) = split_raw(&self.root, range.start);
+        let (_, right) = split_raw(&rest, range.end - range.start);
+        let inserted = if text.is_empty() {
+            Arc::new(Node::empty())
+        } else {
+            build_balanced(chunk_string(text))
+        };
+        let root = concat_nodes(concat_nodes(left, inserted), right);
+        Rope { root }.maybe_rebalance()
     }
 
-    /// Byte offset → line number (0-indexed).
+    /// Byte offset → line number (0-indexed). `byte` does not need to fall
+    /// on a UTF-8 character boundary; the result is the number of `\n`
+    /// bytes in `[0, byte)`.
     pub fn byte_to_line(&self, byte: usize) -> usize {
         assert!(byte <= self.len_bytes(), "byte offset out of bounds");
         byte_to_line(&self.root, byte)
     }
 
-    /// Byte offset → character index.
+    /// Byte offset → character index. `byte` **must** fall on a UTF-8
+    /// character boundary.
     pub fn byte_to_char(&self, byte: usize) -> usize {
         assert!(byte <= self.len_bytes(), "byte offset out of bounds");
+        assert!(
+            self.is_char_boundary(byte),
+            "byte_to_char offset {byte} is not on a UTF-8 character boundary"
+        );
         byte_to_char(&self.root, byte)
     }
 
@@ -465,8 +555,24 @@ impl Rope {
         line_to_byte(&self.root, line)
     }
 
+    /// Return whether `byte_offset` lies on a UTF-8 character boundary. The
+    /// two extremes (0 and [`Rope::len_bytes`]) are always boundaries.
+    pub fn is_char_boundary(&self, byte_offset: usize) -> bool {
+        if byte_offset == 0 || byte_offset == self.len_bytes() {
+            return true;
+        }
+        if byte_offset > self.len_bytes() {
+            return false;
+        }
+        is_boundary_in(&self.root, byte_offset)
+    }
+
     /// Return the full rope as a newly-allocated `String`.
-    pub fn as_string(&self) -> String {
+    ///
+    /// This is an `O(n)` operation that pre-sizes its output and walks the
+    /// tree once. For incremental access prefer [`Rope::chunks`] and the
+    /// byte / char iterators, which do no allocation.
+    pub fn text(&self) -> String {
         let mut out = String::with_capacity(self.len_bytes());
         for chunk in self.chunks() {
             out.push_str(chunk);
@@ -475,14 +581,20 @@ impl Rope {
     }
 
     /// Extract a byte range as a newly-allocated `String`.
+    ///
+    /// Walks the tree in place — no intermediate nodes are allocated.
+    /// Panics if the range is out of bounds or off char boundaries.
     pub fn slice_to_string(&self, range: ByteRange) -> String {
+        let len = self.len_bytes();
+        assert!(range.start <= range.end, "inverted slice range");
+        assert!(range.end <= len, "slice range out of bounds");
         assert!(
-            range.start <= range.end && range.end <= self.len_bytes(),
-            "slice range out of bounds"
+            self.is_char_boundary(range.start) && self.is_char_boundary(range.end),
+            "slice range {range:?} is not on UTF-8 character boundaries"
         );
-        let (_, rest) = self.split(range.start);
-        let (mid, _) = rest.split(range.end - range.start);
-        mid.as_string()
+        let mut out = String::with_capacity(range.end - range.start);
+        slice_walk(&self.root, range.start, range.end, &mut out);
+        out
     }
 
     /// Iterator over leaf chunks in order.
@@ -508,13 +620,12 @@ impl Rope {
     }
 
     /// Iterator over 0-indexed lines. Line separators are included in each
-    /// yielded line string.
+    /// yielded line string except (possibly) the final trailing line.
+    ///
+    /// This iterator is `O(n)` total, using a persistent chunk cursor that
+    /// advances once across the rope.
     pub fn lines(&self) -> Lines<'_> {
-        Lines {
-            rope: self,
-            next_byte: 0,
-            total: self.len_bytes(),
-        }
+        Lines::new(self)
     }
 
     /// Tree depth — useful for tests and diagnostics.
@@ -528,6 +639,10 @@ impl Rope {
         } else {
             self
         }
+    }
+
+    fn maybe_rebalance_both(self, other: Rope) -> (Rope, Rope) {
+        (self.maybe_rebalance(), other.maybe_rebalance())
     }
 
     /// Rebuild the rope as a fully-balanced tree.
@@ -708,46 +823,57 @@ impl FusedIterator for Chars<'_> {}
 
 /// Line iterator returning owned `String`s. Each yielded line keeps its
 /// trailing newline unless it is the final line of the rope without one.
+///
+/// Walks the rope with a single persistent chunk cursor — `O(n)` total
+/// work across the whole iteration, not `O(n)` per call.
 #[derive(Debug)]
 pub struct Lines<'a> {
-    rope: &'a Rope,
-    next_byte: usize,
-    total: usize,
+    chunks: Chunks<'a>,
+    /// Remainder of the current chunk that has not yet been examined.
+    remaining: &'a str,
+    /// Partial line being assembled when a line spans multiple chunks.
+    buf: String,
+    /// After the rope is exhausted we still emit one final tail (which may
+    /// be empty if the last byte was `\n`). `done` flips true afterwards.
+    done: bool,
+}
+
+impl<'a> Lines<'a> {
+    fn new(rope: &'a Rope) -> Self {
+        let mut chunks = rope.chunks();
+        let remaining = chunks.next().unwrap_or("");
+        Self {
+            chunks,
+            remaining,
+            buf: String::new(),
+            done: false,
+        }
+    }
 }
 
 impl Iterator for Lines<'_> {
     type Item = String;
 
     fn next(&mut self) -> Option<String> {
-        if self.next_byte > self.total {
+        if self.done {
             return None;
         }
-        if self.next_byte == self.total {
-            // Emit the (possibly empty) tail exactly once.
-            self.next_byte = self.total + 1;
-            return Some(String::new());
-        }
-        // Find the next newline starting at `next_byte`.
-        let start = self.next_byte;
-        let mut cursor = start;
-        let mut found_newline = false;
-        for b in self.rope.bytes().skip(start) {
-            cursor += 1;
-            if b == b'\n' {
-                found_newline = true;
-                break;
+        loop {
+            // `\n` is ASCII so the byte index is always a char boundary.
+            if let Some(pos) = self.remaining.as_bytes().iter().position(|&b| b == b'\n') {
+                self.buf.push_str(&self.remaining[..=pos]);
+                self.remaining = &self.remaining[pos + 1..];
+                return Some(std::mem::take(&mut self.buf));
+            }
+            // No newline in the current chunk; drain it into `buf` and advance.
+            self.buf.push_str(self.remaining);
+            if let Some(next) = self.chunks.next() {
+                self.remaining = next;
+            } else {
+                self.done = true;
+                return Some(std::mem::take(&mut self.buf));
             }
         }
-        let end = cursor;
-        let line = self.rope.slice_to_string(start..end);
-        if found_newline {
-            self.next_byte = end;
-        } else {
-            // No newline means we just consumed the final partial line;
-            // mark iteration finished.
-            self.next_byte = self.total + 1;
-        }
-        Some(line)
     }
 }
 
@@ -923,5 +1049,123 @@ mod tests {
         assert_eq!(r.slice_to_string(0..5), "hello");
         assert_eq!(r.slice_to_string(6..11), "world");
         assert_eq!(r.slice_to_string(11..11), "");
+    }
+
+    // ---- char boundary / UTF-8 safety ----
+
+    #[test]
+    fn is_char_boundary_matches_str() {
+        let text = "a🦀b한ç";
+        let r = Rope::from_str(text);
+        for i in 0..=text.len() {
+            assert_eq!(
+                r.is_char_boundary(i),
+                text.is_char_boundary(i),
+                "disagreement at offset {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_byte_split_and_concat_roundtrip() {
+        let text = "héllo 🦀 世界";
+        let r = Rope::from_str(text);
+        for i in 0..=text.len() {
+            if !text.is_char_boundary(i) {
+                continue;
+            }
+            let (a, b) = r.split(i);
+            assert_eq!(a.concat(b).text(), text, "split at {i}");
+        }
+    }
+
+    #[test]
+    fn multi_byte_edit() {
+        // "a🦀b" is 6 bytes: 'a' (1), '🦀' (4 @ 1..5), 'b' (1 @ 5).
+        let r = Rope::from_str("a🦀b");
+        let r2 = r.edit(1..5, "X");
+        assert_eq!(r2.text(), "aXb");
+        // Insert the wave at the very end (offset 6).
+        let r3 = r.edit(6..6, "🌊");
+        assert_eq!(r3.text(), "a🦀b🌊");
+        // Replace the crab with another 4-byte scalar.
+        let r4 = r.edit(1..5, "🦊");
+        assert_eq!(r4.text(), "a🦊b");
+    }
+
+    #[test]
+    #[should_panic(expected = "not on a UTF-8 character boundary")]
+    fn edit_off_boundary_panics_clearly() {
+        let r = Rope::from_str("🦀");
+        let _ = r.edit(1..2, "X");
+    }
+
+    #[test]
+    fn byte_to_line_accepts_non_boundary_offsets() {
+        // Multi-byte chars + newlines: make sure we can count newlines at
+        // offsets that fall inside a scalar value.
+        let r = Rope::from_str("a🦀\nb");
+        // 🦀 spans bytes 1..5. Offset 2 is mid-char but there are 0 newlines
+        // before it.
+        assert_eq!(r.byte_to_line(2), 0);
+        assert_eq!(r.byte_to_line(5), 0);
+        assert_eq!(r.byte_to_line(6), 1);
+    }
+
+    // ---- Lines iterator correctness & performance ----
+
+    #[test]
+    fn lines_over_many_lines_is_linear() {
+        use std::fmt::Write;
+        // 100k lines. If the iterator is O(n²) this test won't finish.
+        let line_count = 100_000;
+        let mut text = String::with_capacity(line_count * 8);
+        for i in 0..line_count {
+            writeln!(text, "l{i}").unwrap();
+        }
+        let r = Rope::from_str(&text);
+        let count = r.lines().count();
+        assert_eq!(count, line_count + 1); // trailing empty line
+    }
+
+    #[test]
+    fn lines_across_chunk_boundaries() {
+        // Force a rope that must span chunks.
+        let chunk_a = "a".repeat(TARGET_LEAF_BYTES - 2);
+        let chunk_b = "b".repeat(TARGET_LEAF_BYTES);
+        let text = format!("{chunk_a}\n{chunk_b}");
+        let r = Rope::from_str(&text);
+        let lines: Vec<String> = r.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), chunk_a.len() + 1);
+        assert_eq!(lines[1].len(), chunk_b.len());
+    }
+
+    // ---- Thread-safety assertions ----
+
+    #[test]
+    fn rope_is_send_and_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<Rope>();
+        assert_sync::<Rope>();
+    }
+
+    // ---- Rebalance budget ----
+
+    #[test]
+    fn edit_does_not_rebalance_every_call() {
+        // With the rebalance check hoisted to edit()'s top, depth grows
+        // monotonically between rebalances and never exceeds the threshold
+        // immediately after a rebalance fires.
+        let mut r = Rope::new();
+        for i in 0..500 {
+            r = r.edit(r.len_bytes()..r.len_bytes(), &format!("[{i}]"));
+            assert!(
+                r.depth() <= REBALANCE_THRESHOLD * 2,
+                "depth {} exceeds 2x threshold at edit {i}",
+                r.depth()
+            );
+        }
     }
 }
