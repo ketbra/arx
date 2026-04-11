@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use arx_buffer::{Buffer, BufferId, BufferSnapshot, ByteRange, Edit, EditOrigin};
 use tokio::sync::watch;
 
+use crate::window::WindowManager;
+
 /// The editor's in-process state.
 ///
 /// Owns every piece of mutable editor state today. Lives on the event loop
@@ -23,6 +25,8 @@ use tokio::sync::watch;
 #[derive(Debug, Default)]
 pub struct Editor {
     buffers: BufferManager,
+    windows: WindowManager,
+    dirty: bool,
 }
 
 impl Editor {
@@ -39,6 +43,34 @@ impl Editor {
     /// Mutably borrow the [`BufferManager`].
     pub fn buffers_mut(&mut self) -> &mut BufferManager {
         &mut self.buffers
+    }
+
+    /// Borrow the [`WindowManager`].
+    pub fn windows(&self) -> &WindowManager {
+        &self.windows
+    }
+
+    /// Mutably borrow the [`WindowManager`].
+    pub fn windows_mut(&mut self) -> &mut WindowManager {
+        &mut self.windows
+    }
+
+    /// Mark the editor as "display-affecting since the last frame" so the
+    /// next tick of the event loop will ping the redraw notify (if any).
+    ///
+    /// Commands that mutate visible state — buffer edits, cursor moves,
+    /// scroll changes, window swaps — should call this explicitly. Read-
+    /// only queries (e.g. the render task's `build_view_state`) must not,
+    /// otherwise the render task creates its own redraw feedback loop.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Consume the dirty flag and return whether a redraw should fire.
+    /// Called by [`crate::EventLoop`] after each dispatched command.
+    #[must_use]
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::replace(&mut self.dirty, false)
     }
 }
 

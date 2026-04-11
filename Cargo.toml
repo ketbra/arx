@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/arx-buffer", "crates/arx-core", "crates/arx-render"]
+members = ["crates/arx-buffer", "crates/arx-core", "crates/arx-driver", "crates/arx-render"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
@@ -11,10 +11,12 @@ compact_str = "0.8"
 smallvec = "1"
 unicode-segmentation = "1"
 unicode-width = "0.2"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures-util = "0.3"
 arx-buffer = { path = "crates/arx-buffer" }
 arx-core = { path = "crates/arx-core" }
 arx-render = { path = "crates/arx-render" }
+arx-driver = { path = "crates/arx-driver" }
 
 [workspace.package]
 version = "0.1.0"

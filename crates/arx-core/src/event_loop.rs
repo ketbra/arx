@@ -6,8 +6,15 @@
 //! order, on the loop's task. When every [`CommandBus`] handle has been
 //! dropped the receiver returns `None` and `run` returns the final
 //! [`Editor`] state.
+//!
+//! Attaching a redraw [`Notify`](tokio::sync::Notify) via
+//! [`EventLoop::with_redraw_notify`] makes the loop ping it after every
+//! command execution, so a render task can reactively redraw without
+//! polling or knowing which commands mutate display state.
 
-use tokio::sync::mpsc;
+use std::sync::Arc;
+
+use tokio::sync::{Notify, mpsc};
 use tracing::trace;
 
 use crate::command::{CommandBus, CommandFn};
@@ -24,6 +31,7 @@ pub const DEFAULT_BUS_CAPACITY: usize = 1024;
 pub struct EventLoop {
     editor: Editor,
     receiver: mpsc::Receiver<CommandFn>,
+    redraw: Option<Arc<Notify>>,
 }
 
 impl EventLoop {
@@ -42,6 +50,7 @@ impl EventLoop {
         let event_loop = EventLoop {
             editor: Editor::new(),
             receiver,
+            redraw: None,
         };
         (event_loop, bus)
     }
@@ -51,7 +60,23 @@ impl EventLoop {
     pub fn with_editor(editor: Editor, capacity: usize) -> (Self, CommandBus) {
         let (sender, receiver) = mpsc::channel(capacity);
         let bus = CommandBus::new(sender);
-        (EventLoop { editor, receiver }, bus)
+        (
+            EventLoop {
+                editor,
+                receiver,
+                redraw: None,
+            },
+            bus,
+        )
+    }
+
+    /// Attach a redraw [`Notify`] that will be pinged once per dispatched
+    /// command. The notify coalesces — a burst of commands produces a
+    /// single wake-up on the waiter side.
+    #[must_use]
+    pub fn with_redraw_notify(mut self, notify: Arc<Notify>) -> Self {
+        self.redraw = Some(notify);
+        self
     }
 
     /// Borrow the [`Editor`] without running. Useful before [`Self::run`].
@@ -79,6 +104,14 @@ impl EventLoop {
         let mut count: u64 = 0;
         while let Some(cmd) = self.receiver.recv().await {
             cmd(&mut self.editor);
+            // Only ping redraw if the command explicitly marked the editor
+            // dirty. Otherwise a read-only invoke from the render task
+            // would trigger its own next redraw and we'd spin forever.
+            if self.editor.take_dirty() {
+                if let Some(ref n) = self.redraw {
+                    n.notify_one();
+                }
+            }
             count = count.wrapping_add(1);
         }
         trace!(commands_executed = count, "event loop drained");
@@ -94,6 +127,11 @@ impl EventLoop {
         let mut count = 0;
         while let Ok(cmd) = self.receiver.try_recv() {
             cmd(&mut self.editor);
+            if self.editor.take_dirty() {
+                if let Some(ref n) = self.redraw {
+                    n.notify_one();
+                }
+            }
             count += 1;
         }
         count
@@ -219,6 +257,71 @@ mod tests {
         let collected = log.lock().unwrap().clone();
         let expected: Vec<u32> = (0..50).collect();
         assert_eq!(collected, expected);
+    }
+
+    #[tokio::test]
+    async fn redraw_notify_pings_when_command_marks_dirty() {
+        let notify = Arc::new(Notify::new());
+        let (event_loop, bus) = EventLoop::new();
+        let event_loop = event_loop.with_redraw_notify(notify.clone());
+        let driver = tokio::spawn(event_loop.run());
+
+        let notified = notify.clone();
+        let waiter = tokio::spawn(async move {
+            notified.notified().await;
+            "woke"
+        });
+
+        bus.dispatch(Editor::mark_dirty).await.unwrap();
+        assert_eq!(waiter.await.unwrap(), "woke");
+        drop(bus);
+        let _ = driver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn redraw_notify_skips_commands_that_do_not_mark_dirty() {
+        // A pure read-only command should not fire the redraw notify —
+        // otherwise the render task creates its own feedback loop.
+        let notify = Arc::new(Notify::new());
+        let (event_loop, bus) = EventLoop::new();
+        let event_loop = event_loop.with_redraw_notify(notify.clone());
+        let driver = tokio::spawn(event_loop.run());
+
+        for _ in 0..5 {
+            bus.dispatch(|_editor| { /* no mark_dirty */ })
+                .await
+                .unwrap();
+        }
+        // Any `notified().await` should hang — we assert a short timeout.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            notify.notified(),
+        )
+        .await;
+        assert!(res.is_err(), "redraw fired for a clean command");
+
+        drop(bus);
+        let _ = driver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn redraw_notify_coalesces_rapid_dirty_commands() {
+        // Five dirty commands in rapid succession coalesce into a single
+        // stored permit (Notify::notify_one is idempotent).
+        let notify = Arc::new(Notify::new());
+        let (event_loop, bus) = EventLoop::with_capacity(16);
+        let event_loop = event_loop.with_redraw_notify(notify.clone());
+        let driver = tokio::spawn(event_loop.run());
+
+        for _ in 0..5 {
+            bus.dispatch(Editor::mark_dirty).await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_millis(100), notify.notified())
+            .await
+            .expect("notify permit should already be set");
+
+        drop(bus);
+        let _ = driver.await.unwrap();
     }
 
     #[tokio::test]
