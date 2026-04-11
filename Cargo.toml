@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/arx-buffer"]
+members = ["crates/arx-buffer", "crates/arx-core"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+thiserror = "2"
+arx-buffer = { path = "crates/arx-buffer" }
 
 [workspace.package]
 version = "0.1.0"
