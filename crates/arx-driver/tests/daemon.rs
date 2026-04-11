@@ -1,9 +1,11 @@
-//! End-to-end daemon + socket test.
+//! End-to-end daemon + IPC test.
 //!
-//! Spawns a real [`DaemonServer`] bound to a temp Unix socket, connects
-//! a synthetic client that speaks the wire protocol directly (not
-//! [`DaemonClient`] — we don't want to grab the real terminal in a
-//! test), sends a handshake + a couple of key events, and asserts:
+//! Spawns a real [`DaemonServer`] bound to a per-test IPC endpoint
+//! (Unix domain socket on Unix, named pipe on Windows), connects a
+//! synthetic client that speaks the wire protocol directly (not
+//! [`arx_driver::DaemonClient`] — we don't want to grab the real
+//! terminal in a test), sends a handshake + a couple of key events,
+//! and asserts:
 //!
 //! * the daemon replies with a `Welcome`;
 //! * the daemon ships at least one `RenderOps` frame reflecting a
@@ -11,17 +13,18 @@
 //! * the daemon tears the session down cleanly when the client sends
 //!   `Goodbye` — but keeps the Editor state (next connection sees it).
 
+use std::path::Path;
 use std::time::Duration;
 
 use arx_core::Editor;
 use arx_driver::DaemonServer;
 use arx_keymap::{Key, KeyChord, KeyModifiers};
 use arx_protocol::{
-    ClientMessage, DaemonMessage, HelloInfo, PROTOCOL_VERSION, read_frame, write_frame,
+    ClientMessage, DaemonMessage, HelloInfo, IpcAddress, IpcStream, PROTOCOL_VERSION, read_frame,
+    write_frame,
 };
 use arx_render::DiffOp;
 use tempfile::TempDir;
-use tokio::net::UnixStream;
 
 fn seeded_editor() -> Editor {
     let mut editor = Editor::new();
@@ -30,31 +33,44 @@ fn seeded_editor() -> Editor {
     editor
 }
 
-async fn connect(path: &std::path::Path) -> UnixStream {
+/// Pick an IPC address unique to this test / pid so parallel tests
+/// can't collide on the same pipe name.
+#[cfg(unix)]
+fn test_address(dir: &Path, tag: &str) -> IpcAddress {
+    IpcAddress::Path(dir.join(format!("arx-test-{tag}.sock")))
+}
+
+#[cfg(windows)]
+fn test_address(_dir: &Path, tag: &str) -> IpcAddress {
+    let pid = std::process::id();
+    IpcAddress::Pipe(format!(r"\\.\pipe\arx-test-{tag}-{pid}"))
+}
+
+async fn connect(address: &IpcAddress) -> IpcStream {
     for _ in 0..20 {
-        if let Ok(s) = UnixStream::connect(path).await {
+        if let Ok(s) = IpcStream::connect(address).await {
             return s;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("daemon socket never appeared at {}", path.display());
+    panic!("daemon endpoint never appeared at {address}");
 }
 
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn handshake_and_render_round_trip() {
     let dir = TempDir::new().unwrap();
-    let socket_path = dir.path().join("arx.sock");
+    let address = test_address(dir.path(), "roundtrip");
 
     // Spawn the daemon.
-    let server = DaemonServer::bind(socket_path.clone(), seeded_editor()).unwrap();
+    let server = DaemonServer::bind(address.clone(), seeded_editor()).unwrap();
     let daemon_handle = tokio::spawn(async move {
         // run() loops forever; we abort it when the test ends.
         let _ = server.run().await;
     });
 
     // Connect a test client.
-    let stream = connect(&socket_path).await;
+    let stream = connect(&address).await;
     let (mut reader, mut writer) = stream.into_split();
 
     // Handshake: Hello → Welcome.
@@ -136,7 +152,7 @@ async fn handshake_and_render_round_trip() {
 
     // The daemon keeps running, ready for another connection.
     // Reconnect and verify state persisted (buffer still contains "Xhi").
-    let stream2 = connect(&socket_path).await;
+    let stream2 = connect(&address).await;
     let (mut reader2, mut writer2) = stream2.into_split();
     write_frame(
         &mut writer2,
@@ -186,14 +202,14 @@ async fn handshake_and_render_round_trip() {
 #[tokio::test]
 async fn version_mismatch_is_rejected_gracefully() {
     let dir = TempDir::new().unwrap();
-    let socket_path = dir.path().join("arx.sock");
+    let address = test_address(dir.path(), "version");
 
-    let server = DaemonServer::bind(socket_path.clone(), Editor::new()).unwrap();
+    let server = DaemonServer::bind(address.clone(), Editor::new()).unwrap();
     let daemon_handle = tokio::spawn(async move {
         let _ = server.run().await;
     });
 
-    let stream = connect(&socket_path).await;
+    let stream = connect(&address).await;
     let (mut reader, mut writer) = stream.into_split();
     write_frame(
         &mut writer,

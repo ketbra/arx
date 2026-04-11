@@ -3,13 +3,14 @@
 //! Spec §7: the daemon owns the editor (buffers, windows, event loop,
 //! commands, keymap) and the render pipeline. Clients are thin — they
 //! only own the terminal and ship keys in / render ops out. This module
-//! is the glue that binds a Unix socket, accepts a client, and stitches
-//! together:
+//! is the glue that binds a cross-platform IPC endpoint via
+//! [`arx_protocol::IpcListener`] (Unix domain socket on Unix, Windows
+//! named pipe on Windows), accepts a client, and stitches together:
 //!
 //! * an [`EventLoop`] on an [`Editor`] seeded by the caller;
 //! * a [`RenderTask`] over a [`RemoteBackend`];
 //! * two IPC tasks — a "reader" that drains [`ClientMessage`]s off the
-//!   socket and feeds the editor, and a "writer" that ships
+//!   connection and feeds the editor, and a "writer" that ships
 //!   [`DaemonMessage::RenderOps`] batches back out.
 //!
 //! Phase 1 handles a single client at a time: after the client
@@ -19,23 +20,21 @@
 //! milestones; [`Session`](arx_core::Session) is already in the right
 //! shape for them.
 //!
-//! A `TODO(phase-1b)` marker sits on [`DaemonServer::run`] where the
+//! A `TODO(phase-1c)` marker sits on [`DaemonServer::run`] where the
 //! session persistence hook will land — load a session file at startup,
 //! write one on clean shutdown.
 
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use arx_core::{CommandBus, Editor, EventLoop};
 use arx_protocol::{
-    ClientMessage, DaemonMessage, FrameError, HelloInfo, PROTOCOL_VERSION, ShutdownReason,
-    read_frame, write_frame,
+    ClientMessage, DaemonMessage, FrameError, HelloInfo, IpcAddress, IpcListener, IpcReadHalf,
+    IpcStream, PROTOCOL_VERSION, ShutdownReason, TransportError, read_frame, write_frame,
 };
 
 use crate::remote_backend::RemoteBackend;
@@ -47,35 +46,32 @@ use crate::state::{SharedTerminalSize, Shutdown};
 pub enum DaemonError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("IPC transport error: {0}")]
+    Transport(#[from] TransportError),
     #[error("IPC framing error: {0}")]
     Frame(#[from] FrameError),
     #[error("task join error")]
     Join(#[from] tokio::task::JoinError),
 }
 
-/// A daemon instance bound to a Unix socket path.
+/// A daemon instance bound to a cross-platform IPC endpoint.
 #[derive(Debug)]
 pub struct DaemonServer {
-    socket_path: PathBuf,
-    listener: UnixListener,
+    address: IpcAddress,
+    listener: IpcListener,
     editor: Editor,
 }
 
 impl DaemonServer {
-    /// Bind `socket_path` and take ownership of the initial [`Editor`]
-    /// state. Any existing socket at that path is removed first (the
-    /// OS doesn't let you bind over an existing one). Callers should
-    /// arrange a `scopeguard` or similar to remove the socket again on
-    /// exit.
-    pub fn bind(socket_path: PathBuf, editor: Editor) -> io::Result<Self> {
-        // Remove a stale socket file if present. We do NOT check for an
-        // existing live daemon here — that's the caller's job, via a
-        // pidfile or by trying to connect first.
-        let _ = std::fs::remove_file(&socket_path);
-        let listener = UnixListener::bind(&socket_path)?;
-        info!(path = %socket_path.display(), "daemon listening");
+    /// Bind `address` and take ownership of the initial [`Editor`]
+    /// state. On Unix, any existing socket file at that path is
+    /// removed first. On Windows the bind refuses if another live
+    /// server is already listening on the same pipe name.
+    pub fn bind(address: IpcAddress, editor: Editor) -> Result<Self, DaemonError> {
+        let listener = IpcListener::bind(&address)?;
+        info!(address = %address, "daemon listening");
         Ok(Self {
-            socket_path,
+            address,
             listener,
             editor,
         })
@@ -88,13 +84,13 @@ impl DaemonServer {
     /// [`Editor`] is preserved across client reconnects — detaching and
     /// reattaching keeps buffers, cursors, and scroll positions intact.
     pub async fn run(mut self) -> Result<Editor, DaemonError> {
-        // TODO(phase-1b): load a SessionFile from disk here and apply
+        // TODO(phase-1c): load a SessionFile from disk here and apply
         // it to `self.editor` if present.
         loop {
             tokio::select! {
                 accept = self.listener.accept() => {
                     match accept {
-                        Ok((stream, _addr)) => {
+                        Ok(stream) => {
                             debug!("client connected");
                             self.editor = handle_client(stream, self.editor).await?;
                             debug!("client disconnected; editor state preserved");
@@ -109,13 +105,15 @@ impl DaemonServer {
             // For now we loop forever. A clean shutdown path would come
             // from a separate `Shutdown` signal plumbed into the select
             // above — trivial to add once we have a CLI command for it.
-            // TODO(phase-1b): also write the SessionFile here on the
+            // TODO(phase-1c): also write the SessionFile here on the
             // shutdown branch.
         }
     }
 
-    pub fn socket_path(&self) -> &std::path::Path {
-        &self.socket_path
+    /// The IPC address this daemon is bound to.
+    #[must_use]
+    pub fn address(&self) -> &IpcAddress {
+        &self.address
     }
 }
 
@@ -125,7 +123,7 @@ impl DaemonServer {
 /// hands it back when the client disconnects. The daemon's outer loop
 /// reuses that state for the next client.
 async fn handle_client(
-    stream: UnixStream,
+    stream: IpcStream,
     editor: Editor,
 ) -> Result<Editor, DaemonError> {
     let (mut reader, mut writer) = stream.into_split();
@@ -225,10 +223,10 @@ async fn handle_client(
     Ok(editor)
 }
 
-/// Drive the reader loop: read framed [`ClientMessage`]s from the socket
-/// and dispatch each against the [`CommandBus`].
+/// Drive the reader loop: read framed [`ClientMessage`]s from the
+/// connection and dispatch each against the [`CommandBus`].
 async fn run_reader(
-    reader: &mut tokio::net::unix::OwnedReadHalf,
+    reader: &mut IpcReadHalf,
     bus: &CommandBus,
     size: &SharedTerminalSize,
     shutdown: &Shutdown,
@@ -296,7 +294,7 @@ async fn run_reader(
 // Client side
 // ---------------------------------------------------------------------------
 
-/// Connect to a daemon over a Unix socket and run as a thin client.
+/// Connect to a daemon over an IPC endpoint and run as a thin client.
 ///
 /// Owns the terminal via [`TerminalGuard`](crate::driver::TerminalGuard)-
 /// equivalent raw-mode setup; spawns:
@@ -308,22 +306,22 @@ async fn run_reader(
 ///
 /// The client returns when either the daemon sends
 /// [`DaemonMessage::Shutdown`] or the user presses a key that causes
-/// the daemon to close its side of the socket.
+/// the daemon to close its side of the connection.
 pub struct DaemonClient {
-    socket_path: PathBuf,
+    address: IpcAddress,
 }
 
 impl std::fmt::Debug for DaemonClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DaemonClient")
-            .field("socket_path", &self.socket_path)
+            .field("address", &self.address)
             .finish()
     }
 }
 
 impl DaemonClient {
-    pub fn new(socket_path: PathBuf) -> Self {
-        Self { socket_path }
+    pub fn new(address: IpcAddress) -> Self {
+        Self { address }
     }
 
     /// Connect and run until disconnect.
@@ -341,7 +339,7 @@ impl DaemonClient {
         use arx_keymap::KeyChord;
         use arx_render::{Backend, CrosstermBackend};
 
-        let stream = UnixStream::connect(&self.socket_path).await?;
+        let stream = IpcStream::connect(&self.address).await?;
         let (mut reader, mut writer) = stream.into_split();
 
         // Send Hello.

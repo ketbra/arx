@@ -20,3 +20,4 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 compact_str = { workspace = true }
+tempfile = { workspace = true }
