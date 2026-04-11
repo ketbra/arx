@@ -1,0 +1,21 @@
+[package]
+name = "ext-hello"
+description = "Reference extension: greets the user from a named command"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# `cdylib` is what `libloading` expects. We rely on the same-compiler-
+# version contract for ABI soundness (see arx-sdk docs) — the SDK
+# version check at load time catches mismatched builds.
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+arx-sdk = { workspace = true }

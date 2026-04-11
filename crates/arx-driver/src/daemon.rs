@@ -46,7 +46,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -56,6 +56,8 @@ use arx_protocol::{
     IpcStream, PROTOCOL_VERSION, ShutdownReason, TransportError, read_frame, write_frame,
 };
 
+use crate::ext_host::ExtensionHost;
+use crate::ext_watcher::ExtensionWatcher;
 use crate::remote_backend::RemoteBackend;
 use crate::render::RenderTask;
 use crate::state::{SharedTerminalSize, Shutdown};
@@ -79,6 +81,7 @@ pub struct DaemonServer {
     listener: IpcListener,
     editor: Editor,
     session_path: Option<PathBuf>,
+    extensions_dir: Option<PathBuf>,
     shutdown: Shutdown,
 }
 
@@ -87,6 +90,7 @@ impl std::fmt::Debug for DaemonServer {
         f.debug_struct("DaemonServer")
             .field("address", &self.address)
             .field("session_path", &self.session_path)
+            .field("extensions_dir", &self.extensions_dir)
             .finish_non_exhaustive()
     }
 }
@@ -108,6 +112,7 @@ impl DaemonServer {
             listener,
             editor,
             session_path: None,
+            extensions_dir: None,
             shutdown: Shutdown::new(),
         })
     }
@@ -117,6 +122,22 @@ impl DaemonServer {
     #[must_use]
     pub fn with_session_path(mut self, path: PathBuf) -> Self {
         self.session_path = Some(path);
+        self
+    }
+
+    /// Attach an extensions directory. When set, [`Self::run`]:
+    ///
+    /// 1. Creates the directory if it doesn't exist,
+    /// 2. Walks it at startup and loads every dylib it finds, and
+    /// 3. Spawns a [`ExtensionWatcher`] task that hot-reloads any
+    ///    dylib modified while the daemon is running.
+    ///
+    /// Pass [`None`] (or don't call this) to disable extension
+    /// loading entirely — the extension host stays empty and no
+    /// watcher is spawned.
+    #[must_use]
+    pub fn with_extensions_dir(mut self, dir: PathBuf) -> Self {
+        self.extensions_dir = Some(dir);
         self
     }
 
@@ -161,6 +182,26 @@ impl DaemonServer {
             }
         }
 
+        // --- Extensions phase ---
+        //
+        // Walk the extensions directory synchronously and load every
+        // dylib before any client connects. Individual load failures
+        // are logged but don't abort startup — one broken extension
+        // shouldn't lock the user out of their editor.
+        //
+        // The host lives behind an Arc<Mutex<>> so the watcher task
+        // (spawned per client connection) can share it with the
+        // daemon. Between clients the watcher is gone, so the host
+        // sits idle inside the arc.
+        let host = Arc::new(Mutex::new(ExtensionHost::new()));
+        if let Some(dir) = self.extensions_dir.clone() {
+            let mut locked = host.lock().await;
+            match locked.load_dir_sync(&dir, &mut self.editor) {
+                Ok(count) => info!(count, dir = %dir.display(), "loaded extensions"),
+                Err(e) => warn!(%e, dir = %dir.display(), "extension scan failed"),
+            }
+        }
+
         // --- Accept loop ---
         let accept_result = loop {
             tokio::select! {
@@ -173,7 +214,13 @@ impl DaemonServer {
                     match accept {
                         Ok(stream) => {
                             debug!("client connected");
-                            self.editor = handle_client(stream, self.editor).await?;
+                            self.editor = handle_client(
+                                stream,
+                                self.editor,
+                                host.clone(),
+                                self.extensions_dir.clone(),
+                            )
+                            .await?;
                             debug!("client disconnected; editor state preserved");
                         }
                         Err(e) => {
@@ -184,6 +231,12 @@ impl DaemonServer {
                 }
             }
         };
+
+        // --- Unload phase ---
+        {
+            let mut locked = host.lock().await;
+            locked.unload_all_sync(&mut self.editor);
+        }
 
         // --- Save phase ---
         if let Some(path) = self.session_path.as_ref() {
@@ -243,6 +296,8 @@ async fn restore_session(editor: Editor, session: Session) -> Editor {
 async fn handle_client(
     stream: IpcStream,
     editor: Editor,
+    host: Arc<Mutex<ExtensionHost>>,
+    extensions_dir: Option<PathBuf>,
 ) -> Result<Editor, DaemonError> {
     let (mut reader, mut writer) = stream.into_split();
 
@@ -323,6 +378,18 @@ async fn handle_client(
         let _ = write_frame(&mut writer, &DaemonMessage::Shutdown(ShutdownReason::DaemonExit))
             .await;
         writer_shutdown.fire();
+    });
+
+    // Extension hot-reload watcher — only while a client is
+    // connected, because that's when the user is looking at the
+    // editor and when there's a live bus for the watcher to use.
+    // Dropped on disconnect, which kills its task.
+    let _watcher = extensions_dir.as_ref().map(|dir| {
+        ExtensionWatcher::spawn(dir, host.clone(), bus.clone(), shutdown.clone())
+            .inspect_err(|err| {
+                warn!(%err, dir = %dir.display(), "extension watcher failed to start");
+            })
+            .ok()
     });
 
     // Reader loop: drains ClientMessages off the socket into the bus.

@@ -45,6 +45,8 @@
 
 pub mod daemon;
 pub mod driver;
+pub mod ext_host;
+pub mod ext_watcher;
 pub mod input;
 pub mod remote_backend;
 pub mod render;
@@ -52,6 +54,8 @@ pub mod state;
 
 pub use daemon::{DaemonClient, DaemonError, DaemonServer};
 pub use driver::{Driver, DriverError};
+pub use ext_host::{ExtHostError, ExtensionHost};
+pub use ext_watcher::{ExtensionWatcher, ExtensionWatcherError};
 pub use input::InputTask;
 pub use remote_backend::RemoteBackend;
 pub use render::RenderTask;

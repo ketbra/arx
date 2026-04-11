@@ -8,6 +8,8 @@ members = [
     "crates/arx-keymap",
     "crates/arx-protocol",
     "crates/arx-render",
+    "crates/arx-sdk",
+    "examples/ext-hello",
 ]
 
 [workspace.dependencies]
@@ -31,6 +33,9 @@ arx-render = { path = "crates/arx-render" }
 arx-driver = { path = "crates/arx-driver" }
 arx-keymap = { path = "crates/arx-keymap" }
 arx-protocol = { path = "crates/arx-protocol" }
+arx-sdk = { path = "crates/arx-sdk" }
+libloading = "0.8"
+notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
 
 [workspace.package]
 version = "0.1.0"
@@ -40,7 +45,11 @@ license = "Apache-2.0"
 repository = "https://github.com/ketbra/arx"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` (not `forbid`) so the extension host's `libloading` FFI can
+# opt in with an explicit `#![allow(unsafe_code)]` plus SAFETY comments.
+# Every crate inherits deny-by-default; only `ext_host` currently
+# exercises the exception.
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]

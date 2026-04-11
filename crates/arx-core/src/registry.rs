@@ -67,8 +67,18 @@ pub trait Command: Send + Sync {
     fn name(&self) -> &str;
 
     /// Human-readable description for the command palette and `C-h k`
-    /// lookup screens.
-    fn description(&self) -> &'static str {
+    /// lookup screens. Borrows from `self` so dynamically-loaded
+    /// extensions can return a runtime-built string (their metadata
+    /// isn't known at compile time).
+    //
+    // clippy::unnecessary_wraps / elidable_lifetime_names suggests
+    // the return type should be `&'static str` for the default impl,
+    // which is correct for stock commands but wrong for extension
+    // commands: `ExtensionCommand` overrides this and returns a
+    // borrow of its owned `String`. We keep the `&str` signature
+    // deliberately and silence clippy.
+    #[allow(clippy::needless_lifetimes, clippy::extra_unused_lifetimes)]
+    fn description<'a>(&'a self) -> &'a str {
         ""
     }
 
@@ -120,6 +130,14 @@ impl CommandRegistry {
     /// can drop any borrow into the registry before invoking.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Command>> {
         self.commands.get(name).cloned()
+    }
+
+    /// Remove a command by name. Returns `true` if a binding was
+    /// actually dropped. Used by the extension host to strip an
+    /// extension's commands before unloading its dylib — any clones
+    /// already in flight stay alive through their own `Arc`s.
+    pub fn unregister(&mut self, name: &str) -> bool {
+        self.commands.remove(name).is_some()
     }
 
     /// Iterate every registered `(name, description)` pair. Useful for

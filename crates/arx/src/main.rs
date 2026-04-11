@@ -62,6 +62,16 @@ enum Mode {
         /// Disable session persistence for this run.
         #[arg(long)]
         no_session: bool,
+        /// Directory to scan for extension dylibs (`*.so` / `*.dylib`
+        /// / `*.dll`). Every dylib in the directory is loaded at
+        /// startup and watched for changes while a client is
+        /// connected. Default: `~/.arx/extensions/`. Pass
+        /// `--no-extensions` to skip extension loading entirely.
+        #[arg(long, conflicts_with = "no_extensions")]
+        extensions_dir: Option<PathBuf>,
+        /// Disable the extension host for this run.
+        #[arg(long)]
+        no_extensions: bool,
     },
     /// Connect to a running daemon as a thin client.
     Client {
@@ -85,6 +95,34 @@ fn resolve_session_path(raw: Option<PathBuf>, disabled: bool) -> Option<PathBuf>
     }
 }
 
+fn resolve_extensions_dir(raw: Option<PathBuf>, disabled: bool) -> Option<PathBuf> {
+    if disabled {
+        None
+    } else {
+        Some(raw.unwrap_or_else(default_extensions_dir))
+    }
+}
+
+/// Default extensions directory.
+///
+/// Unix: `$HOME/.arx/extensions`. Windows: `%USERPROFILE%\.arx\extensions`.
+/// Falls back to `./arx-extensions` relative to the working directory
+/// if neither env var is set — preserves the "works out of the box"
+/// property on sandboxed CI.
+fn default_extensions_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".arx").join("extensions");
+        }
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if !profile.is_empty() {
+            return PathBuf::from(profile).join(".arx").join("extensions");
+        }
+    }
+    PathBuf::from("arx-extensions")
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -94,10 +132,13 @@ async fn main() -> ExitCode {
             socket,
             session_file,
             no_session,
+            extensions_dir,
+            no_extensions,
         }) => {
             run_daemon(
                 resolve_address(socket),
                 resolve_session_path(session_file, no_session),
+                resolve_extensions_dir(extensions_dir, no_extensions),
             )
             .await
         }
@@ -151,6 +192,7 @@ async fn run_embedded(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Err
 async fn run_daemon(
     address: IpcAddress,
     session_path: Option<PathBuf>,
+    extensions_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use arx_core::Editor;
     // `IpcListener`'s Drop impl removes the Unix socket on exit;
@@ -159,6 +201,9 @@ async fn run_daemon(
     let mut server = DaemonServer::bind(address, Editor::new())?;
     if let Some(path) = session_path {
         server = server.with_session_path(path);
+    }
+    if let Some(dir) = extensions_dir {
+        server = server.with_extensions_dir(dir);
     }
     // Wire Ctrl+C to the daemon's shutdown handle so the accept loop
     // breaks cleanly and the session save-on-shutdown path runs.

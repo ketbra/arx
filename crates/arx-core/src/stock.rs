@@ -66,7 +66,7 @@ macro_rules! stock_cmd {
             fn name(&self) -> &str {
                 names::$name
             }
-            fn description(&self) -> &'static str {
+            fn description(&self) -> &str {
                 $desc
             }
             fn run(&self, cx: &mut CommandContext<'_>) {
