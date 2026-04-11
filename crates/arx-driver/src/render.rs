@@ -108,6 +108,17 @@ impl<B: Backend + Send + 'static> RenderTask<B> {
                 }
             }
         }
+
+        // One final draw at shutdown time so any mutations that landed
+        // between the last redraw wake-up and the shutdown flag become
+        // visible on the backend. Matters in tests (observe final state)
+        // and in real use (if the user makes a last-millisecond edit
+        // before Ctrl+Q, show it before tearing down the terminal).
+        if let Err(err) =
+            draw_once(&mut backend, &bus, &size, &mut frame_id, &mut previous).await
+        {
+            warn!(%err, "final draw failed");
+        }
         backend
     }
 }
@@ -147,11 +158,23 @@ async fn build_view_state(bus: &CommandBus, cols: u16, rows: u16) -> Option<View
         let active = editor.windows().active()?;
         let data = editor.windows().get(active)?.clone();
         let snapshot = editor.buffers().snapshot(data.buffer_id)?;
+        let is_modified = editor
+            .buffers()
+            .get(data.buffer_id)
+            .is_some_and(arx_buffer::Buffer::is_modified);
+        let label = editor
+            .buffers()
+            .path(data.buffer_id)
+            .and_then(|p| p.file_name())
+            .map_or_else(
+                || format!("buffer {}", data.buffer_id.0),
+                |n| n.to_string_lossy().into_owned(),
+            );
         let text = snapshot.text();
+        let modified_tag = if is_modified { " [+]" } else { "" };
         let global = GlobalState {
             modeline_left: format!(
-                "buffer {}  (ln {}/{})",
-                data.buffer_id.0,
+                "{label}{modified_tag}  (ln {}/{})",
                 snapshot.rope().byte_to_line(data.cursor_byte) + 1,
                 snapshot.rope().len_lines(),
             ),

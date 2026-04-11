@@ -21,3 +21,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 unicode-segmentation = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

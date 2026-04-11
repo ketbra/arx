@@ -86,6 +86,12 @@ pub struct Buffer {
     rope: Rope,
     properties: PropertyMap,
     version: u64,
+    /// Version at which the buffer was last persisted to disk.
+    /// A buffer is "clean" (unmodified relative to its last save) iff
+    /// `version == saved_version`. Brand-new buffers and buffers created
+    /// from in-memory text both start at `saved_version == 0`, which
+    /// compares equal to the initial `version == 0`.
+    saved_version: u64,
 }
 
 impl Buffer {
@@ -96,6 +102,7 @@ impl Buffer {
             rope: Rope::new(),
             properties: PropertyMap::new(),
             version: 0,
+            saved_version: 0,
         }
     }
 
@@ -106,6 +113,7 @@ impl Buffer {
             rope: Rope::from_str(text),
             properties: PropertyMap::new(),
             version: 0,
+            saved_version: 0,
         }
     }
 
@@ -115,6 +123,34 @@ impl Buffer {
 
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Version at which the buffer was last persisted.
+    pub fn saved_version(&self) -> u64 {
+        self.saved_version
+    }
+
+    /// Whether the buffer has been edited since its last save.
+    pub fn is_modified(&self) -> bool {
+        self.version != self.saved_version
+    }
+
+    /// Mark the buffer's current version as "saved". Callers that want to
+    /// avoid the save race (user edits during `tokio::fs::write`) should
+    /// capture `version()` before writing and call
+    /// [`Buffer::mark_saved_at`] with the captured value instead.
+    pub fn mark_saved(&mut self) {
+        self.saved_version = self.version;
+    }
+
+    /// Mark the buffer as saved *at the given version*. Used after an
+    /// async save to record "we persisted version N". If the buffer has
+    /// been edited past `version` in the meantime, this is a no-op — the
+    /// buffer correctly stays modified.
+    pub fn mark_saved_at(&mut self, version: u64) {
+        if self.version == version {
+            self.saved_version = version;
+        }
     }
 
     pub fn rope(&self) -> &Rope {
@@ -336,5 +372,42 @@ mod tests {
         assert_eq!(e.new_len, 3);
         assert_eq!(buf.text(), "new");
         assert_eq!(buf.version(), 1);
+    }
+
+    #[test]
+    fn buffer_starts_clean() {
+        let buf = Buffer::from_str(BufferId(1), "hello");
+        assert!(!buf.is_modified());
+        assert_eq!(buf.version(), 0);
+        assert_eq!(buf.saved_version(), 0);
+    }
+
+    #[test]
+    fn edit_makes_buffer_modified() {
+        let mut buf = Buffer::from_str(BufferId(1), "hello");
+        buf.edit(5..5, "!", EditOrigin::User);
+        assert!(buf.is_modified());
+    }
+
+    #[test]
+    fn mark_saved_clears_modified() {
+        let mut buf = Buffer::from_str(BufferId(1), "hello");
+        buf.edit(5..5, "!", EditOrigin::User);
+        assert!(buf.is_modified());
+        buf.mark_saved();
+        assert!(!buf.is_modified());
+    }
+
+    #[test]
+    fn mark_saved_at_respects_intervening_edit() {
+        // Simulates the save race: we capture version=1, the user edits
+        // (version=2), then we try to mark_saved_at(1). That should NOT
+        // mark the buffer clean, because version 2 hasn't been persisted.
+        let mut buf = Buffer::from_str(BufferId(1), "hello");
+        buf.edit(5..5, "!", EditOrigin::User);
+        let captured_version = buf.version();
+        buf.edit(0..0, "X", EditOrigin::User);
+        buf.mark_saved_at(captured_version);
+        assert!(buf.is_modified(), "edit during save should leave buffer modified");
     }
 }

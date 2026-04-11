@@ -1,9 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["crates/arx-buffer", "crates/arx-core", "crates/arx-driver", "crates/arx-render"]
+members = [
+    "crates/arx",
+    "crates/arx-buffer",
+    "crates/arx-core",
+    "crates/arx-driver",
+    "crates/arx-render",
+]
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
 tracing = "0.1"
 thiserror = "2"
 bitflags = "2"

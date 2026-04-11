@@ -14,11 +14,13 @@
 //!   by tests to drive the whole pipeline with a scripted event stream
 //!   and a [`arx_render::TestBackend`], with no TTY involved.
 
+use std::future::Future;
 use std::io::{self, Stdout, Write};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crossterm::event::Event;
-use crossterm::{cursor, terminal, ExecutableCommand};
+use crossterm::{ExecutableCommand, cursor, terminal};
 use futures_util::Stream;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -31,6 +33,11 @@ use crate::input::InputTask;
 use crate::render::RenderTask;
 use crate::state::{SharedTerminalSize, Shutdown};
 
+/// Erased async hook that runs after the event loop has been spawned and
+/// seeded. The driver stores one of these and runs it from `run_with`.
+type AsyncHook = Box<dyn FnOnce(CommandBus) -> BoxFuture<'static, ()> + Send>;
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 /// Errors that can happen while running the driver.
 #[derive(Debug, thiserror::Error)]
 pub enum DriverError {
@@ -40,33 +47,60 @@ pub enum DriverError {
     Join(#[from] tokio::task::JoinError),
 }
 
-/// Convenience: a builder / holder for driver configuration.
+/// Top-level driver configuration.
 ///
-/// For Phase 1 there's nothing to configure beyond which seed function
-/// to run against the editor before the event loop starts (used to open
-/// an initial buffer / window). The next milestones will grow this
-/// struct to hold the keymap, theme, and file paths from the CLI.
+/// The driver has two seed hooks:
+///
+/// * a synchronous **pre-spawn seed** that runs against the editor
+///   before the event loop is spawned (for fast, deterministic state
+///   setup in tests — it cannot use the command bus because the loop
+///   hasn't started yet);
+/// * an asynchronous **post-spawn hook** that runs on the tokio runtime
+///   once the event loop is up and the tasks are running, with access
+///   to the [`CommandBus`]. This is where real-file-I/O startup work
+///   lives: e.g. the `arx` binary uses it to open files from the
+///   command line via [`arx_core::open_file`].
+///
+/// Both are optional; either can be a no-op.
 pub struct Driver {
     seed: Box<dyn FnOnce(&mut Editor) + Send>,
+    async_hook: Option<AsyncHook>,
 }
 
 impl std::fmt::Debug for Driver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Driver").finish_non_exhaustive()
+        f.debug_struct("Driver")
+            .field("async_hook", &self.async_hook.as_ref().map(|_| "..."))
+            .finish_non_exhaustive()
     }
 }
 
 impl Driver {
-    /// Create a driver with an optional "seed" function that runs against
-    /// the editor before the event loop begins accepting input. Use this
-    /// to open files, restore session state, etc.
+    /// Create a driver with an optional synchronous pre-spawn seed.
+    /// The seed runs against the editor **before** the event loop is
+    /// spawned, so it must not use the command bus.
     pub fn new<F>(seed: F) -> Self
     where
         F: FnOnce(&mut Editor) + Send + 'static,
     {
         Self {
             seed: Box::new(seed),
+            async_hook: None,
         }
+    }
+
+    /// Attach a post-spawn async hook. The hook runs once after the
+    /// event loop and input / render tasks have been spawned and has
+    /// access to the [`CommandBus`]; use it for async startup work like
+    /// reading files from disk.
+    #[must_use]
+    pub fn with_async_hook<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: FnOnce(CommandBus) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.async_hook = Some(Box::new(move |bus| Box::pin(hook(bus))));
+        self
     }
 
     /// Run against a real terminal (stdin / stdout). Sets up raw mode +
@@ -81,9 +115,9 @@ impl Driver {
         let backend = CrosstermBackend::new(io::stdout(), cols, rows);
         let events = crossterm::event::EventStream::new();
 
-        let result = self
-            .run_with(events, backend, size, |_| async {})
-            .await;
+        // `run_with` already consults the stored async hook — we just
+        // supply a no-op extension hook.
+        let result = self.run_with(events, backend, size, |_| async {}).await;
 
         // Restore the terminal before returning either Ok or Err.
         drop(guard);
@@ -92,8 +126,15 @@ impl Driver {
 
     /// Generic entry point used by `run` and by tests. Drives the whole
     /// pipeline until either the input or render task signals shutdown.
+    ///
+    /// If `self` has an async hook installed via [`Self::with_async_hook`],
+    /// it runs **before** the caller-supplied `hook`. That means
+    /// `run_with` is composition-safe: the builder's hook is always
+    /// honoured, and the explicit parameter is a per-call extension
+    /// (typically a test waiter that lets render frames land before
+    /// shutdown).
     pub async fn run_with<S, B, F, Fut>(
-        self,
+        mut self,
         events: S,
         backend: B,
         size: SharedTerminalSize,
@@ -108,10 +149,10 @@ impl Driver {
         let redraw = Arc::new(Notify::new());
         let shutdown = Shutdown::new();
 
-        // Build the editor and run the seed *before* the event loop
-        // starts. Going through the bus here would deadlock, because
-        // `invoke` awaits a reply from a loop that hasn't been spawned
-        // yet. Using `with_editor` sidesteps that entirely.
+        // Build the editor and run the synchronous seed *before* the
+        // event loop starts. Going through the bus here would deadlock,
+        // because `invoke` awaits a reply from a loop that hasn't been
+        // spawned yet. Using `with_editor` sidesteps that entirely.
         let mut editor = Editor::new();
         let seed = self.seed;
         seed(&mut editor);
@@ -121,13 +162,8 @@ impl Driver {
         // Spawn the event loop driver.
         let loop_handle: JoinHandle<Editor> = tokio::spawn(event_loop.run());
 
-        // Spawn input + render tasks.
-        let input_task = InputTask {
-            events,
-            bus: bus.clone(),
-            size: size.clone(),
-            shutdown: shutdown.clone(),
-        };
+        // Spawn the render task before the input task so it can catch
+        // the redraws triggered by the async hook's `open_file` calls.
         let render_task = RenderTask::new(
             backend,
             bus.clone(),
@@ -135,15 +171,30 @@ impl Driver {
             shutdown.clone(),
             size.clone(),
         );
-        let input_handle = tokio::spawn(input_task.run());
         let render_handle = tokio::spawn(render_task.run());
 
-        // Run any test / embedding hook (no-op in the real driver).
+        // Run the builder-provided async hook (e.g. "open files") to
+        // completion **before** spawning the input task. Otherwise the
+        // input task would start consuming events against an editor
+        // that has no buffers or windows yet, and they'd all be no-ops.
+        if let Some(builder_hook) = self.async_hook.take() {
+            builder_hook(bus.clone()).await;
+        }
+
+        // Now it's safe to start consuming input.
+        let input_task = InputTask {
+            events,
+            bus: bus.clone(),
+            size: size.clone(),
+            shutdown: shutdown.clone(),
+        };
+        let input_handle = tokio::spawn(input_task.run());
+
+        // Per-call hook (e.g. "wait for frames to land" in tests).
         hook(bus.clone()).await;
 
-        // Wait for input to end. When it does, also signal render shutdown
-        // (it might already be noticing the same flag) and drop the bus
-        // so the event loop drains.
+        // Wait for input to end. When it does, signal render shutdown
+        // and drop the bus so the event loop drains.
         let _ = input_handle.await;
         shutdown.fire();
         let _ = render_handle.await;

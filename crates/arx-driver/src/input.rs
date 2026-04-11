@@ -7,6 +7,7 @@
 //! | Event | Action |
 //! |---|---|
 //! | `Ctrl+Q`, `Ctrl+C`, `Esc` | request shutdown |
+//! | `Ctrl+S` | save the active buffer to disk |
 //! | printable char | insert at cursor |
 //! | `Enter` | insert `"\n"` |
 //! | `Backspace` | delete the grapheme before the cursor |
@@ -113,6 +114,7 @@ async fn handle_key(key: KeyEvent, bus: &CommandBus) -> ControlFlow<()> {
     }
 
     let dispatched = match key.code {
+        KeyCode::Char('s') if is_ctrl => dispatch_save(bus).await,
         KeyCode::Char(ch) if !is_ctrl => dispatch_insert(bus, ch.to_string()).await,
         KeyCode::Enter => dispatch_insert(bus, "\n".into()).await,
         KeyCode::Backspace => dispatch_backspace(bus).await,
@@ -338,6 +340,42 @@ async fn dispatch_move_end(bus: &CommandBus) -> Result<(), ()> {
     })
     .await
     .map_err(|_| ())
+}
+
+/// Save the buffer in the active window to its on-disk path.
+///
+/// Fire-and-forget: we spawn a tokio task for the async save so the
+/// input loop can keep processing events while the write is in flight.
+/// Errors (no active window, no path, I/O failure) are logged via
+/// `tracing` — they don't block subsequent input.
+async fn dispatch_save(bus: &CommandBus) -> Result<(), ()> {
+    // Resolve which buffer to save upfront. This does mark the editor
+    // dirty so the modeline re-renders (the in-flight indicator is
+    // visible before the actual write completes).
+    let buffer_id = bus
+        .invoke(|editor| {
+            editor
+                .windows()
+                .active_data()
+                .map(|data| data.buffer_id)
+        })
+        .await
+        .map_err(|_| ())?;
+    let Some(buffer_id) = buffer_id else {
+        tracing::debug!("save: no active window");
+        return Ok(());
+    };
+
+    let bus_clone = bus.clone();
+    tokio::spawn(async move {
+        match arx_core::save_file(&bus_clone, buffer_id).await {
+            Ok(path) => tracing::info!(path = %path.display(), "saved"),
+            Err(err) => tracing::warn!(%err, "save failed"),
+        }
+        // Nudge the renderer so the modeline clears the `[+]` indicator.
+        let _ = bus_clone.dispatch(Editor::mark_dirty).await;
+    });
+    Ok(())
 }
 
 async fn dispatch_scroll(bus: &CommandBus, delta: i32) -> Result<(), ()> {

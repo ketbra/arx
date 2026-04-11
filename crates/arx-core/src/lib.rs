@@ -76,9 +76,11 @@
 pub mod command;
 pub mod editor;
 pub mod event_loop;
+pub mod file;
 pub mod window;
 
 pub use command::{CommandBus, CommandFn, DispatchError};
 pub use editor::{BufferManager, Editor};
 pub use event_loop::{DEFAULT_BUS_CAPACITY, EventLoop};
+pub use file::{OpenFileError, SaveFileError, open_file, save_file, save_file_as};
 pub use window::{WindowData, WindowId, WindowManager};
