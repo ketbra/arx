@@ -126,6 +126,59 @@ pub fn default_address() -> IpcAddress {
     }
 }
 
+/// Pick the default session-file path for the current user.
+///
+/// Session persistence is *data* (survives reboots) rather than
+/// *runtime* state (lives until shutdown), so the search path follows
+/// the XDG state spec rather than `$XDG_RUNTIME_DIR`.
+///
+/// | Platform | Path |
+/// |---|---|
+/// | Unix (Linux, …) | `$XDG_STATE_HOME/arx/session.postcard` → `$HOME/.local/state/arx/session.postcard` → `/tmp/arx-<user>-session.postcard` |
+/// | Windows | `%LOCALAPPDATA%\arx\session.postcard` → `%USERPROFILE%\arx\session.postcard` |
+///
+/// The parent directory is only created by
+/// [`arx_core::Session::save_to_path`] at write time — we don't touch
+/// the filesystem here.
+#[must_use]
+pub fn default_session_path() -> PathBuf {
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir).join("arx").join("session.postcard");
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                return PathBuf::from(home)
+                    .join(".local")
+                    .join("state")
+                    .join("arx")
+                    .join("session.postcard");
+            }
+        }
+        PathBuf::from(format!(
+            "/tmp/arx-{}-session.postcard",
+            current_user()
+        ))
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
+            if !appdata.is_empty() {
+                return PathBuf::from(appdata).join("arx").join("session.postcard");
+            }
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            if !profile.is_empty() {
+                return PathBuf::from(profile).join("arx").join("session.postcard");
+            }
+        }
+        PathBuf::from(format!("arx-{}-session.postcard", current_user()))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -480,6 +533,21 @@ mod tests {
         assert!(matches!(addr, IpcAddress::Path(_)));
         #[cfg(windows)]
         assert!(matches!(addr, IpcAddress::Pipe(_)));
+    }
+
+    #[test]
+    fn default_session_path_is_platform_appropriate() {
+        let path = default_session_path();
+        // The function must return *some* non-empty path in every
+        // environment — it's the daemon's startup hook and cannot
+        // return None. On both platforms the final segment is our
+        // fixed filename.
+        let fname = path
+            .file_name()
+            .expect("session path has no filename")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(fname, "session.postcard");
     }
 
     #[cfg(unix)]

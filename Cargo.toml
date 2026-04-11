@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs", "io-util", "net"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs", "io-util", "net", "signal"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 tracing = "0.1"

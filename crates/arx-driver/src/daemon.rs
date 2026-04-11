@@ -20,18 +20,37 @@
 //! milestones; [`Session`](arx_core::Session) is already in the right
 //! shape for them.
 //!
-//! A `TODO(phase-1c)` marker sits on [`DaemonServer::run`] where the
-//! session persistence hook will land — load a session file at startup,
-//! write one on clean shutdown.
+//! # Session persistence
+//!
+//! [`DaemonServer::bind`] optionally takes a session-file path. If
+//! given, [`DaemonServer::run`] does two things around its accept
+//! loop:
+//!
+//! 1. At startup, before the first `accept`, it tries
+//!    [`arx_core::Session::load_from_path`]. A missing file is fine
+//!    — that's first run. A decode / version-mismatch error is
+//!    logged and the daemon keeps going with a clean editor (we
+//!    never refuse to start because the session file is broken).
+//! 2. At shutdown, after the accept loop breaks, it snapshots the
+//!    editor and writes the result with
+//!    [`arx_core::Session::save_to_path`]. This is "Level 1"
+//!    persistence per the ladder in
+//!    [`arx_core::session`] — clean exits save, unclean exits
+//!    don't.
+//!
+//! A [`Shutdown`] handle threaded into the accept loop lets callers
+//! (a Ctrl+C handler, a test, a future `arx daemon stop` command)
+//! break out cleanly so the save step actually runs.
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use arx_core::{CommandBus, Editor, EventLoop};
+use arx_core::{CommandBus, Editor, EventLoop, Session};
 use arx_protocol::{
     ClientMessage, DaemonMessage, FrameError, HelloInfo, IpcAddress, IpcListener, IpcReadHalf,
     IpcStream, PROTOCOL_VERSION, ShutdownReason, TransportError, read_frame, write_frame,
@@ -55,11 +74,21 @@ pub enum DaemonError {
 }
 
 /// A daemon instance bound to a cross-platform IPC endpoint.
-#[derive(Debug)]
 pub struct DaemonServer {
     address: IpcAddress,
     listener: IpcListener,
     editor: Editor,
+    session_path: Option<PathBuf>,
+    shutdown: Shutdown,
+}
+
+impl std::fmt::Debug for DaemonServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DaemonServer")
+            .field("address", &self.address)
+            .field("session_path", &self.session_path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DaemonServer {
@@ -67,6 +96,10 @@ impl DaemonServer {
     /// state. On Unix, any existing socket file at that path is
     /// removed first. On Windows the bind refuses if another live
     /// server is already listening on the same pipe name.
+    ///
+    /// The returned server has no session file wired up — call
+    /// [`Self::with_session_path`] before [`Self::run`] to enable
+    /// Level 1 persistence.
     pub fn bind(address: IpcAddress, editor: Editor) -> Result<Self, DaemonError> {
         let listener = IpcListener::bind(&address)?;
         info!(address = %address, "daemon listening");
@@ -74,20 +107,68 @@ impl DaemonServer {
             address,
             listener,
             editor,
+            session_path: None,
+            shutdown: Shutdown::new(),
         })
     }
 
-    /// Run the daemon forever, handling clients serially.
+    /// Attach a session file. When set, [`Self::run`] loads the file at
+    /// startup (if present) and writes it on clean shutdown.
+    #[must_use]
+    pub fn with_session_path(mut self, path: PathBuf) -> Self {
+        self.session_path = Some(path);
+        self
+    }
+
+    /// Clone the internal [`Shutdown`] handle. Callers can wire this to
+    /// a Ctrl+C handler or any other signal source to break the accept
+    /// loop cleanly; [`Self::run`] polls the same handle inside its
+    /// `tokio::select!`, so a `fire()` from outside unblocks a pending
+    /// `accept()` and lets the save-on-shutdown path run.
+    #[must_use]
+    pub fn shutdown_handle(&self) -> Shutdown {
+        self.shutdown.clone()
+    }
+
+    /// Run the daemon, handling clients serially until the shutdown
+    /// handle fires or the listener errors.
     ///
-    /// Returns the final [`Editor`] state when either the listener is
-    /// closed externally or the server is signalled to stop. The
-    /// [`Editor`] is preserved across client reconnects — detaching and
-    /// reattaching keeps buffers, cursors, and scroll positions intact.
+    /// Returns the final [`Editor`] state. The editor is preserved
+    /// across client reconnects and, if a session path was configured
+    /// via [`Self::with_session_path`], its final state is serialised
+    /// to that path before returning.
     pub async fn run(mut self) -> Result<Editor, DaemonError> {
-        // TODO(phase-1c): load a SessionFile from disk here and apply
-        // it to `self.editor` if present.
-        loop {
+        // --- Load phase ---
+        if let Some(path) = self.session_path.clone() {
+            match Session::load_from_path(&path).await {
+                Ok(Some(session)) => {
+                    // Apply via the event loop so the single-writer
+                    // invariant is respected. The event loop then
+                    // shuts down and returns the restored editor.
+                    let editor = std::mem::replace(&mut self.editor, Editor::new());
+                    self.editor = restore_session(editor, session).await;
+                    info!(path = %path.display(), "session restored");
+                }
+                Ok(None) => {
+                    debug!(path = %path.display(), "no session file yet");
+                }
+                Err(e) => {
+                    // Never refuse to start because a session file is
+                    // corrupt: a user whose state got corrupted still
+                    // wants to use their editor.
+                    warn!(%e, path = %path.display(), "session load failed; starting fresh");
+                }
+            }
+        }
+
+        // --- Accept loop ---
+        let accept_result = loop {
             tokio::select! {
+                biased;
+                () = self.shutdown.wait() => {
+                    debug!("daemon: shutdown signal received");
+                    break Ok(());
+                }
                 accept = self.listener.accept() => {
                     match accept {
                         Ok(stream) => {
@@ -97,17 +178,24 @@ impl DaemonServer {
                         }
                         Err(e) => {
                             warn!(%e, "accept failed");
-                            return Err(e.into());
+                            break Err(DaemonError::Transport(e));
                         }
                     }
                 }
             }
-            // For now we loop forever. A clean shutdown path would come
-            // from a separate `Shutdown` signal plumbed into the select
-            // above — trivial to add once we have a CLI command for it.
-            // TODO(phase-1c): also write the SessionFile here on the
-            // shutdown branch.
+        };
+
+        // --- Save phase ---
+        if let Some(path) = self.session_path.as_ref() {
+            let session = Session::from_editor(&self.editor);
+            if let Err(e) = session.save_to_path(path).await {
+                warn!(%e, path = %path.display(), "session save failed");
+            } else {
+                info!(path = %path.display(), "session saved");
+            }
         }
+
+        accept_result.map(|()| self.editor)
     }
 
     /// The IPC address this daemon is bound to.
@@ -115,6 +203,36 @@ impl DaemonServer {
     pub fn address(&self) -> &IpcAddress {
         &self.address
     }
+}
+
+/// Replay a restored [`Session`] against `editor` via a short-lived
+/// event loop — this is the only way to get a `&mut Editor` from the
+/// `Session::restore` code path without duplicating the single-writer
+/// invariant.
+///
+/// If the restore closure errors (bus closed, which can't happen here
+/// because we own both ends), the original editor comes back
+/// unmodified. Missing files on disk are logged and skipped per the
+/// `Session::restore` contract.
+async fn restore_session(editor: Editor, session: Session) -> Editor {
+    let (event_loop, bus) = EventLoop::with_editor(editor, arx_core::DEFAULT_BUS_CAPACITY);
+    let handle: JoinHandle<Editor> = tokio::spawn(event_loop.run());
+    match session.restore(&bus).await {
+        Ok(summary) => {
+            debug!(
+                restored_buffers = summary.restored_buffers,
+                skipped_buffers = summary.skipped_buffers,
+                restored_windows = summary.restored_windows,
+                "session restore complete",
+            );
+        }
+        Err(e) => warn!(%e, "session restore failed"),
+    }
+    drop(bus);
+    handle.await.unwrap_or_else(|e| {
+        warn!(%e, "restore event loop panicked; returning empty editor");
+        Editor::new()
+    })
 }
 
 /// Handle one client connection end-to-end.

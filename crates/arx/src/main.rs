@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use arx_driver::{DaemonClient, DaemonServer, Driver};
-use arx_protocol::{IpcAddress, default_address};
+use arx_protocol::{IpcAddress, default_address, default_session_path};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -51,6 +51,17 @@ enum Mode {
         /// named pipes; everything else is treated as a path.
         #[arg(long)]
         socket: Option<String>,
+        /// Path to the session file for Level-1 persistence. If set,
+        /// the daemon loads it at startup (if it exists) and saves
+        /// the current editor state to it on clean shutdown. Pass
+        /// `--no-session` to disable entirely. Default:
+        /// `$XDG_STATE_HOME/arx/session.postcard` on Unix,
+        /// `%LOCALAPPDATA%\arx\session.postcard` on Windows.
+        #[arg(long, conflicts_with = "no_session")]
+        session_file: Option<PathBuf>,
+        /// Disable session persistence for this run.
+        #[arg(long)]
+        no_session: bool,
     },
     /// Connect to a running daemon as a thin client.
     Client {
@@ -66,12 +77,30 @@ fn resolve_address(raw: Option<String>) -> IpcAddress {
         .unwrap_or_else(default_address)
 }
 
+fn resolve_session_path(raw: Option<PathBuf>, disabled: bool) -> Option<PathBuf> {
+    if disabled {
+        None
+    } else {
+        Some(raw.unwrap_or_else(default_session_path))
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.mode {
         None => run_embedded(cli.files).await,
-        Some(Mode::Daemon { socket }) => run_daemon(resolve_address(socket)).await,
+        Some(Mode::Daemon {
+            socket,
+            session_file,
+            no_session,
+        }) => {
+            run_daemon(
+                resolve_address(socket),
+                resolve_session_path(session_file, no_session),
+            )
+            .await
+        }
         Some(Mode::Client { socket }) => run_client(resolve_address(socket)).await,
     };
     match result {
@@ -119,12 +148,29 @@ async fn run_embedded(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-async fn run_daemon(address: IpcAddress) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_daemon(
+    address: IpcAddress,
+    session_path: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use arx_core::Editor;
     // `IpcListener`'s Drop impl removes the Unix socket on exit;
     // Windows named pipes clean up when the handle closes, so we
     // don't need a separate guard type any more.
-    let server = DaemonServer::bind(address, Editor::new())?;
+    let mut server = DaemonServer::bind(address, Editor::new())?;
+    if let Some(path) = session_path {
+        server = server.with_session_path(path);
+    }
+    // Wire Ctrl+C to the daemon's shutdown handle so the accept loop
+    // breaks cleanly and the session save-on-shutdown path runs.
+    // Without this, hitting Ctrl+C would kill the process mid-accept
+    // and lose the final session state.
+    let shutdown = server.shutdown_handle();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("ctrl+c received; shutting down daemon");
+            shutdown.fire();
+        }
+    });
     let _editor = server.run().await?;
     Ok(())
 }

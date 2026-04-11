@@ -29,5 +29,5 @@ pub use codec::{FrameError, MAX_FRAME_BYTES, read_frame, write_frame};
 pub use message::{ClientMessage, DaemonMessage, HelloInfo, ShutdownReason, PROTOCOL_VERSION};
 pub use transport::{
     IpcAddress, IpcListener, IpcReadHalf, IpcStream, IpcWriteHalf, TransportError,
-    current_user, default_address,
+    current_user, default_address, default_session_path,
 };
