@@ -27,25 +27,70 @@ use unicode_width::UnicodeWidthStr;
 use arx_buffer::{PropertyMap, StyledRun};
 
 use crate::cell::{Cell, CellFlags, CellGrid};
-use crate::face::ResolvedFace;
+use crate::face::{Color, ResolvedFace};
 use crate::render_tree::{CursorRender, CursorStyle, RenderTree};
-use crate::view_state::{GutterConfig, LayoutTree, TerminalSize, ViewState, WindowState};
+use crate::view_state::{
+    GutterConfig, LayoutTree, PaletteView, TerminalSize, ViewState, WindowState,
+};
 
 /// Render a complete [`ViewState`] into a [`RenderTree`].
 ///
 /// Phase 1 only draws the single-window case. Splits will be added when
 /// we thread a per-window bounding box through [`render_window`].
+///
+/// When [`GlobalState::palette`] is `Some(_)`, the bottom of the
+/// viewport is partitioned like this:
+///
+/// ```text
+///     ┌────────────── text area (shrunk) ──────────────┐
+///     │                                                │
+///     │                                                │
+///     ├─── matches row (N rows) ───────────────────────┤
+///     ├─── prompt row  (1 row) ────────────────────────┤
+///     └─── modeline    (1 row) ────────────────────────┘
+/// ```
+///
+/// The shrinking happens before `render_window` is called so the
+/// primary window's cursor-visibility math (which depends on
+/// [`WindowState::scroll`] and the rect height passed here) doesn't
+/// collide with the overlay.
 pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
     let TerminalSize { cols, rows } = state.size;
     let mut grid = CellGrid::new(cols, rows);
     let mut cursors: SmallVec<[CursorRender; 1]> = SmallVec::new();
 
     // Reserve the bottom row for the modeline if there's height to spare.
-    let (text_rows, modeline_row) = if rows >= 1 {
+    let (mut text_rows, modeline_row) = if rows >= 1 {
         (rows - 1, Some(rows - 1))
     } else {
         (0, None)
     };
+
+    // Palette overlay eats additional rows above the modeline.
+    let palette_layout = state.global.palette.as_ref().map(|p| {
+        let matches_rows = p.max_rows.min(text_rows);
+        let prompt_row = if matches_rows < text_rows {
+            Some(text_rows - matches_rows - 1)
+        } else {
+            None
+        };
+        let matches_top = prompt_row.map(|r| r + 1);
+        PaletteLayout {
+            view: p,
+            prompt_row,
+            matches_top,
+            matches_rows,
+        }
+    });
+    if let Some(layout) = palette_layout.as_ref() {
+        // Shrink the text area to make room for the overlay. `prompt_row`
+        // being `None` would mean the terminal is too short for a useful
+        // overlay — in that case we leave text_rows alone and skip
+        // painting the palette below.
+        if let Some(prompt) = layout.prompt_row {
+            text_rows = prompt;
+        }
+    }
 
     match &state.layout {
         LayoutTree::Single(window_id) => {
@@ -58,11 +103,28 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
         }
     }
 
+    if let Some(layout) = palette_layout {
+        paint_palette(&layout, cols, &mut grid, &mut cursors);
+    }
+
     if let Some(row) = modeline_row {
         render_modeline(&state.global, row, cols, &mut grid);
     }
 
     RenderTree::new(grid, cursors, frame_id)
+}
+
+/// Pre-computed palette overlay geometry for the current frame.
+struct PaletteLayout<'a> {
+    view: &'a PaletteView,
+    /// Row index of the single-line prompt. `None` means the terminal
+    /// is too small to show the overlay; callers skip painting.
+    prompt_row: Option<u16>,
+    /// Row index of the first match row.
+    matches_top: Option<u16>,
+    /// Number of match rows (may be 0 if the list is empty or the
+    /// terminal is very small).
+    matches_rows: u16,
 }
 
 /// Render a single window into its bounding rectangle.
@@ -406,6 +468,214 @@ fn resolve_cursor(
     })
 }
 
+/// Paint the command-palette overlay: one prompt row with the query,
+/// plus up to `matches_rows` match rows above it. The highlighted row
+/// uses an inverted face; the rest share the prompt's face. A primary
+/// cursor is added at the end of the query so the cursor ends up
+/// where the user's next keystroke will land.
+fn paint_palette(
+    layout: &PaletteLayout<'_>,
+    cols: u16,
+    grid: &mut CellGrid,
+    cursors: &mut SmallVec<[CursorRender; 1]>,
+) {
+    let Some(prompt_row) = layout.prompt_row else {
+        return;
+    };
+    let prompt_face = ResolvedFace {
+        fg: Color::WHITE,
+        bg: Color::rgb(0x20, 0x20, 0x30),
+        ..ResolvedFace::DEFAULT
+    };
+    let selected_face = ResolvedFace {
+        fg: Color::BLACK,
+        bg: Color::rgb(0xd0, 0xd0, 0xe0),
+        bold: true,
+        ..ResolvedFace::DEFAULT
+    };
+
+    let cursor_col = paint_palette_prompt(layout.view, prompt_row, cols, prompt_face, grid);
+
+    // A bar cursor lives at the end of the query. Replaces any window
+    // cursor the render_window pass might have emitted, since the
+    // palette owns focus while open.
+    cursors.clear();
+    cursors.push(CursorRender {
+        col: cursor_col,
+        row: prompt_row,
+        style: CursorStyle::Bar,
+    });
+
+    if let Some(matches_top) = layout.matches_top {
+        paint_palette_matches(
+            layout.view,
+            matches_top,
+            layout.matches_rows,
+            cols,
+            prompt_face,
+            selected_face,
+            grid,
+        );
+    }
+}
+
+/// Paint the "M-x <query>" prompt line and return the column where a
+/// follow-up cursor should sit (end of the visible query).
+fn paint_palette_prompt(
+    view: &PaletteView,
+    row: u16,
+    cols: u16,
+    face: ResolvedFace,
+    grid: &mut CellGrid,
+) -> u16 {
+    clear_row(grid, row, cols, face);
+    let mut x: u16 = 0;
+    for g in "M-x ".graphemes(true) {
+        if x >= cols {
+            break;
+        }
+        grid.set(
+            x,
+            row,
+            Cell {
+                grapheme: CompactString::new(g),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+        x = x.saturating_add(UnicodeWidthStr::width(g).clamp(1, 2) as u16);
+    }
+    for g in view.query.graphemes(true) {
+        if x >= cols {
+            break;
+        }
+        let w = UnicodeWidthStr::width(g).clamp(1, 2) as u16;
+        grid.set(
+            x,
+            row,
+            Cell {
+                grapheme: CompactString::new(g),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+        if w == 2 && x + 1 < cols {
+            grid.set(x + 1, row, Cell::wide_continuation(face));
+        }
+        x = x.saturating_add(w);
+    }
+    x.min(cols.saturating_sub(1))
+}
+
+/// Paint the match list beneath the prompt. Scrolls to keep the
+/// selected row visible; highlights it with `selected_face`.
+fn paint_palette_matches(
+    view: &PaletteView,
+    matches_top: u16,
+    matches_rows: u16,
+    cols: u16,
+    face: ResolvedFace,
+    selected_face: ResolvedFace,
+    grid: &mut CellGrid,
+) {
+    if matches_rows == 0 {
+        return;
+    }
+    // Scroll the visible window of matches so the selection is
+    // centred (with saturation at both edges).
+    let total = view.matches.len();
+    let selected = view.selected.min(total.saturating_sub(1));
+    let rows_cap = matches_rows as usize;
+    let scroll_top = if total <= rows_cap || selected < rows_cap / 2 {
+        0
+    } else if selected + rows_cap / 2 >= total {
+        total - rows_cap
+    } else {
+        selected - rows_cap / 2
+    };
+
+    for row_idx in 0..matches_rows {
+        let y = matches_top + row_idx;
+        let match_idx = scroll_top + row_idx as usize;
+        let Some(entry) = view.matches.get(match_idx) else {
+            clear_row(grid, y, cols, face);
+            continue;
+        };
+        let row_face = if match_idx == selected {
+            selected_face
+        } else {
+            face
+        };
+        clear_row(grid, y, cols, row_face);
+        paint_palette_match_row(entry, y, cols, row_face, grid);
+    }
+}
+
+/// Paint `"  name  — description"` into a single match row. Handles
+/// width 2 graphemes and description truncation at `cols`.
+fn paint_palette_match_row(
+    entry: &crate::view_state::PaletteEntry,
+    y: u16,
+    cols: u16,
+    face: ResolvedFace,
+    grid: &mut CellGrid,
+) {
+    let mut col: u16 = 2;
+    col = paint_palette_text(&entry.name, col, y, cols, face, grid);
+    if !entry.description.is_empty() && col + 3 < cols {
+        col = paint_palette_text("  — ", col, y, cols, face, grid);
+        paint_palette_text(&entry.description, col, y, cols, face, grid);
+    }
+}
+
+/// Paint `text` starting at `(col, y)` and return the new cursor
+/// column. Stops at `cols` (no wrapping).
+fn paint_palette_text(
+    text: &str,
+    start_col: u16,
+    y: u16,
+    cols: u16,
+    face: ResolvedFace,
+    grid: &mut CellGrid,
+) -> u16 {
+    let mut col = start_col;
+    for g in text.graphemes(true) {
+        if col >= cols {
+            break;
+        }
+        let w = UnicodeWidthStr::width(g).clamp(1, 2) as u16;
+        grid.set(
+            col,
+            y,
+            Cell {
+                grapheme: CompactString::new(g),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+        if w == 2 && col + 1 < cols {
+            grid.set(col + 1, y, Cell::wide_continuation(face));
+        }
+        col = col.saturating_add(w);
+    }
+    col
+}
+
+/// Fill every cell in `row` with a space of `face`.
+fn clear_row(grid: &mut CellGrid, row: u16, cols: u16, face: ResolvedFace) {
+    for x in 0..cols {
+        grid.set(
+            x,
+            row,
+            Cell {
+                grapheme: CompactString::const_new(" "),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+    }
+}
+
 /// Paint the bottom modeline. Left-aligned text, right-aligned right text,
 /// padded to the full width with the default face.
 fn render_modeline(global: &crate::view_state::GlobalState, row: u16, cols: u16, grid: &mut CellGrid) {
@@ -546,6 +816,7 @@ mod tests {
             global: GlobalState {
                 modeline_left: String::new(),
                 modeline_right: String::new(),
+                palette: None,
             },
         }
     }
@@ -732,5 +1003,114 @@ mod tests {
         // Neither marker should appear anywhere on row 0.
         assert!(row0.iter().all(|c| c.grapheme.as_str() != "<"));
         assert!(row0.iter().all(|c| c.grapheme.as_str() != ">"));
+    }
+
+    // ---- Command palette overlay ----
+
+    fn state_with_palette(window: WindowState, cols: u16, rows: u16, palette: PaletteView) -> ViewState {
+        ViewState {
+            size: TerminalSize::new(cols, rows),
+            layout: LayoutTree::Single(window.id),
+            windows: vec![window],
+            global: GlobalState {
+                modeline_left: String::new(),
+                modeline_right: String::new(),
+                palette: Some(palette),
+            },
+        }
+    }
+
+    fn entry(name: &str, desc: &str) -> crate::view_state::PaletteEntry {
+        crate::view_state::PaletteEntry {
+            name: name.to_owned(),
+            description: desc.to_owned(),
+        }
+    }
+
+    #[test]
+    fn palette_overlay_paints_prompt_and_matches() {
+        let w = window_for("hello");
+        let palette = PaletteView {
+            query: "cur".to_owned(),
+            matches: vec![
+                entry("cursor.left", "Move left"),
+                entry("cursor.right", "Move right"),
+            ],
+            selected: 1,
+            max_rows: 2,
+        };
+        // 30 cols × 10 rows: plenty of space. Layout from the bottom
+        // up: modeline (row 9), match row 1 (row 8), match row 0
+        // (row 7), prompt (row 6). Text area = rows 0..=5.
+        let state = state_with_palette(w, 30, 10, palette);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines.len(), 10);
+
+        // Prompt row is max_rows (2) above the modeline, so row 6.
+        let prompt = lines[6];
+        assert!(prompt.starts_with("M-x cur"), "prompt = {prompt:?}");
+
+        // Rows 7, 8 are the two match rows in order.
+        assert!(lines[7].contains("cursor.left"), "row 7: {:?}", lines[7]);
+        assert!(lines[8].contains("cursor.right"), "row 8: {:?}", lines[8]);
+
+        // A bar-style cursor sits at the end of the query on the
+        // prompt row.
+        assert_eq!(tree.cursors.len(), 1);
+        assert_eq!(tree.cursors[0].style, CursorStyle::Bar);
+        // "M-x " is 4 cells; "cur" is 3 more → cursor at col 7.
+        assert_eq!(tree.cursors[0].col, 7);
+        assert_eq!(tree.cursors[0].row, 6);
+    }
+
+    #[test]
+    fn palette_overlay_shrinks_text_area() {
+        // A tall buffer should only paint as many rows as the text
+        // area minus the overlay.
+        let w = window_for("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10");
+        let palette = PaletteView {
+            query: String::new(),
+            matches: vec![entry("a", ""), entry("b", ""), entry("c", "")],
+            selected: 0,
+            max_rows: 3,
+        };
+        // 10 rows, minus 1 modeline minus 3 matches minus 1 prompt
+        // = 5 rows of text area.
+        let state = state_with_palette(w, 20, 10, palette);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+
+        // Lines 0..5 should contain l1..l5. Line 6+ is palette/modeline.
+        for (i, label) in (0..5).zip(["l1", "l2", "l3", "l4", "l5"]) {
+            assert!(
+                lines[i].contains(label),
+                "row {i} should contain {label:?}, got {:?}",
+                lines[i]
+            );
+        }
+        // Line 5 is the start of the palette area — it should NOT
+        // contain l6 (the 6th buffer line).
+        assert!(!lines[5].contains("l6"), "row 5: {:?}", lines[5]);
+    }
+
+    #[test]
+    fn palette_overlay_hides_window_cursor() {
+        // Even with the primary window carrying a cursor, the palette
+        // owns focus and the only emitted cursor should be its bar.
+        let mut w = window_for("hello");
+        w.cursors = sv![Cursor::at(2)];
+        let palette = PaletteView {
+            query: String::new(),
+            matches: vec![entry("cursor.left", "")],
+            selected: 0,
+            max_rows: 1,
+        };
+        let state = state_with_palette(w, 30, 10, palette);
+        let tree = render(&state, 0);
+        assert_eq!(tree.cursors.len(), 1);
+        assert_eq!(tree.cursors[0].style, CursorStyle::Bar);
     }
 }

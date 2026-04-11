@@ -52,3 +52,16 @@ pub const EDITOR_QUIT: &str = "editor.quit";
 pub const MODE_ENTER_INSERT: &str = "mode.enter-insert";
 /// Leave insert mode (pop the top layer back to the enclosing mode).
 pub const MODE_LEAVE_INSERT: &str = "mode.leave-insert";
+
+/// Open the command palette (M-x-style fuzzy command search).
+pub const COMMAND_PALETTE_OPEN: &str = "command-palette.open";
+/// Close the command palette without executing a command.
+pub const COMMAND_PALETTE_CLOSE: &str = "command-palette.close";
+/// Execute the currently-highlighted command in the palette.
+pub const COMMAND_PALETTE_EXECUTE: &str = "command-palette.execute";
+/// Move the palette selection down one row.
+pub const COMMAND_PALETTE_NEXT: &str = "command-palette.next";
+/// Move the palette selection up one row.
+pub const COMMAND_PALETTE_PREV: &str = "command-palette.prev";
+/// Remove the last character from the palette query.
+pub const COMMAND_PALETTE_BACKSPACE: &str = "command-palette.backspace";

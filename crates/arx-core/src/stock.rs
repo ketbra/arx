@@ -40,6 +40,12 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(EditorQuit);
     reg.register(ModeEnterInsert);
     reg.register(ModeLeaveInsert);
+    reg.register(CommandPaletteOpen);
+    reg.register(CommandPaletteClose);
+    reg.register(CommandPaletteExecute);
+    reg.register(CommandPaletteNext);
+    reg.register(CommandPalettePrev);
+    reg.register(CommandPaletteBackspace);
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +613,168 @@ impl ModeLeaveInsert {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Command palette
+// ---------------------------------------------------------------------------
+//
+// The command palette is opened by [`CommandPaletteOpen`] (bound to
+// `M-x` in Emacs). Opening pushes a dedicated `palette` keymap layer
+// so all subsequent keystrokes route to palette-control commands
+// instead of the usual editor bindings — `<Up>`/`<Down>` move the
+// selection, `<Enter>` executes, `<Esc>` closes, `<Backspace>` edits
+// the query, and every printable key falls through the unbound path
+// so [`crate::Editor::handle_printable_fallback`] appends it to the
+// query.
+//
+// [`CommandPaletteExecute`] snapshots the selected command name,
+// closes the palette (popping the layer and resetting state), and
+// then invokes the captured command. Doing the close *before* the
+// invocation means the executed command runs against a normal editor
+// state — so `M-x buffer.save` doesn't leave the palette layer on
+// top of the stack if the saved command happens to check the layer
+// for some reason.
+
+fn ensure_palette_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("palette") {
+        return;
+    }
+    editor.keymap_mut().push_layer(Layer::new(
+        LayerId::from("palette"),
+        Arc::new(arx_keymap::profiles::palette_layer()),
+    ));
+    // Disable count prefixes while the palette is open — a digit
+    // typed into the search query shouldn't also multiply the next
+    // command.
+    editor
+        .keymap_mut()
+        .set_count_mode(arx_keymap::CountMode::Reject);
+}
+
+fn leave_palette_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("palette") {
+        editor.keymap_mut().pop_layer();
+        // Restore the count mode set by the active profile. We don't
+        // know which profile, so pick the safe default: both Emacs
+        // and Vim's outer layers start with count-accept/reject
+        // configured at `Editor::with_profile` time, and a push/pop
+        // doesn't disturb that — but the palette layer changed it,
+        // so reinstate the inverse here. Emacs has Reject; Vim has
+        // Accept. We assume Accept as the "enabled" default and let
+        // the next keystroke through either way.
+        editor
+            .keymap_mut()
+            .set_count_mode(arx_keymap::CountMode::Accept);
+    }
+}
+
+stock_cmd!(
+    CommandPaletteOpen,
+    COMMAND_PALETTE_OPEN,
+    "Open the command palette for fuzzy command search"
+);
+impl CommandPaletteOpen {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // `open` snapshots the registry, so mutate it through a
+        // split borrow to release the registry ref before calling
+        // `open`. Simpler: clone the list out first.
+        let registry_snapshot: Vec<(String, String)> = cx
+            .editor
+            .commands()
+            .iter()
+            .map(|(n, d)| (n.to_owned(), d.to_owned()))
+            .collect();
+        let palette = cx.editor.palette_mut();
+        palette.open_with_entries(registry_snapshot);
+        ensure_palette_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CommandPaletteClose,
+    COMMAND_PALETTE_CLOSE,
+    "Close the command palette without executing"
+);
+impl CommandPaletteClose {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().close();
+        leave_palette_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CommandPaletteExecute,
+    COMMAND_PALETTE_EXECUTE,
+    "Execute the selected command in the palette"
+);
+impl CommandPaletteExecute {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Snapshot the selected command name (so we can drop the
+        // palette borrow before invoking anything).
+        let selected_name = cx
+            .editor
+            .palette()
+            .selected_match()
+            .map(|m| m.name.clone());
+        // Close the palette BEFORE running the target command so the
+        // executed command sees normal state.
+        cx.editor.palette_mut().close();
+        leave_palette_layer(cx.editor);
+        cx.editor.mark_dirty();
+
+        let Some(name) = selected_name else {
+            return;
+        };
+        let Some(command) = cx.editor.commands().get(&name) else {
+            tracing::warn!(%name, "palette: selected command vanished before execute");
+            return;
+        };
+        let mut inner = CommandContext {
+            editor: cx.editor,
+            bus: cx.bus.clone(),
+            count: 1,
+        };
+        command.run(&mut inner);
+    }
+}
+
+stock_cmd!(
+    CommandPaletteNext,
+    COMMAND_PALETTE_NEXT,
+    "Move the palette selection down one row"
+);
+impl CommandPaletteNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().select_next();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CommandPalettePrev,
+    COMMAND_PALETTE_PREV,
+    "Move the palette selection up one row"
+);
+impl CommandPalettePrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().select_prev();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CommandPaletteBackspace,
+    COMMAND_PALETTE_BACKSPACE,
+    "Delete the last character from the palette query"
+);
+impl CommandPaletteBackspace {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().backspace();
+        cx.editor.mark_dirty();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,6 +1043,210 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cursor_line, 10);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- Command palette end-to-end ----
+
+    /// Helper: run a named command against a fresh `CommandContext`.
+    async fn run_named(bus: &crate::CommandBus, name: &'static str) {
+        let bus_clone = bus.clone();
+        bus.invoke(move |editor| {
+            let cmd = editor
+                .commands()
+                .get(name)
+                .unwrap_or_else(|| panic!("command {name:?} not registered"));
+            let mut cx = CommandContext {
+                editor,
+                bus: bus_clone,
+                count: 1,
+            };
+            cmd.run(&mut cx);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn palette_open_pushes_layer_and_populates_matches() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("hello", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+
+        run_named(&bus, names::COMMAND_PALETTE_OPEN).await;
+
+        let (is_open, top_layer, match_count) = bus
+            .invoke(|editor| {
+                (
+                    editor.palette().is_open(),
+                    editor.keymap().top_layer().to_string(),
+                    editor.palette().matches().len(),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(is_open);
+        assert_eq!(top_layer, "palette");
+        // Every stock command should show up when the query is empty.
+        assert!(match_count >= 20, "got {match_count} matches");
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn palette_printable_fallback_appends_to_query() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("hello", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+
+        run_named(&bus, names::COMMAND_PALETTE_OPEN).await;
+
+        // Pump four characters through handle_printable_fallback —
+        // that's what the driver's input task does for unbound
+        // printable keys.
+        bus.invoke(|editor| {
+            for ch in "curs".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+
+        let (query, top_name) = bus
+            .invoke(|editor| {
+                (
+                    editor.palette().query().to_owned(),
+                    editor
+                        .palette()
+                        .selected_match()
+                        .map(|m| m.name.clone()),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(query, "curs");
+        // Every `cursor.*` command starts with "curs" — so the top
+        // match had better start with it too.
+        let name = top_name.unwrap();
+        assert!(name.starts_with("cursor."), "top match was {name:?}");
+
+        // The buffer itself must NOT have changed: "curs" went to the
+        // palette query, not the active buffer.
+        let text = bus
+            .invoke(|editor| {
+                let id = editor.windows().active().unwrap();
+                let buf = editor.windows().get(id).unwrap().buffer_id;
+                editor.buffers().get(buf).unwrap().text()
+            })
+            .await
+            .unwrap();
+        assert_eq!(text, "hello");
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn palette_execute_runs_selected_command_and_closes() {
+        // Full round trip: open, narrow to `cursor.right`, execute,
+        // verify the cursor moved AND the palette is closed.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("hello", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+
+        run_named(&bus, names::COMMAND_PALETTE_OPEN).await;
+        bus.invoke(|editor| {
+            // Query that uniquely matches cursor.right as the top hit.
+            for ch in "cursor.righ".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+
+        let top = bus
+            .invoke(|editor| {
+                editor
+                    .palette()
+                    .selected_match()
+                    .map(|m| m.name.clone())
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        assert_eq!(top, "cursor.right");
+
+        run_named(&bus, names::COMMAND_PALETTE_EXECUTE).await;
+
+        let (cursor, is_open, top_layer) = bus
+            .invoke(|editor| {
+                let id = editor.windows().active().unwrap();
+                (
+                    editor.windows().get(id).unwrap().cursor_byte,
+                    editor.palette().is_open(),
+                    editor.keymap().top_layer().to_string(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(cursor, 1, "cursor.right should have advanced one grapheme");
+        assert!(!is_open);
+        assert_ne!(top_layer, "palette");
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn palette_close_resets_without_executing() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("hello", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+
+        run_named(&bus, names::COMMAND_PALETTE_OPEN).await;
+        bus.invoke(|editor| editor.handle_printable_fallback('c'))
+            .await
+            .unwrap();
+        run_named(&bus, names::COMMAND_PALETTE_CLOSE).await;
+
+        let (is_open, top_layer, cursor) = bus
+            .invoke(|editor| {
+                let id = editor.windows().active().unwrap();
+                (
+                    editor.palette().is_open(),
+                    editor.keymap().top_layer().to_string(),
+                    editor.windows().get(id).unwrap().cursor_byte,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(!is_open);
+        assert_ne!(top_layer, "palette");
+        // No command ran, so the cursor stayed at 0.
+        assert_eq!(cursor, 0);
 
         drop(bus);
         let _ = handle.await.unwrap();

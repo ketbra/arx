@@ -375,9 +375,12 @@ async fn run_reader(
             ClientMessage::Key(chord) => {
                 let bus_clone = bus.clone();
                 // Run through Editor::handle_key inline. If the keymap
-                // reports Unbound + printable_fallback, fall back to
-                // self-insert — mirroring the local input task's
-                // behaviour for typed characters that aren't bound.
+                // reports Unbound + printable_fallback, route the
+                // character through `handle_printable_fallback` so the
+                // editor decides whether it goes into the buffer
+                // (normal typing) or the command palette query
+                // (palette open) — same routing the embedded input
+                // task uses.
                 let quit = bus
                     .invoke(move |editor| {
                         let outcome = editor.handle_key(&bus_clone, chord);
@@ -385,10 +388,7 @@ async fn run_reader(
                             printable_fallback: Some(ch),
                         } = outcome
                         {
-                            arx_core::stock::insert_at_cursor(
-                                editor,
-                                &ch.to_string(),
-                            );
+                            editor.handle_printable_fallback(ch);
                         }
                         editor.quit_requested()
                     })

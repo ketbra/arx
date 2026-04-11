@@ -157,4 +157,38 @@ pub struct GlobalState {
     pub modeline_left: String,
     /// Right-aligned modeline text.
     pub modeline_right: String,
+    /// Command palette overlay state. `None` when the palette is
+    /// closed (the common case); `Some(...)` means the view layer
+    /// should paint it as a bottom overlay and the caller should
+    /// reserve the corresponding rows before drawing the primary
+    /// window.
+    pub palette: Option<PaletteView>,
+}
+
+/// What the view layer needs to know to draw a command-palette
+/// overlay. A direct projection of `arx_core::CommandPalette`
+/// flattened into display-friendly types so `arx-render` doesn't
+/// depend on `arx-core`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteView {
+    /// Current query text shown in the prompt line.
+    pub query: String,
+    /// Filtered, scored, sorted match list.
+    pub matches: Vec<PaletteEntry>,
+    /// Index into `matches` for the highlighted row.
+    pub selected: usize,
+    /// Maximum number of match rows to draw. The render layer caps
+    /// `matches` at this figure when the list is longer; the caller
+    /// supplies the cap so it can reserve the matching number of
+    /// viewport rows for the overlay.
+    pub max_rows: u16,
+}
+
+/// One row in the palette's match list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteEntry {
+    /// Command name (`"cursor.word-forward"`).
+    pub name: String,
+    /// Human description, possibly empty.
+    pub description: String,
 }

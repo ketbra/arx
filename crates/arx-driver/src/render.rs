@@ -21,8 +21,9 @@ use tracing::{debug, trace, warn};
 
 use arx_core::CommandBus;
 use arx_render::{
-    Backend, Cursor, GlobalState, GutterConfig, LayoutTree, RenderTree, ScrollPosition,
-    TerminalSize, ViewState, WindowId as ViewWindowId, WindowState, diff, initial_paint, render,
+    Backend, Cursor, GlobalState, GutterConfig, LayoutTree, PaletteEntry, PaletteView, RenderTree,
+    ScrollPosition, TerminalSize, ViewState, WindowId as ViewWindowId, WindowState, diff,
+    initial_paint, render,
 };
 
 use crate::state::{SharedTerminalSize, Shutdown};
@@ -179,6 +180,29 @@ async fn build_view_state(bus: &CommandBus, cols: u16, rows: u16) -> Option<View
             );
         let text = snapshot.text();
         let modified_tag = if is_modified { " [+]" } else { "" };
+        let palette_view = if editor.palette().is_open() {
+            // Cap the visible match list at 8 rows for Phase 1 — a
+            // nice middle ground: enough to browse stock commands
+            // without swallowing the whole editor.
+            const MAX_PALETTE_ROWS: u16 = 8;
+            let entries = editor
+                .palette()
+                .matches()
+                .iter()
+                .map(|m| PaletteEntry {
+                    name: m.name.clone(),
+                    description: m.description.clone(),
+                })
+                .collect::<Vec<_>>();
+            Some(PaletteView {
+                query: editor.palette().query().to_owned(),
+                matches: entries,
+                selected: editor.palette().selected_index(),
+                max_rows: MAX_PALETTE_ROWS,
+            })
+        } else {
+            None
+        };
         let global = GlobalState {
             modeline_left: format!(
                 "{label}{modified_tag}  (ln {}/{})",
@@ -186,6 +210,7 @@ async fn build_view_state(bus: &CommandBus, cols: u16, rows: u16) -> Option<View
                 snapshot.rope().len_lines(),
             ),
             modeline_right: format!("{} bytes", text.len()),
+            palette: palette_view,
         };
 
         // Mirror the layout calculation the view layer does so the

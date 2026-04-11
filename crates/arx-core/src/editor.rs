@@ -18,6 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::command::CommandBus;
+use crate::palette::CommandPalette;
 use crate::registry::{CommandContext, CommandRegistry};
 use crate::window::WindowManager;
 
@@ -44,6 +45,7 @@ pub struct Editor {
     windows: WindowManager,
     keymap: KeymapEngine,
     commands: CommandRegistry,
+    palette: CommandPalette,
     dirty: bool,
     quit_requested: bool,
 }
@@ -54,6 +56,7 @@ impl std::fmt::Debug for Editor {
             .field("buffers", &self.buffers)
             .field("windows", &self.windows)
             .field("commands", &self.commands)
+            .field("palette", &self.palette)
             .field("dirty", &self.dirty)
             .field("quit_requested", &self.quit_requested)
             .finish_non_exhaustive()
@@ -87,6 +90,7 @@ impl Editor {
             windows: WindowManager::default(),
             keymap,
             commands,
+            palette: CommandPalette::new(),
             dirty: false,
             quit_requested: false,
         }
@@ -131,6 +135,34 @@ impl Editor {
     /// own commands through this handle in later milestones.
     pub fn commands_mut(&mut self) -> &mut CommandRegistry {
         &mut self.commands
+    }
+
+    /// Borrow the command palette state.
+    pub fn palette(&self) -> &CommandPalette {
+        &self.palette
+    }
+
+    /// Mutably borrow the command palette state.
+    pub fn palette_mut(&mut self) -> &mut CommandPalette {
+        &mut self.palette
+    }
+
+    /// Handle a printable character that the keymap layer reported as
+    /// unbound. Single entry point called by the driver's input task
+    /// (embedded *and* daemon variants) so the routing decision lives
+    /// in editor state rather than duplicated across input paths.
+    ///
+    /// If the command palette is open, the character extends the
+    /// palette's query and the buffer is untouched; otherwise the
+    /// character is self-inserted at the active cursor via
+    /// [`crate::stock::insert_at_cursor`].
+    pub fn handle_printable_fallback(&mut self, ch: char) {
+        if self.palette.is_open() {
+            self.palette.append_char(ch);
+            self.mark_dirty();
+        } else {
+            crate::stock::insert_at_cursor(self, &ch.to_string());
+        }
     }
 
     /// Mark the editor as "display-affecting since the last frame" so the

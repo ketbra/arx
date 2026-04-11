@@ -122,13 +122,12 @@ async fn handle_key(
         printable_fallback: Some(ch),
     } = outcome
     {
-        // Self-insert fallback: keymap didn't bind this printable char,
-        // so treat it as ordinary typed text.
-        let text = ch.to_string();
+        // Printable fallback: let the editor decide what to do.
+        // `handle_printable_fallback` self-inserts into the active
+        // buffer under normal conditions, or routes into the command
+        // palette query when the palette layer is on the stack.
         if bus
-            .dispatch(move |editor| {
-                arx_core::stock::insert_at_cursor(editor, &text);
-            })
+            .dispatch(move |editor| editor.handle_printable_fallback(ch))
             .await
             .is_err()
         {

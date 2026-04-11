@@ -17,9 +17,11 @@ use std::sync::Arc;
 
 use crate::commands::{
     BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_NEWLINE, BUFFER_SAVE,
-    CURSOR_BUFFER_END, CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END,
-    CURSOR_LINE_START, CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD,
-    EDITOR_QUIT, MODE_ENTER_INSERT, MODE_LEAVE_INSERT, SCROLL_PAGE_DOWN, SCROLL_PAGE_UP,
+    COMMAND_PALETTE_BACKSPACE, COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE,
+    COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN, COMMAND_PALETTE_PREV, CURSOR_BUFFER_END,
+    CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
+    CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_QUIT,
+    MODE_ENTER_INSERT, MODE_LEAVE_INSERT, SCROLL_PAGE_DOWN, SCROLL_PAGE_UP,
 };
 use crate::engine::CountMode;
 use crate::keymap::Keymap;
@@ -87,11 +89,41 @@ pub fn emacs() -> Profile {
     m.bind_str("C-x C-c", EDITOR_QUIT).unwrap();
     m.bind_str("C-x C-q", EDITOR_QUIT).unwrap();
 
+    // Command palette.
+    m.bind_str("M-x", COMMAND_PALETTE_OPEN).unwrap();
+
     Profile {
         global: Arc::new(m),
         startup_layer: None,
         count_mode: CountMode::Reject,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Command palette
+// ---------------------------------------------------------------------------
+
+/// Keymap pushed on top of the current profile when the command
+/// palette opens. Every printable key falls through this layer
+/// unbound so the driver's `Editor::handle_printable_fallback` can
+/// append it to the query; the few bindings here handle navigation,
+/// editing the query, executing, and dismissing.
+///
+/// Shared between every profile — a Vim user and an Emacs user both
+/// invoke `M-x` (or their profile's equivalent) and get the same
+/// palette UX. Keeping it in `arx-keymap` means profiles in other
+/// crates can reference it without reaching into `arx-core::stock`.
+pub fn palette_layer() -> Keymap {
+    let mut m = Keymap::named("palette");
+    m.bind_str("<Enter>", COMMAND_PALETTE_EXECUTE).unwrap();
+    m.bind_str("<Esc>", COMMAND_PALETTE_CLOSE).unwrap();
+    m.bind_str("C-g", COMMAND_PALETTE_CLOSE).unwrap();
+    m.bind_str("<Up>", COMMAND_PALETTE_PREV).unwrap();
+    m.bind_str("<Down>", COMMAND_PALETTE_NEXT).unwrap();
+    m.bind_str("C-p", COMMAND_PALETTE_PREV).unwrap();
+    m.bind_str("C-n", COMMAND_PALETTE_NEXT).unwrap();
+    m.bind_str("<Backspace>", COMMAND_PALETTE_BACKSPACE).unwrap();
+    m
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +166,10 @@ pub fn vim() -> Profile {
     // Rescue save/quit bindings that work in every mode.
     global.bind_str("C-s", BUFFER_SAVE).unwrap();
     global.bind_str("C-q", EDITOR_QUIT).unwrap();
+    // Command palette. `:` is Vim's usual command-line trigger; in
+    // Phase 1 we point it at the generic palette since we don't have
+    // a distinct ex-command-line yet.
+    global.bind_str("M-x", COMMAND_PALETTE_OPEN).unwrap();
 
     // Normal layer: push on top of global at startup.
     let mut normal = Keymap::named("vim.normal");
@@ -152,6 +188,9 @@ pub fn vim() -> Profile {
     normal.bind_str("b", CURSOR_WORD_BACKWARD).unwrap();
     normal.bind_str("g g", CURSOR_BUFFER_START).unwrap();
     normal.bind_str("G", CURSOR_BUFFER_END).unwrap();
+    // `:` opens the command palette as a stand-in for the ex-command
+    // line until Phase 2 wires up a real ex-prompt.
+    normal.bind_str(":", COMMAND_PALETTE_OPEN).unwrap();
     normal.bind_str("i", MODE_ENTER_INSERT).unwrap();
     normal.bind_str("a", MODE_ENTER_INSERT).unwrap(); // simplified: no trailing cursor move yet
     normal.bind_str("o", MODE_ENTER_INSERT).unwrap(); // simplified: no newline-below yet
