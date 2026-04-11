@@ -1,12 +1,20 @@
 [workspace]
 resolver = "3"
-members = ["crates/arx-buffer", "crates/arx-core"]
+members = ["crates/arx-buffer", "crates/arx-core", "crates/arx-render"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
 tracing = "0.1"
 thiserror = "2"
+bitflags = "2"
+compact_str = "0.8"
+smallvec = "1"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+crossterm = "0.28"
 arx-buffer = { path = "crates/arx-buffer" }
+arx-core = { path = "crates/arx-core" }
+arx-render = { path = "crates/arx-render" }
 
 [workspace.package]
 version = "0.1.0"

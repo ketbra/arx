@@ -1,0 +1,20 @@
+[package]
+name = "arx-render"
+description = "Arx editor rendering pipeline: ViewState -> RenderTree -> Diff -> Backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arx-buffer = { workspace = true }
+bitflags = { workspace = true }
+compact_str = { workspace = true }
+smallvec = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+crossterm = { workspace = true }

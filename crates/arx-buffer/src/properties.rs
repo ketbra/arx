@@ -51,7 +51,7 @@ pub struct Diagnostic {
 }
 
 /// Underline rendering style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnderlineStyle {
     Straight,
     Curly,
@@ -110,63 +110,17 @@ impl Face {
     }
 }
 
-/// Bit flags for fast per-run property lookups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct PropertyFlags(u32);
-
-#[allow(dead_code)]
-impl PropertyFlags {
-    pub const READONLY: Self = Self(0b0000_0001);
-    pub const SEARCH_MATCH: Self = Self(0b0000_0010);
-    pub const SELECTION: Self = Self(0b0000_0100);
-    pub const DIAGNOSTIC: Self = Self(0b0000_1000);
-    pub const FOLDED: Self = Self(0b0001_0000);
-    pub const AGENT_EDIT: Self = Self(0b0010_0000);
-    pub const LINK: Self = Self(0b0100_0000);
-
-    pub const fn empty() -> Self {
-        Self(0)
-    }
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
-    pub const fn contains(self, other: Self) -> bool {
-        (self.0 & other.0) == other.0
-    }
-    pub const fn intersects(self, other: Self) -> bool {
-        (self.0 & other.0) != 0
-    }
-    pub fn insert(&mut self, other: Self) {
-        self.0 |= other.0;
-    }
-    pub fn remove(&mut self, other: Self) {
-        self.0 &= !other.0;
-    }
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
-
-impl std::ops::BitOr for PropertyFlags {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
-    }
-}
-impl std::ops::BitAnd for PropertyFlags {
-    type Output = Self;
-    fn bitand(self, rhs: Self) -> Self {
-        Self(self.0 & rhs.0)
-    }
-}
-impl std::ops::BitOrAssign for PropertyFlags {
-    fn bitor_assign(&mut self, rhs: Self) {
-        self.0 |= rhs.0;
-    }
-}
-impl std::ops::BitAndAssign for PropertyFlags {
-    fn bitand_assign(&mut self, rhs: Self) {
-        self.0 &= rhs.0;
+bitflags::bitflags! {
+    /// Bit flags for fast per-run property lookups.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct PropertyFlags: u32 {
+        const READONLY     = 0b0000_0001;
+        const SEARCH_MATCH = 0b0000_0010;
+        const SELECTION    = 0b0000_0100;
+        const DIAGNOSTIC   = 0b0000_1000;
+        const FOLDED       = 0b0001_0000;
+        const AGENT_EDIT   = 0b0010_0000;
+        const LINK         = 0b0100_0000;
     }
 }
 
