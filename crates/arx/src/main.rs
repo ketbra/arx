@@ -1,25 +1,24 @@
 //! Arx editor binary.
 //!
-//! Thin shim: parse CLI arguments, build an [`arx_driver::Driver`] with an
-//! async hook that opens the requested files through [`arx_core::open_file`],
-//! and run it to completion. All the real work lives in the library crates.
+//! Thin shim: parse CLI arguments and run one of three modes:
 //!
-//! Phase 1 only ships a tiny flag surface:
+//! * **embedded** (default): spin up the editor in-process on the
+//!   current terminal. This is what Phase 1 has shipped up to now and
+//!   what tests exercise directly.
+//! * **`arx daemon`**: run as a background server bound to a Unix
+//!   socket, waiting for clients. State survives client disconnects.
+//! * **`arx client`**: connect to a running daemon over its Unix socket
+//!   and act as a thin terminal front-end.
 //!
-//! ```text
-//! arx [FILES...]
-//! ```
-//!
-//! Later phases will grow this into the full CLI reference described in
-//! `docs/spec.md` (sessions, daemon, headless commands, package manager).
-//! For now `arx foo.rs bar.rs` opens the files and drops you into the
-//! TUI; `Ctrl+S` saves the active buffer, `Ctrl+Q` quits.
+//! All the real work lives in the library crates (`arx-driver`,
+//! `arx-core`, etc.). This file is just argument parsing + mode
+//! selection.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use arx_driver::Driver;
-use clap::Parser;
+use arx_driver::{DaemonClient, DaemonServer, Driver};
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,20 +28,59 @@ use clap::Parser;
     disable_help_subcommand = true
 )]
 struct Cli {
-    /// Files to open. Each file becomes a buffer; the last one is the
-    /// active window. Missing paths are opened as empty buffers bound
-    /// to that path, so `arx new_file.rs` works as expected.
+    /// Files to open when running in embedded mode. Ignored for the
+    /// `daemon` and `client` subcommands.
     files: Vec<PathBuf>,
+
+    #[command(subcommand)]
+    mode: Option<Mode>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Mode {
+    /// Run as a background daemon bound to a Unix socket.
+    Daemon {
+        /// Socket path to bind. Defaults to
+        /// `$XDG_RUNTIME_DIR/arx.sock` or `/tmp/arx-<uid>.sock`.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Connect to a running daemon as a thin client.
+    Client {
+        /// Socket path to connect to. Same default search path as
+        /// `arx daemon`.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+}
+
+fn default_socket_path() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        return PathBuf::from(dir).join("arx.sock");
+    }
+    // Fall back to /tmp with a per-user suffix so concurrent users
+    // don't collide on the same path.
+    let uid = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    PathBuf::from(format!("/tmp/arx-{uid}.sock"))
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli).await {
+    let result = match &cli.mode {
+        None => run_embedded(cli.files).await,
+        Some(Mode::Daemon { socket }) => {
+            let path = socket.clone().unwrap_or_else(default_socket_path);
+            run_daemon(path).await
+        }
+        Some(Mode::Client { socket }) => {
+            let path = socket.clone().unwrap_or_else(default_socket_path);
+            run_client(path).await
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            // The terminal guard has already been torn down by the time
-            // we get here, so it's safe to print to stderr.
             eprintln!("arx: {err}");
             let mut source = err.source();
             while let Some(cause) = source {
@@ -54,14 +92,8 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let files = cli.files;
-
-    let driver = Driver::new(|_editor| {
-        // Nothing synchronous to seed — windows/buffers are opened by
-        // the async hook below once the event loop is up.
-    })
-    .with_async_hook(move |bus| async move {
+async fn run_embedded(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let driver = Driver::new(|_editor| {}).with_async_hook(move |bus| async move {
         for path in files {
             match arx_core::open_file(&bus, path.clone()).await {
                 Ok((buffer_id, window_id)) => {
@@ -77,9 +109,6 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        // If nothing opened (either because the CLI had no args or
-        // every `open_file` failed), fall back to a scratch buffer so
-        // the editor has something to render.
         let _ = bus
             .dispatch(|editor| {
                 if editor.windows().active().is_none() {
@@ -90,7 +119,32 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             })
             .await;
     });
-
     driver.run().await?;
     Ok(())
+}
+
+async fn run_daemon(socket: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    use arx_core::Editor;
+    let server = DaemonServer::bind(socket, Editor::new())?;
+    // Best-effort socket cleanup on normal return.
+    let socket_path = server.socket_path().to_path_buf();
+    let _guard = SocketGuard(socket_path);
+    let _editor = server.run().await?;
+    Ok(())
+}
+
+async fn run_client(socket: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let client = DaemonClient::new(socket);
+    client.run().await?;
+    Ok(())
+}
+
+/// RAII guard that removes a Unix socket on drop. Best-effort; errors
+/// are logged but never panic.
+struct SocketGuard(PathBuf);
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }

@@ -13,3 +13,4 @@ workspace = true
 [dependencies]
 ropey = "1.6.1"
 bitflags = { workspace = true }
+serde = { workspace = true }

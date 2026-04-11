@@ -16,7 +16,7 @@ use arx_buffer::{Face as SparseFace, UnderlineStyle};
 
 /// 24-bit RGB colour. Terminal backends that don't support truecolour
 /// quantise to their nearest palette entry at write time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Color(pub u32);
 
 impl Color {
@@ -43,7 +43,7 @@ impl Color {
 /// Every attribute has a definite value — no `Option`s. Produced by
 /// resolving a sparse [`SparseFace`] (from the buffer's property layers)
 /// against a default face from the active theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedFace {
     pub fg: Color,
     pub bg: Color,

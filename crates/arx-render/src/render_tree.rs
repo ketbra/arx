@@ -40,7 +40,7 @@ impl RenderTree {
 }
 
 /// Where and how to render a cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CursorRender {
     /// Column (0-indexed from the left of the terminal).
     pub col: u16,
@@ -51,7 +51,9 @@ pub struct CursorRender {
 }
 
 /// Cursor visual style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum CursorStyle {
     /// Solid block (default for normal/insert modes).
     #[default]

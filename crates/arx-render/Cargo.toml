@@ -18,3 +18,4 @@ smallvec = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 crossterm = { workspace = true }
+serde = { workspace = true }

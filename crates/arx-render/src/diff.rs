@@ -14,7 +14,7 @@ use crate::cell::Cell;
 use crate::render_tree::{CursorRender, RenderTree};
 
 /// A single low-level terminal update.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiffOp {
     /// The terminal was resized. Backends should clear state before
     /// applying the subsequent ops.

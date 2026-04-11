@@ -6,27 +6,31 @@ members = [
     "crates/arx-core",
     "crates/arx-driver",
     "crates/arx-keymap",
+    "crates/arx-protocol",
     "crates/arx-render",
 ]
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs", "io-util", "net"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 tracing = "0.1"
 thiserror = "2"
-bitflags = "2"
-compact_str = "0.8"
+bitflags = { version = "2", features = ["serde"] }
+compact_str = { version = "0.8", features = ["serde"] }
 smallvec = "1"
 unicode-segmentation = "1"
 unicode-width = "0.2"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
 arx-buffer = { path = "crates/arx-buffer" }
 arx-core = { path = "crates/arx-core" }
 arx-render = { path = "crates/arx-render" }
 arx-driver = { path = "crates/arx-driver" }
 arx-keymap = { path = "crates/arx-keymap" }
+arx-protocol = { path = "crates/arx-protocol" }
 
 [workspace.package]
 version = "0.1.0"

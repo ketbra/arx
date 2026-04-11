@@ -9,7 +9,7 @@ use std::fmt;
 
 /// A logical key. Abstracts over character input, navigation keys, and
 /// semantic markers like `<leader>`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Key {
     /// A literal character. Case matters; `Shift` is encoded in
     /// [`KeyModifiers::shift`] only for non-printable keys.
@@ -22,7 +22,7 @@ pub enum Key {
 }
 
 /// Named non-character keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum NamedKey {
     Enter,
     Escape,
@@ -74,7 +74,9 @@ impl fmt::Display for NamedKey {
 // readable in call sites than flag bit-ors. `meta` is rare in terminals
 // but preserved so the representation doesn't lose info.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub struct KeyModifiers {
     pub ctrl: bool,
     pub alt: bool,
@@ -128,7 +130,7 @@ impl KeyModifiers {
 }
 
 /// A single key press with its active modifiers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct KeyChord {
     pub key: Key,
     pub modifiers: KeyModifiers,

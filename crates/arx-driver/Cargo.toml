@@ -14,6 +14,7 @@ workspace = true
 arx-buffer = { workspace = true }
 arx-core = { workspace = true }
 arx-keymap = { workspace = true }
+arx-protocol = { workspace = true }
 arx-render = { workspace = true }
 crossterm = { workspace = true }
 futures-util = { workspace = true }
@@ -25,3 +26,4 @@ unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+compact_str = { workspace = true }

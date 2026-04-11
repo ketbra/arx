@@ -51,7 +51,7 @@ pub struct Diagnostic {
 }
 
 /// Underline rendering style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum UnderlineStyle {
     Straight,
     Curly,

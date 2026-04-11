@@ -78,6 +78,7 @@ pub mod editor;
 pub mod event_loop;
 pub mod file;
 pub mod registry;
+pub mod session;
 pub mod stock;
 pub mod window;
 
@@ -86,4 +87,5 @@ pub use editor::{BufferManager, Editor, KeyHandled};
 pub use event_loop::{DEFAULT_BUS_CAPACITY, EventLoop};
 pub use file::{OpenFileError, SaveFileError, open_file, save_file, save_file_as};
 pub use registry::{Command, CommandContext, CommandRegistry};
+pub use session::{SerializedBuffer, SerializedWindow, Session, SessionFile};
 pub use window::{WindowData, WindowId, WindowManager};

@@ -16,7 +16,7 @@ use crate::face::ResolvedFace;
 
 bitflags! {
     /// Per-cell flags. Mirrors spec §4.3.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
     pub struct CellFlags: u8 {
         /// This cell is the second half of a wide grapheme; its
         /// `grapheme` is empty and it must not be rendered independently.
@@ -35,7 +35,7 @@ bitflags! {
 }
 
 /// One renderable cell of the terminal grid.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Cell {
     /// The grapheme cluster displayed at this cell. Empty for
     /// [`CellFlags::WIDE_CONTINUATION`] cells.

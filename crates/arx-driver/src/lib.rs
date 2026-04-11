@@ -43,12 +43,16 @@
 //! [`Driver::run_with`] is the generic entry used by tests with a
 //! scripted event stream and an in-memory backend.
 
+pub mod daemon;
 pub mod driver;
 pub mod input;
+pub mod remote_backend;
 pub mod render;
 pub mod state;
 
+pub use daemon::{DaemonClient, DaemonError, DaemonServer};
 pub use driver::{Driver, DriverError};
 pub use input::InputTask;
+pub use remote_backend::RemoteBackend;
 pub use render::RenderTask;
 pub use state::{SharedTerminalSize, Shutdown};
