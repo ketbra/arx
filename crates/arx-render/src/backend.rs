@@ -237,6 +237,16 @@ impl<W: Write> Backend for CrosstermBackend<W> {
                 DiffOp::Resize { width, height } => {
                     self.width = *width;
                     self.height = *height;
+                    // `Clear(All)` erases to the terminal's *current*
+                    // SGR background, which could be anything
+                    // `self.last_face` drifted to (e.g. the modeline's
+                    // light-grey face). Explicitly set our default bg
+                    // before clearing so the erased area is in a known
+                    // state regardless of prior writes.
+                    self.out
+                        .queue(style::SetBackgroundColor(color_to_xterm(
+                            ResolvedFace::DEFAULT.bg,
+                        )))?;
                     self.out.queue(terminal::Clear(terminal::ClearType::All))?;
                     self.last_face = None;
                 }

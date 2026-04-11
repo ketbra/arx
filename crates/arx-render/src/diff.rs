@@ -83,11 +83,42 @@ pub fn diff(old: &RenderTree, new: &RenderTree) -> Vec<DiffOp> {
     ops
 }
 
-/// Produce a full-repaint `DiffOp` stream for an initial frame. Equivalent
-/// to `diff(&RenderTree::blank(new.width, new.height, 0), new)`.
+/// Produce a full-repaint `DiffOp` stream for an initial frame.
+///
+/// Unlike `diff(&RenderTree::blank(..), new)`, this emits a
+/// [`DiffOp::SetCell`] for **every** position in the grid — even cells
+/// that happen to equal [`Cell::blank`]. We can't skip blank-to-blank
+/// matches on the first frame because we have no idea what the
+/// terminal's starting state actually is: a cell we don't explicitly
+/// paint ends up showing whatever background the terminal decided to
+/// use for its "erased" state, which is rarely our
+/// [`crate::face::ResolvedFace::DEFAULT`]. The visible symptom of the
+/// old shortcut was that text cells got our black background but
+/// single-space cells between words (and whole empty rows) showed
+/// through to the terminal's own default bg, producing a mottled
+/// light/dark pattern.
+///
+/// The extra bytes on the wire (every cell in an 80×24 terminal, ~2000
+/// ops) are a one-shot cost at session startup — not a concern for a
+/// local IPC link.
 pub fn initial_paint(new: &RenderTree) -> Vec<DiffOp> {
-    let blank = RenderTree::blank(new.cells.width(), new.cells.height(), 0);
-    diff(&blank, new)
+    let width = new.cells.width();
+    let height = new.cells.height();
+    let mut ops = Vec::with_capacity((width as usize) * (height as usize) + 2);
+    for y in 0..height {
+        for x in 0..width {
+            let cell = new.cells.get(x, y).unwrap();
+            ops.push(DiffOp::SetCell {
+                x,
+                y,
+                cell: cell.clone(),
+            });
+        }
+    }
+    if let Some(cursor) = new.cursors.first() {
+        ops.push(DiffOp::MoveCursor(*cursor));
+    }
+    ops
 }
 
 #[cfg(test)]
@@ -191,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_paint_emits_every_non_blank_cell_and_cursor() {
+    fn initial_paint_emits_every_cell_and_cursor() {
         let mut b = tree(2, 2);
         b.cells.set(0, 0, cell("X"));
         b.cells.set(1, 1, cell("Y"));
@@ -201,15 +232,53 @@ mod tests {
             style: CursorStyle::Block,
         }];
         let ops = initial_paint(&b);
-        // Only 2 non-blank cells, but the blank-vs-blank path also
-        // produces *no* ops for unchanged cells, so expect 2 SetCell ops
-        // plus a MoveCursor.
+        // 2×2 grid = 4 SetCell ops, regardless of how many were blanks.
         let setcells: Vec<_> = ops
             .iter()
             .filter(|op| matches!(op, DiffOp::SetCell { .. }))
             .collect();
-        assert_eq!(setcells.len(), 2);
+        assert_eq!(setcells.len(), 4);
         assert!(ops.iter().any(|op| matches!(op, DiffOp::MoveCursor(_))));
+    }
+
+    /// Regression test for the "different background colours on reopen"
+    /// bug: `initial_paint` used to diff against a synthetic blank
+    /// reference and skipped any cell that matched it. In-line spaces
+    /// and empty rows stayed un-painted, so the terminal's own default
+    /// background leaked through wherever the new frame didn't happen
+    /// to have non-blank content — producing a mottled light/dark
+    /// pattern on fresh sessions.
+    ///
+    /// Every cell, including the ones still equal to `Cell::blank`,
+    /// must be represented in the op stream so the terminal is told
+    /// exactly what colour every position has.
+    #[test]
+    fn initial_paint_explicitly_paints_blank_cells() {
+        // 3×2 grid with one painted cell. The other five positions are
+        // still Cell::blank() — they MUST all appear in the op stream.
+        let mut b = tree(3, 2);
+        b.cells.set(1, 0, cell("X"));
+        let ops = initial_paint(&b);
+        let setcells: Vec<(u16, u16, String)> = ops
+            .iter()
+            .filter_map(|op| match op {
+                DiffOp::SetCell { x, y, cell } => {
+                    Some((*x, *y, cell.grapheme.as_str().to_owned()))
+                }
+                _ => None,
+            })
+            .collect();
+        // 3 × 2 = 6 positions, all present.
+        assert_eq!(setcells.len(), 6);
+        assert!(setcells.contains(&(1, 0, "X".into())));
+        // Every blank position must also appear, so the terminal is
+        // told what colour to use for them (not left showing through
+        // to its own default).
+        assert!(setcells.contains(&(0, 0, " ".into())));
+        assert!(setcells.contains(&(2, 0, " ".into())));
+        assert!(setcells.contains(&(0, 1, " ".into())));
+        assert!(setcells.contains(&(1, 1, " ".into())));
+        assert!(setcells.contains(&(2, 1, " ".into())));
     }
 }
 
