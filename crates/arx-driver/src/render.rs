@@ -153,6 +153,13 @@ async fn draw_once<B: Backend>(
 /// Build a fresh [`ViewState`] by round-tripping through the command
 /// bus. Keeps the single-writer invariant: only the event-loop task
 /// touches the `Editor`.
+///
+/// Also writes the computed text-area size back into the active
+/// window's [`arx_core::WindowData`] so cursor-visibility and
+/// page-scroll commands (which run in the event loop, not here) know
+/// how much space they're scrolling against. That mutation happens
+/// inside the same `invoke` closure as the read, so there's no
+/// round-trip and no chance of racing a render against a resize.
 async fn build_view_state(bus: &CommandBus, cols: u16, rows: u16) -> Option<ViewState> {
     bus.invoke(move |editor| {
         let active = editor.windows().active()?;
@@ -180,6 +187,34 @@ async fn build_view_state(bus: &CommandBus, cols: u16, rows: u16) -> Option<View
             ),
             modeline_right: format!("{} bytes", text.len()),
         };
+
+        // Mirror the layout calculation the view layer does so the
+        // values we write back match what the renderer will actually
+        // use. This is duplicated logic, but the shape is tiny: bottom
+        // row reserved for the modeline, left gutter sized to fit the
+        // largest line number (with the `GutterConfig::default()`
+        // min_width of 4 plus a one-cell pad).
+        let text_rows = rows.saturating_sub(1);
+        let gutter = GutterConfig::default();
+        let gutter_width = if gutter.line_numbers {
+            let digits = digit_count(snapshot.rope().len_lines().max(1));
+            (digits.max(gutter.min_width as usize) as u16) + 1
+        } else {
+            0
+        };
+        let text_cols = cols.saturating_sub(gutter_width);
+
+        if let Some(window) = editor.windows_mut().get_mut(active) {
+            window.visible_rows = text_rows;
+            window.visible_cols = text_cols;
+        }
+        // If that update shifted the text area enough that the cursor
+        // is no longer inside it (e.g. on a terminal resize), fix the
+        // scroll position before building the view state so this very
+        // frame reflects the corrected scroll.
+        editor.ensure_active_cursor_visible();
+        let data = editor.windows().get(active)?.clone();
+
         Some(ViewState {
             size: TerminalSize::new(cols, rows),
             layout: LayoutTree::Single(ViewWindowId(active.0)),
@@ -191,7 +226,7 @@ async fn build_view_state(bus: &CommandBus, cols: u16, rows: u16) -> Option<View
                     top_line: data.scroll_top_line,
                     left_col: data.scroll_left_col,
                 },
-                gutter: GutterConfig::default(),
+                gutter,
             }],
             global,
         })
@@ -199,6 +234,18 @@ async fn build_view_state(bus: &CommandBus, cols: u16, rows: u16) -> Option<View
     .await
     .ok()
     .flatten()
+}
+
+fn digit_count(mut n: usize) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    let mut c = 0;
+    while n > 0 {
+        c += 1;
+        n /= 10;
+    }
+    c
 }
 
 #[cfg(test)]

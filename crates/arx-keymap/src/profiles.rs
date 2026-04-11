@@ -16,9 +16,10 @@
 use std::sync::Arc;
 
 use crate::commands::{
-    BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_NEWLINE, BUFFER_SAVE, CURSOR_DOWN,
-    CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START, CURSOR_RIGHT, CURSOR_UP, EDITOR_QUIT,
-    MODE_ENTER_INSERT, MODE_LEAVE_INSERT, SCROLL_PAGE_DOWN, SCROLL_PAGE_UP,
+    BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_NEWLINE, BUFFER_SAVE,
+    CURSOR_BUFFER_END, CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END,
+    CURSOR_LINE_START, CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD,
+    EDITOR_QUIT, MODE_ENTER_INSERT, MODE_LEAVE_INSERT, SCROLL_PAGE_DOWN, SCROLL_PAGE_UP,
 };
 use crate::engine::CountMode;
 use crate::keymap::Keymap;
@@ -63,6 +64,11 @@ pub fn emacs() -> Profile {
     m.bind_str("C-e", CURSOR_LINE_END).unwrap();
     m.bind_str("<Home>", CURSOR_LINE_START).unwrap();
     m.bind_str("<End>", CURSOR_LINE_END).unwrap();
+    // Word- and buffer-level motions.
+    m.bind_str("M-f", CURSOR_WORD_FORWARD).unwrap();
+    m.bind_str("M-b", CURSOR_WORD_BACKWARD).unwrap();
+    m.bind_str("M-<", CURSOR_BUFFER_START).unwrap();
+    m.bind_str("M->", CURSOR_BUFFER_END).unwrap();
 
     // Basic editing.
     m.bind_str("<Enter>", BUFFER_NEWLINE).unwrap();
@@ -137,6 +143,15 @@ pub fn vim() -> Profile {
     normal.bind_str("j", CURSOR_DOWN).unwrap();
     normal.bind_str("0", CURSOR_LINE_START).unwrap();
     normal.bind_str("$", CURSOR_LINE_END).unwrap();
+    // Word- and buffer-level motions. `gg` is a two-chord sequence
+    // matching Vim's go-to-top; `G` jumps to end-of-buffer. A count
+    // prefix on `G` (`42G`) is the canonical "go to line 42" idiom
+    // but needs modal input we don't have yet, so 1c's `G` is
+    // unconditional end-of-buffer.
+    normal.bind_str("w", CURSOR_WORD_FORWARD).unwrap();
+    normal.bind_str("b", CURSOR_WORD_BACKWARD).unwrap();
+    normal.bind_str("g g", CURSOR_BUFFER_START).unwrap();
+    normal.bind_str("G", CURSOR_BUFFER_END).unwrap();
     normal.bind_str("i", MODE_ENTER_INSERT).unwrap();
     normal.bind_str("a", MODE_ENTER_INSERT).unwrap(); // simplified: no trailing cursor move yet
     normal.bind_str("o", MODE_ENTER_INSERT).unwrap(); // simplified: no newline-below yet

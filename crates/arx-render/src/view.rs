@@ -182,6 +182,11 @@ struct PaintLine<'a> {
 }
 
 /// Paint one buffer line of text into `grid`, starting at `text_x`, `y`.
+///
+/// Also overlays truncation indicators (`<` / `>`) on the first/last
+/// visible columns when the line's content extends past the viewport
+/// edges. Empty lines never get indicators — they'd be lying about
+/// content that isn't there.
 fn paint_line(grid: &mut CellGrid, args: &PaintLine<'_>) {
     let &PaintLine {
         buffer,
@@ -213,6 +218,7 @@ fn paint_line(grid: &mut CellGrid, args: &PaintLine<'_>) {
     //   * `text_col`    — column inside the window's text area (post-clip).
     let mut display_col: u16 = 0;
     let mut text_col: u16 = 0;
+    let mut truncated_right = false;
 
     for (byte_in_line, grapheme) in line_text.grapheme_indices(true) {
         let global_byte = line_start + byte_in_line;
@@ -236,6 +242,7 @@ fn paint_line(grid: &mut CellGrid, args: &PaintLine<'_>) {
         }
 
         if text_col >= text_width {
+            truncated_right = true;
             break;
         }
 
@@ -255,6 +262,7 @@ fn paint_line(grid: &mut CellGrid, args: &PaintLine<'_>) {
                     flags: flags_from_runs,
                 },
             );
+            truncated_right = true;
             break;
         }
 
@@ -272,6 +280,51 @@ fn paint_line(grid: &mut CellGrid, args: &PaintLine<'_>) {
         }
         text_col += width;
         display_col += width;
+    }
+
+    // Truncation indicators. An indicator is only worth drawing when
+    // it actually has a cell to overwrite — i.e. the text area is at
+    // least one column wide.
+    if text_width == 0 {
+        return;
+    }
+    let indicator_face = truncation_face();
+    if window.scroll.left_col > 0 {
+        // Left side: the line has content that's scrolled off. We only
+        // know the line is non-empty because the guard above returned
+        // for empty lines.
+        grid.set(
+            text_x,
+            y,
+            Cell {
+                grapheme: CompactString::const_new("<"),
+                face: indicator_face,
+                flags: CellFlags::empty(),
+            },
+        );
+    }
+    if truncated_right {
+        grid.set(
+            text_x + text_width - 1,
+            y,
+            Cell {
+                grapheme: CompactString::const_new(">"),
+                face: indicator_face,
+                flags: CellFlags::empty(),
+            },
+        );
+    }
+}
+
+/// Face used for the `<` / `>` horizontal-truncation indicators. A
+/// dim yellow on the default background distinguishes them from
+/// regular text without being obnoxious.
+fn truncation_face() -> ResolvedFace {
+    ResolvedFace {
+        fg: crate::face::Color::rgb(0xc0, 0xa0, 0x00),
+        bg: ResolvedFace::DEFAULT.bg,
+        bold: true,
+        ..ResolvedFace::DEFAULT
     }
 }
 
@@ -617,5 +670,67 @@ mod tests {
         let state = state_for(w, 20, 3);
         let tree = render(&state, 0);
         assert!(tree.cursors.is_empty());
+    }
+
+    #[test]
+    fn right_truncation_marker_appears_on_overflow_line() {
+        // A line that's clearly wider than the visible text area gets a
+        // `>` in the final visible column.
+        let long = "a".repeat(200);
+        let w = window_for(&long);
+        let state = state_for(w, 20, 3);
+        let tree = render(&state, 0);
+        let row0: Vec<&Cell> = (0..tree.cells.width())
+            .map(|x| tree.cells.get(x, 0).unwrap())
+            .collect();
+        // The last cell on row 0 must be the `>` indicator.
+        assert_eq!(
+            row0.last().unwrap().grapheme.as_str(),
+            ">",
+            "row0 = {:?}",
+            row0.iter().map(|c| c.grapheme.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn left_truncation_marker_appears_when_scrolled_horizontally() {
+        // With scroll.left_col > 0 the first visible column of the
+        // text area (right after the gutter) becomes a `<` indicator.
+        let long = "abcdefghij".repeat(20);
+        let mut w = window_for(&long);
+        w.scroll.left_col = 10;
+        let state = state_for(w, 20, 3);
+        let tree = render(&state, 0);
+        let row0: Vec<&str> = (0..tree.cells.width())
+            .map(|x| tree.cells.get(x, 0).unwrap().grapheme.as_str())
+            .collect();
+        // The gutter is right-aligned digits padded with spaces; the
+        // `<` sits at the first non-gutter column. Look for it
+        // directly — its mere presence on the row proves the marker
+        // got painted.
+        assert!(
+            row0.contains(&"<"),
+            "no left indicator on row0: {row0:?}",
+        );
+        // And it should appear BEFORE any of the visible text, i.e.
+        // no letters before the `<`.
+        let lt_pos = row0.iter().position(|c| *c == "<").unwrap();
+        let has_letter_before = row0[..lt_pos]
+            .iter()
+            .any(|c| c.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic()));
+        assert!(!has_letter_before, "letters before `<`: {row0:?}");
+    }
+
+    #[test]
+    fn short_line_inside_viewport_gets_no_truncation_markers() {
+        let w = window_for("hi");
+        let state = state_for(w, 20, 3);
+        let tree = render(&state, 0);
+        let row0: Vec<&Cell> = (0..tree.cells.width())
+            .map(|x| tree.cells.get(x, 0).unwrap())
+            .collect();
+        // Neither marker should appear anywhere on row 0.
+        assert!(row0.iter().all(|c| c.grapheme.as_str() != "<"));
+        assert!(row0.iter().all(|c| c.grapheme.as_str() != ">"));
     }
 }

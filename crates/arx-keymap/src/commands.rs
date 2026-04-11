@@ -22,6 +22,14 @@ pub const CURSOR_DOWN: &str = "cursor.down";
 pub const CURSOR_LINE_START: &str = "cursor.line-start";
 /// Move the primary cursor to the end of its current line.
 pub const CURSOR_LINE_END: &str = "cursor.line-end";
+/// Move the primary cursor forward one word.
+pub const CURSOR_WORD_FORWARD: &str = "cursor.word-forward";
+/// Move the primary cursor backward one word.
+pub const CURSOR_WORD_BACKWARD: &str = "cursor.word-backward";
+/// Move the primary cursor to the start of the buffer.
+pub const CURSOR_BUFFER_START: &str = "cursor.buffer-start";
+/// Move the primary cursor to the end of the buffer.
+pub const CURSOR_BUFFER_END: &str = "cursor.buffer-end";
 
 /// Insert a newline at the cursor.
 pub const BUFFER_NEWLINE: &str = "buffer.newline";

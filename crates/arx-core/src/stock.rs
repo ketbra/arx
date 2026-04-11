@@ -27,6 +27,10 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CursorDown);
     reg.register(CursorLineStart);
     reg.register(CursorLineEnd);
+    reg.register(CursorWordForward);
+    reg.register(CursorWordBackward);
+    reg.register(CursorBufferStart);
+    reg.register(CursorBufferEnd);
     reg.register(BufferNewline);
     reg.register(BufferDeleteBackward);
     reg.register(BufferDeleteForward);
@@ -124,24 +128,39 @@ impl CursorRight {
 stock_cmd!(CursorUp, CURSOR_UP, "Move the cursor up one line");
 impl CursorUp {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        move_vertical(cx, -1);
+        let delta = -(cx.count.max(1) as i32);
+        move_cursor_vertical_by(cx.editor, delta);
+        cx.editor.mark_dirty();
     }
 }
 
 stock_cmd!(CursorDown, CURSOR_DOWN, "Move the cursor down one line");
 impl CursorDown {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        move_vertical(cx, 1);
+        let delta = cx.count.max(1) as i32;
+        move_cursor_vertical_by(cx.editor, delta);
+        cx.editor.mark_dirty();
     }
 }
 
-fn move_vertical(cx: &mut CommandContext<'_>, direction: i32) {
-    let n = cx.count.max(1) as i32;
-    let delta = direction * n;
-    let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+/// Move the active window's cursor up (`delta < 0`) or down (`delta > 0`)
+/// by that many lines, preserving the byte-offset-within-line so long
+/// lines don't snap to column 0.
+///
+/// Used by [`CursorUp`] / [`CursorDown`] *and* by the page-scroll
+/// commands — moving the cursor by a page's worth of lines and letting
+/// [`Editor::ensure_active_cursor_visible`] chase it is how page-up /
+/// page-down end up scrolling in this editor.
+fn move_cursor_vertical_by(editor: &mut Editor, delta: i32) {
+    let Some(window_id) = editor.windows().active() else {
         return;
     };
-    let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+    let Some(data) = editor.windows().get(window_id) else {
+        return;
+    };
+    let buffer_id = data.buffer_id;
+    let cursor = data.cursor_byte;
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
         return;
     };
     let rope = buffer.rope();
@@ -158,10 +177,9 @@ fn move_vertical(cx: &mut CommandContext<'_>, direction: i32) {
         rope.len_bytes()
     };
     let new_cursor = (new_line_start + col).min(new_line_end);
-    if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
         window.cursor_byte = new_cursor;
     }
-    cx.editor.mark_dirty();
 }
 
 stock_cmd!(
@@ -206,6 +224,154 @@ impl CursorLineEnd {
         } else {
             rope.len_bytes()
         };
+        if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+            window.cursor_byte = end;
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+/// A character is a "word character" for the purposes of our stock
+/// `M-f` / `M-b` / Vim `w` / `b` if it's alphanumeric or an underscore.
+/// This matches Emacs's default `[[:word:]]` character class closely
+/// enough for source-code editing without pulling in a regex crate.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Advance `cursor` forward to the start of the next word, or to the
+/// end of the buffer if there is no next word. "Next word" means: skip
+/// any run of non-word characters, then skip the run of word characters
+/// that follows. Emacs `M-f` semantics.
+fn next_word_boundary(text: &str, cursor: usize) -> usize {
+    // Walk grapheme-by-grapheme so multi-byte characters don't land
+    // mid-codepoint. The word-char test looks at the first char of the
+    // grapheme, which is good enough for the identifier-ish characters
+    // we care about.
+    let tail = &text[cursor..];
+    let mut idx = cursor;
+    let mut saw_word = false;
+    for (i, g) in tail.grapheme_indices(true) {
+        let first = g.chars().next().unwrap_or(' ');
+        let is_w = is_word_char(first);
+        if !saw_word {
+            if is_w {
+                saw_word = true;
+            }
+        } else if !is_w {
+            return cursor + i;
+        }
+        idx = cursor + i + g.len();
+    }
+    idx
+}
+
+/// Walk backward from `cursor` to the start of the previous word, or
+/// to the start of the buffer if there isn't one. Emacs `M-b`.
+fn prev_word_boundary(text: &str, cursor: usize) -> usize {
+    let head = &text[..cursor];
+    // Collect grapheme offsets once so we can walk them in reverse.
+    let graphemes: Vec<(usize, &str)> = head.grapheme_indices(true).collect();
+    let mut saw_word = false;
+    let mut result = 0;
+    for (i, g) in graphemes.into_iter().rev() {
+        let first = g.chars().next().unwrap_or(' ');
+        let is_w = is_word_char(first);
+        if !saw_word {
+            if is_w {
+                saw_word = true;
+                result = i;
+            }
+        } else if is_w {
+            result = i;
+        } else {
+            return result;
+        }
+    }
+    result
+}
+
+stock_cmd!(
+    CursorWordForward,
+    CURSOR_WORD_FORWARD,
+    "Move the cursor forward one word"
+);
+impl CursorWordForward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let n = cx.count.max(1);
+        for _ in 0..n {
+            let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+                return;
+            };
+            let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                return;
+            };
+            let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+            let next = next_word_boundary(&text, cursor);
+            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+                window.cursor_byte = next;
+            }
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CursorWordBackward,
+    CURSOR_WORD_BACKWARD,
+    "Move the cursor backward one word"
+);
+impl CursorWordBackward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let n = cx.count.max(1);
+        for _ in 0..n {
+            let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+                return;
+            };
+            let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                return;
+            };
+            let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+            let prev = prev_word_boundary(&text, cursor);
+            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+                window.cursor_byte = prev;
+            }
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CursorBufferStart,
+    CURSOR_BUFFER_START,
+    "Move the cursor to the start of the buffer"
+);
+impl CursorBufferStart {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, _)) = active(cx.editor) else {
+            return;
+        };
+        if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+            window.cursor_byte = 0;
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CursorBufferEnd,
+    CURSOR_BUFFER_END,
+    "Move the cursor to the end of the buffer"
+);
+impl CursorBufferEnd {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let end = buffer.len_bytes();
         if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
             window.cursor_byte = end;
         }
@@ -323,29 +489,32 @@ impl BufferDeleteForward {
 // Scrolling
 // ---------------------------------------------------------------------------
 
-fn scroll_by(cx: &mut CommandContext<'_>, lines: i32) {
-    let n = cx.count.max(1) as i32 * lines;
-    let Some(window_id) = cx.editor.windows().active() else {
-        return;
-    };
-    let Some(data) = cx.editor.windows().get(window_id) else {
-        return;
-    };
-    let new_top = if n >= 0 {
-        data.scroll_top_line.saturating_add(n as usize)
+/// Compute a page size for vertical scroll commands from the active
+/// window's cached viewport height. Emacs convention is to leave two
+/// lines of overlap between pages so the eye can track position, which
+/// works out to `visible_rows - 2`. Falls back to a conservative
+/// default when the window hasn't been rendered yet.
+fn active_page_size(editor: &Editor) -> i32 {
+    let visible = editor
+        .windows()
+        .active_data()
+        .map_or(0, |d| d.visible_rows);
+    if visible >= 3 {
+        i32::from(visible - 2)
     } else {
-        data.scroll_top_line.saturating_sub((-n) as usize)
-    };
-    if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
-        window.scroll_top_line = new_top;
+        // Window not rendered yet (or absurdly small). Pick something
+        // better than 0 so the command isn't a no-op.
+        10
     }
-    cx.editor.mark_dirty();
 }
 
 stock_cmd!(ScrollPageUp, SCROLL_PAGE_UP, "Scroll the view up one page");
 impl ScrollPageUp {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        scroll_by(cx, -10);
+        let page = active_page_size(cx.editor);
+        let n = cx.count.max(1) as i32 * page;
+        move_cursor_vertical_by(cx.editor, -n);
+        cx.editor.mark_dirty();
     }
 }
 
@@ -356,7 +525,10 @@ stock_cmd!(
 );
 impl ScrollPageDown {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        scroll_by(cx, 10);
+        let page = active_page_size(cx.editor);
+        let n = cx.count.max(1) as i32 * page;
+        move_cursor_vertical_by(cx.editor, n);
+        cx.editor.mark_dirty();
     }
 }
 
@@ -526,6 +698,183 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(top_after_leave, "vim.normal");
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- Word boundary helpers ----
+
+    #[test]
+    fn next_word_skips_non_word_then_word() {
+        // Matches Emacs `forward-word` / `M-f`: finishes the current
+        // word if we're inside one, then skips the gap and the next
+        // word to land at its end.
+        let text = "foo  bar baz";
+        assert_eq!(next_word_boundary(text, 2), 3); // inside "foo" → end of "foo"
+        assert_eq!(next_word_boundary(text, 3), 8); // from the gap → end of "bar"
+        assert_eq!(next_word_boundary(text, 8), text.len()); // last word → EOB
+    }
+
+    #[test]
+    fn prev_word_walks_back() {
+        let text = "foo  bar baz";
+        // From end of text, previous word start = "baz" at idx 9.
+        assert_eq!(prev_word_boundary(text, text.len()), 9);
+        // From inside "baz" we step back to its start.
+        assert_eq!(prev_word_boundary(text, 11), 9);
+        // From start of "bar" we step back to start of "foo".
+        assert_eq!(prev_word_boundary(text, 5), 0);
+    }
+
+    #[tokio::test]
+    async fn word_forward_and_backward_commands_move_cursor() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("alpha beta gamma", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+
+        let bus_clone = bus.clone();
+        let after_forward = bus
+            .invoke(move |editor| {
+                let cmd = editor
+                    .commands()
+                    .get(names::CURSOR_WORD_FORWARD)
+                    .unwrap();
+                let mut cx = CommandContext {
+                    editor,
+                    bus: bus_clone,
+                    count: 1,
+                };
+                cmd.run(&mut cx);
+                cx.editor.windows().active_data().unwrap().cursor_byte
+            })
+            .await
+            .unwrap();
+        // Forward-word from column 0 jumps past "alpha" and lands at
+        // the start of " beta", i.e. right after "alpha".
+        assert_eq!(after_forward, "alpha".len());
+
+        let bus_clone = bus.clone();
+        let after_backward = bus
+            .invoke(move |editor| {
+                let cmd = editor
+                    .commands()
+                    .get(names::CURSOR_WORD_BACKWARD)
+                    .unwrap();
+                let mut cx = CommandContext {
+                    editor,
+                    bus: bus_clone,
+                    count: 1,
+                };
+                cmd.run(&mut cx);
+                cx.editor.windows().active_data().unwrap().cursor_byte
+            })
+            .await
+            .unwrap();
+        // Stepping back from the end of "alpha" lands at the start of
+        // "alpha".
+        assert_eq!(after_backward, 0);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn buffer_start_and_end_commands_jump_to_edges() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("hello world", None);
+            editor.windows_mut().open(buf);
+            // Start the cursor somewhere in the middle so we can
+            // observe the jumps.
+            editor.windows_mut().active_data_mut().unwrap().cursor_byte = 4;
+        })
+        .await
+        .unwrap();
+
+        let bus_clone = bus.clone();
+        let at_end = bus
+            .invoke(move |editor| {
+                let cmd = editor.commands().get(names::CURSOR_BUFFER_END).unwrap();
+                let mut cx = CommandContext {
+                    editor,
+                    bus: bus_clone,
+                    count: 1,
+                };
+                cmd.run(&mut cx);
+                cx.editor.windows().active_data().unwrap().cursor_byte
+            })
+            .await
+            .unwrap();
+        assert_eq!(at_end, "hello world".len());
+
+        let bus_clone = bus.clone();
+        let at_start = bus
+            .invoke(move |editor| {
+                let cmd = editor.commands().get(names::CURSOR_BUFFER_START).unwrap();
+                let mut cx = CommandContext {
+                    editor,
+                    bus: bus_clone,
+                    count: 1,
+                };
+                cmd.run(&mut cx);
+                cx.editor.windows().active_data().unwrap().cursor_byte
+            })
+            .await
+            .unwrap();
+        assert_eq!(at_start, 0);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn page_down_uses_visible_rows_when_available() {
+        // Set up a 50-line buffer with a 12-row visible area. Page
+        // size should be `12 - 2 = 10`. Starting at line 0, a single
+        // page-down places the cursor on line 10 (and the ensure-visible
+        // step pulls scroll along with it).
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let text = (0..50)
+                .map(|i| format!("line{i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let buf = editor.buffers_mut().create_from_text(&text, None);
+            let id = editor.windows_mut().open(buf);
+            let data = editor.windows_mut().get_mut(id).unwrap();
+            data.visible_rows = 12;
+            data.visible_cols = 40;
+        })
+        .await
+        .unwrap();
+
+        let bus_clone = bus.clone();
+        let cursor_line = bus
+            .invoke(move |editor| {
+                let cmd = editor.commands().get(names::SCROLL_PAGE_DOWN).unwrap();
+                let mut cx = CommandContext {
+                    editor,
+                    bus: bus_clone,
+                    count: 1,
+                };
+                cmd.run(&mut cx);
+                let data = cx.editor.windows().active_data().unwrap();
+                let buffer = cx.editor.buffers().get(data.buffer_id).unwrap();
+                buffer.rope().byte_to_line(data.cursor_byte)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cursor_line, 10);
 
         drop(bus);
         let _ = handle.await.unwrap();

@@ -256,13 +256,23 @@ impl From<&crossterm::event::KeyEvent> for KeyChord {
             // char so the keymap layer can still fall through cleanly.
             _ => Key::Char('\u{0}'),
         };
-        let modifiers = KeyModifiers {
+        let mut modifiers = KeyModifiers {
             ctrl: ev.modifiers.contains(XtermMods::CONTROL),
             alt: ev.modifiers.contains(XtermMods::ALT),
             shift: ev.modifiers.contains(XtermMods::SHIFT),
             meta: ev.modifiers.contains(XtermMods::META)
                 || ev.modifiers.contains(XtermMods::SUPER),
         };
+        // For printable characters the shift modifier is already
+        // encoded in the character itself (Shift+, -> '<',
+        // Shift+a -> 'A'). Legacy xterm-style terminals strip shift;
+        // Kitty's extended protocol keeps it set. Normalize here so
+        // a binding like `M-<` matches regardless of how the
+        // terminal reports the event. Named keys (F-keys, Tab, etc.)
+        // keep shift — `S-Tab` and `S-F1` are legitimate bindings.
+        if let Key::Char(_) = &key {
+            modifiers.shift = false;
+        }
         Self { key, modifiers }
     }
 }
@@ -299,6 +309,31 @@ mod tests {
         let ev = KeyEvent::new(KeyCode::Char('x'), XM::CONTROL);
         let chord = KeyChord::from(&ev);
         assert_eq!(chord, KeyChord::ctrl('x'));
+    }
+
+    #[test]
+    fn from_crossterm_char_drops_shift_modifier() {
+        // Some terminals (Kitty extended protocol) send Shift + `<`
+        // with the shift bit set even though `<` is the shifted form
+        // of `,`. Our normalization should drop the shift bit for
+        // printable-char keys so bindings like `M-<` match either
+        // way.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as XM};
+        let ev = KeyEvent::new(KeyCode::Char('<'), XM::ALT | XM::SHIFT);
+        let chord = KeyChord::from(&ev);
+        assert_eq!(chord.key, Key::Char('<'));
+        assert!(chord.modifiers.alt);
+        assert!(!chord.modifiers.shift);
+    }
+
+    #[test]
+    fn from_crossterm_named_keeps_shift() {
+        // Named keys (F-keys, Tab, arrows) keep their shift modifier —
+        // `S-Tab` and `S-F5` are legitimate distinct bindings.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as XM};
+        let ev = KeyEvent::new(KeyCode::Tab, XM::SHIFT);
+        let chord = KeyChord::from(&ev);
+        assert!(chord.modifiers.shift);
     }
 
     #[test]

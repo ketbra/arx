@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use arx_buffer::{Buffer, BufferId, BufferSnapshot, ByteRange, Edit, EditOrigin};
 use arx_keymap::{FeedOutcome, KeyChord, KeymapEngine, Layer, Profile};
 use tokio::sync::watch;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::command::CommandBus;
 use crate::registry::{CommandContext, CommandRegistry};
@@ -162,9 +164,12 @@ impl Editor {
     /// input task knows whether to fall back to self-insert.
     ///
     /// `bus` is cloned into the [`CommandContext`] so commands can spawn
-    /// async follow-ups (e.g. `buffer.save`).
+    /// async follow-ups (e.g. `buffer.save`). After the command runs,
+    /// [`Self::ensure_active_cursor_visible`] is called so any cursor
+    /// movement or buffer edit that pushed the cursor off-screen pulls
+    /// the scroll position along with it.
     pub fn handle_key(&mut self, bus: &CommandBus, chord: KeyChord) -> KeyHandled {
-        match self.keymap.feed(chord) {
+        let outcome = match self.keymap.feed(chord) {
             FeedOutcome::Execute { command, count } => {
                 // Clone the Arc out so we release the borrow of
                 // `self.commands` before taking `&mut self.editor`.
@@ -185,6 +190,86 @@ impl Editor {
             FeedOutcome::Unbound { printable_fallback } => {
                 KeyHandled::Unbound { printable_fallback }
             }
+        };
+        // Every command path (including the printable-fallback path
+        // taken by the input layer when this returns Unbound) may have
+        // moved the cursor, so run the viewport-follow step here.
+        // When the fallback is used, the input task applies the
+        // self-insert and then calls this method again via a dispatch;
+        // see `arx_driver::input`. In either case the cursor ends up
+        // visible before the next frame is rendered.
+        self.ensure_active_cursor_visible();
+        outcome
+    }
+
+    /// Adjust the active window's scroll position so its primary cursor
+    /// is inside the visible text area. Called from [`Self::handle_key`]
+    /// after every command; safe to call directly after any explicit
+    /// mutation of cursor / scroll state.
+    ///
+    /// Adjusts both the vertical scroll (`scroll_top_line`) and the
+    /// horizontal scroll (`scroll_left_col`). Horizontal uses display
+    /// columns computed from grapheme widths so multi-byte characters
+    /// and wide CJK glyphs come out right.
+    ///
+    /// If the window has never been rendered (`visible_rows == 0` or
+    /// `visible_cols == 0`) this is a no-op — we can't follow the
+    /// cursor into a window we don't know the size of yet.
+    pub fn ensure_active_cursor_visible(&mut self) {
+        let Some(window_id) = self.windows.active() else {
+            return;
+        };
+        let Some(data) = self.windows.get(window_id).cloned() else {
+            return;
+        };
+        let visible_rows = data.visible_rows;
+        let visible_cols = data.visible_cols;
+        if visible_rows == 0 || visible_cols == 0 {
+            // Window hasn't been rendered yet; nothing to align to.
+            return;
+        }
+        let Some(buffer) = self.buffers.get(data.buffer_id) else {
+            return;
+        };
+        let rope = buffer.rope();
+        let cursor_byte = data.cursor_byte.min(rope.len_bytes());
+        let cursor_line = rope.byte_to_line(cursor_byte);
+
+        // Vertical follow.
+        let rows = visible_rows as usize;
+        let mut new_top = data.scroll_top_line;
+        if cursor_line < new_top {
+            new_top = cursor_line;
+        } else if cursor_line >= new_top.saturating_add(rows) {
+            new_top = cursor_line + 1 - rows;
+        }
+        // Don't bother clamping to len_lines — scrolling past the end
+        // just shows blank rows, which is fine and matches how we
+        // handle page-down that overshoots.
+
+        // Horizontal follow. Compute the cursor's *display* column
+        // (grapheme widths summed) from the start of its line.
+        let line_start = rope.line_to_byte(cursor_line);
+        let text_to_cursor = rope.slice_to_string(line_start..cursor_byte);
+        let mut cursor_col: u16 = 0;
+        for g in text_to_cursor.graphemes(true) {
+            cursor_col = cursor_col
+                .saturating_add(UnicodeWidthStr::width(g).clamp(1, 2) as u16);
+        }
+        let cols = visible_cols;
+        let mut new_left = data.scroll_left_col;
+        if cursor_col < new_left {
+            new_left = cursor_col;
+        } else if cursor_col >= new_left.saturating_add(cols) {
+            new_left = cursor_col + 1 - cols;
+        }
+
+        if new_top != data.scroll_top_line || new_left != data.scroll_left_col {
+            if let Some(w) = self.windows.get_mut(window_id) {
+                w.scroll_top_line = new_top;
+                w.scroll_left_col = new_left;
+            }
+            self.mark_dirty();
         }
     }
 }
@@ -434,5 +519,81 @@ mod tests {
         let b = mgr.create_scratch();
         assert_ne!(a, b);
         assert!(b.0 > a.0);
+    }
+
+    // ---- Editor::ensure_active_cursor_visible ----
+
+    fn editor_with_window(text: &str, rows: u16, cols: u16) -> (Editor, crate::WindowId) {
+        let mut editor = Editor::new();
+        let buf = editor.buffers_mut().create_from_text(text, None);
+        let id = editor.windows_mut().open(buf);
+        let data = editor.windows_mut().get_mut(id).unwrap();
+        data.visible_rows = rows;
+        data.visible_cols = cols;
+        (editor, id)
+    }
+
+    #[test]
+    fn cursor_below_viewport_scrolls_down() {
+        let text = (0..20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (mut editor, id) = editor_with_window(&text, 5, 20);
+        // Place cursor on line 10; viewport starts at 0 with height 5 ->
+        // cursor is below. After ensure, top_line should have followed.
+        let line_10_byte = editor
+            .buffers()
+            .get(editor.windows().get(id).unwrap().buffer_id)
+            .unwrap()
+            .rope()
+            .line_to_byte(10);
+        editor.windows_mut().get_mut(id).unwrap().cursor_byte = line_10_byte;
+        editor.ensure_active_cursor_visible();
+        let data = editor.windows().get(id).unwrap();
+        assert!(
+            data.scroll_top_line <= 10,
+            "top {} should cover line 10",
+            data.scroll_top_line
+        );
+        assert!(data.scroll_top_line + 5 > 10);
+    }
+
+    #[test]
+    fn cursor_above_viewport_scrolls_up() {
+        let text = (0..20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (mut editor, id) = editor_with_window(&text, 5, 20);
+        editor.windows_mut().get_mut(id).unwrap().scroll_top_line = 10;
+        // Cursor at line 0 but scroll is at line 10 — cursor is above.
+        editor.windows_mut().get_mut(id).unwrap().cursor_byte = 0;
+        editor.ensure_active_cursor_visible();
+        assert_eq!(editor.windows().get(id).unwrap().scroll_top_line, 0);
+    }
+
+    #[test]
+    fn cursor_past_right_edge_scrolls_right() {
+        let text = "a".repeat(80);
+        let (mut editor, id) = editor_with_window(&text, 5, 20);
+        editor.windows_mut().get_mut(id).unwrap().cursor_byte = 50;
+        editor.ensure_active_cursor_visible();
+        let data = editor.windows().get(id).unwrap();
+        // Cursor column 50 must be inside [left, left + 20).
+        assert!(data.scroll_left_col <= 50);
+        assert!(50 < data.scroll_left_col + 20);
+    }
+
+    #[test]
+    fn ensure_visible_is_noop_when_viewport_unknown() {
+        // visible_rows/cols = 0 → can't compute anything, must leave
+        // scroll state alone.
+        let mut editor = Editor::new();
+        let buf = editor.buffers_mut().create_from_text("abc", None);
+        let id = editor.windows_mut().open(buf);
+        editor.windows_mut().get_mut(id).unwrap().scroll_top_line = 7;
+        editor.ensure_active_cursor_visible();
+        assert_eq!(editor.windows().get(id).unwrap().scroll_top_line, 7);
     }
 }

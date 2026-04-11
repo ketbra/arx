@@ -30,6 +30,13 @@ pub struct WindowId(pub u64);
 ///
 /// Cursor and scroll are in *buffer coordinates*. Translating to screen
 /// coordinates (columns / rows) is the render layer's job.
+///
+/// The `visible_rows` / `visible_cols` fields are **cached viewport
+/// dimensions** written back by the render task each frame so that
+/// commands like `page-down` and [`crate::Editor::ensure_active_cursor_visible`]
+/// know the actual text area size. They're 0 until the window has been
+/// rendered at least once; commands that depend on them fall back to
+/// sensible defaults.
 #[derive(Debug, Clone)]
 pub struct WindowData {
     /// Which buffer this window is viewing.
@@ -40,6 +47,12 @@ pub struct WindowData {
     pub scroll_top_line: usize,
     /// First visible column (for horizontal scroll).
     pub scroll_left_col: u16,
+    /// Last-known number of visible text rows (not counting the
+    /// modeline). Updated by the render task each frame.
+    pub visible_rows: u16,
+    /// Last-known number of visible text columns (not counting the
+    /// gutter). Updated by the render task each frame.
+    pub visible_cols: u16,
 }
 
 impl WindowData {
@@ -51,6 +64,8 @@ impl WindowData {
             cursor_byte: 0,
             scroll_top_line: 0,
             scroll_left_col: 0,
+            visible_rows: 0,
+            visible_cols: 0,
         }
     }
 }
