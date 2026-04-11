@@ -5,6 +5,7 @@ members = [
     "crates/arx-buffer",
     "crates/arx-core",
     "crates/arx-driver",
+    "crates/arx-keymap",
     "crates/arx-render",
 ]
 
@@ -25,6 +26,7 @@ arx-buffer = { path = "crates/arx-buffer" }
 arx-core = { path = "crates/arx-core" }
 arx-render = { path = "crates/arx-render" }
 arx-driver = { path = "crates/arx-driver" }
+arx-keymap = { path = "crates/arx-keymap" }
 
 [workspace.package]
 version = "0.1.0"

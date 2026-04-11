@@ -1,41 +1,27 @@
 //! Input task: translate terminal events into editor commands.
 //!
 //! Reads from a [`crossterm::event::EventStream`] (or any async stream of
-//! [`Event`]) and turns each event into a dispatch onto the
-//! [`arx_core::CommandBus`]. For Phase 1 the keybindings are hardcoded:
+//! [`Event`]) and hands each keystroke to the editor's [`KeymapEngine`]
+//! via [`arx_core::Editor::handle_key`]. The keymap resolves the chord
+//! against the active mode stack, invokes the registered command if any,
+//! and reports back whether the key was handled, pending, or unbound.
 //!
-//! | Event | Action |
-//! |---|---|
-//! | `Ctrl+Q`, `Ctrl+C`, `Esc` | request shutdown |
-//! | `Ctrl+S` | save the active buffer to disk |
-//! | printable char | insert at cursor |
-//! | `Enter` | insert `"\n"` |
-//! | `Backspace` | delete the grapheme before the cursor |
-//! | `Delete` | delete the grapheme at the cursor |
-//! | `Left` / `Right` | move cursor one grapheme |
-//! | `Up` / `Down` | move cursor one line |
-//! | `Home` / `End` | move to start / end of line |
-//! | `PageUp` / `PageDown` | scroll 10 lines |
-//! | `Resize(w, h)` | update the shared terminal size |
+//! Unbound printable characters fall through to a crate-local self-insert
+//! so plain typing works even without explicit bindings. Non-printable
+//! unbound keys are silently dropped.
 //!
-//! A real keymap system lands in the next milestone (spec §15); this
-//! file is deliberately a flat `match` so swapping it out is trivial.
-//!
-//! The handlers are written as free functions taking an owned
-//! [`CommandBus`] clone so that the input task's async state machine
-//! never holds `&self` across an `.await`, which keeps it `Send` under
-//! tokio's multi-threaded runtime even when the event stream type is
-//! not `Sync`.
+//! The task shuts down when it sees the editor's `quit_requested()` flag
+//! flip (set by the `editor.quit` stock command) or when the event
+//! stream drains.
 
 use std::ops::ControlFlow;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::Event;
 use futures_util::StreamExt;
 use tracing::{debug, trace};
-use unicode_segmentation::UnicodeSegmentation;
 
-use arx_buffer::{BufferId, ByteRange, EditOrigin};
-use arx_core::{CommandBus, Editor, WindowId};
+use arx_core::{CommandBus, KeyHandled};
+use arx_keymap::KeyChord;
 
 use crate::state::{SharedTerminalSize, Shutdown};
 
@@ -66,8 +52,8 @@ impl<S> InputTask<S>
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin + Send + 'static,
 {
-    /// Drive the input loop until a shutdown key is seen, the event
-    /// stream ends, or the [`CommandBus`] is closed.
+    /// Drive the input loop until a quit is requested, the event stream
+    /// ends, or the command bus closes.
     pub async fn run(self) {
         let InputTask {
             mut events,
@@ -102,316 +88,67 @@ async fn handle(event: Event, bus: &CommandBus, size: &SharedTerminalSize) -> Co
             size.set(cols, rows);
             ControlFlow::Continue(())
         }
+        // Mouse / paste / focus events are ignored for Phase 1.
         _ => ControlFlow::Continue(()),
     }
 }
 
-async fn handle_key(key: KeyEvent, bus: &CommandBus) -> ControlFlow<()> {
-    let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    if matches!(key.code, KeyCode::Esc) || (is_ctrl && matches!(key.code, KeyCode::Char('q' | 'c')))
-    {
+async fn handle_key(
+    key: crossterm::event::KeyEvent,
+    bus: &CommandBus,
+) -> ControlFlow<()> {
+    let chord = KeyChord::from(&key);
+
+    // One round-trip to the event loop: feed the chord through the
+    // keymap engine, let the matching command run, and ask whether a
+    // quit was requested. This keeps the single-writer invariant: only
+    // the event-loop task ever touches `Editor`.
+    let bus_clone = bus.clone();
+    let result = bus
+        .invoke(move |editor| {
+            let outcome = editor.handle_key(&bus_clone, chord);
+            (outcome, editor.quit_requested())
+        })
+        .await;
+    let Ok((outcome, quit)) = result else {
+        return ControlFlow::Break(());
+    };
+
+    if quit {
         return ControlFlow::Break(());
     }
 
-    let dispatched = match key.code {
-        KeyCode::Char('s') if is_ctrl => dispatch_save(bus).await,
-        KeyCode::Char(ch) if !is_ctrl => dispatch_insert(bus, ch.to_string()).await,
-        KeyCode::Enter => dispatch_insert(bus, "\n".into()).await,
-        KeyCode::Backspace => dispatch_backspace(bus).await,
-        KeyCode::Delete => dispatch_delete_forward(bus).await,
-        KeyCode::Left => dispatch_move_left(bus).await,
-        KeyCode::Right => dispatch_move_right(bus).await,
-        KeyCode::Up => dispatch_move_vertical(bus, -1).await,
-        KeyCode::Down => dispatch_move_vertical(bus, 1).await,
-        KeyCode::Home => dispatch_move_home(bus).await,
-        KeyCode::End => dispatch_move_end(bus).await,
-        KeyCode::PageUp => dispatch_scroll(bus, -10).await,
-        KeyCode::PageDown => dispatch_scroll(bus, 10).await,
-        _ => Ok(()),
-    };
-    if dispatched.is_err() {
-        return ControlFlow::Break(());
+    if let KeyHandled::Unbound {
+        printable_fallback: Some(ch),
+    } = outcome
+    {
+        // Self-insert fallback: keymap didn't bind this printable char,
+        // so treat it as ordinary typed text.
+        let text = ch.to_string();
+        if bus
+            .dispatch(move |editor| {
+                arx_core::stock::insert_at_cursor(editor, &text);
+            })
+            .await
+            .is_err()
+        {
+            return ControlFlow::Break(());
+        }
     }
     ControlFlow::Continue(())
-}
-
-/// Resolve the active window's `(window_id, buffer_id, cursor_byte)` triple.
-fn active_window_cursor(editor: &Editor) -> Option<(WindowId, BufferId, usize)> {
-    let id = editor.windows().active()?;
-    let data = editor.windows().get(id)?;
-    Some((id, data.buffer_id, data.cursor_byte))
-}
-
-async fn dispatch_insert(bus: &CommandBus, text: String) -> Result<(), ()> {
-    bus.dispatch(move |editor| {
-        if let Some((window_id, buffer_id, cursor)) = active_window_cursor(editor) {
-            let edit =
-                editor
-                    .buffers_mut()
-                    .edit(buffer_id, cursor..cursor, &text, EditOrigin::User);
-            if edit.is_some() {
-                if let Some(window) = editor.windows_mut().get_mut(window_id) {
-                    window.cursor_byte = cursor + text.len();
-                }
-                editor.mark_dirty();
-            }
-        }
-    })
-    .await
-    .map_err(|_| ())
-}
-
-async fn dispatch_backspace(bus: &CommandBus) -> Result<(), ()> {
-    bus.dispatch(|editor| {
-        let Some((window_id, buffer_id, cursor)) = active_window_cursor(editor) else {
-            return;
-        };
-        if cursor == 0 {
-            return;
-        }
-        let Some(buffer) = editor.buffers().get(buffer_id) else {
-            return;
-        };
-        let text = buffer.rope().slice_to_string(0..cursor);
-        let start = text
-            .grapheme_indices(true)
-            .next_back()
-            .map_or(0, |(idx, _)| idx);
-        let range: ByteRange = start..cursor;
-        editor
-            .buffers_mut()
-            .edit(buffer_id, range, "", EditOrigin::User);
-        if let Some(window) = editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = start;
-        }
-        editor.mark_dirty();
-    })
-    .await
-    .map_err(|_| ())
-}
-
-async fn dispatch_delete_forward(bus: &CommandBus) -> Result<(), ()> {
-    bus.dispatch(|editor| {
-        let Some((_, buffer_id, cursor)) = active_window_cursor(editor) else {
-            return;
-        };
-        let Some(buffer) = editor.buffers().get(buffer_id) else {
-            return;
-        };
-        let len = buffer.len_bytes();
-        if cursor >= len {
-            return;
-        }
-        let tail = buffer.rope().slice_to_string(cursor..len);
-        let end_in_tail = tail
-            .grapheme_indices(true)
-            .nth(1)
-            .map_or(tail.len(), |(idx, _)| idx);
-        let range: ByteRange = cursor..cursor + end_in_tail;
-        editor
-            .buffers_mut()
-            .edit(buffer_id, range, "", EditOrigin::User);
-        editor.mark_dirty();
-    })
-    .await
-    .map_err(|_| ())
-}
-
-async fn dispatch_move_left(bus: &CommandBus) -> Result<(), ()> {
-    bus.dispatch(|editor| {
-        let Some((window_id, buffer_id, cursor)) = active_window_cursor(editor) else {
-            return;
-        };
-        if cursor == 0 {
-            return;
-        }
-        let Some(buffer) = editor.buffers().get(buffer_id) else {
-            return;
-        };
-        let text = buffer.rope().slice_to_string(0..cursor);
-        let start = text
-            .grapheme_indices(true)
-            .next_back()
-            .map_or(0, |(idx, _)| idx);
-        if let Some(window) = editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = start;
-        }
-        editor.mark_dirty();
-    })
-    .await
-    .map_err(|_| ())
-}
-
-async fn dispatch_move_right(bus: &CommandBus) -> Result<(), ()> {
-    bus.dispatch(|editor| {
-        let Some((window_id, buffer_id, cursor)) = active_window_cursor(editor) else {
-            return;
-        };
-        let Some(buffer) = editor.buffers().get(buffer_id) else {
-            return;
-        };
-        let len = buffer.len_bytes();
-        if cursor >= len {
-            return;
-        }
-        let tail = buffer.rope().slice_to_string(cursor..len);
-        let advance = tail
-            .grapheme_indices(true)
-            .nth(1)
-            .map_or(tail.len(), |(idx, _)| idx);
-        if let Some(window) = editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = cursor + advance;
-        }
-        editor.mark_dirty();
-    })
-    .await
-    .map_err(|_| ())
-}
-
-async fn dispatch_move_vertical(bus: &CommandBus, delta: i32) -> Result<(), ()> {
-    bus.dispatch(move |editor| {
-        let Some((window_id, buffer_id, cursor)) = active_window_cursor(editor) else {
-            return;
-        };
-        let Some(buffer) = editor.buffers().get(buffer_id) else {
-            return;
-        };
-        let rope = buffer.rope();
-        let current_line = rope.byte_to_line(cursor);
-        let target_line = current_line
-            .saturating_add_signed(delta as isize)
-            .min(rope.len_lines().saturating_sub(1));
-        let line_start = rope.line_to_byte(current_line);
-        let col = cursor - line_start;
-        let new_line_start = rope.line_to_byte(target_line);
-        let new_line_end = if target_line + 1 < rope.len_lines() {
-            rope.line_to_byte(target_line + 1).saturating_sub(1)
-        } else {
-            rope.len_bytes()
-        };
-        let new_cursor = (new_line_start + col).min(new_line_end);
-        if let Some(window) = editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = new_cursor;
-        }
-        editor.mark_dirty();
-    })
-    .await
-    .map_err(|_| ())
-}
-
-async fn dispatch_move_home(bus: &CommandBus) -> Result<(), ()> {
-    bus.dispatch(|editor| {
-        let Some((window_id, buffer_id, cursor)) = active_window_cursor(editor) else {
-            return;
-        };
-        let Some(buffer) = editor.buffers().get(buffer_id) else {
-            return;
-        };
-        let line = buffer.rope().byte_to_line(cursor);
-        let start = buffer.rope().line_to_byte(line);
-        if let Some(window) = editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = start;
-        }
-        editor.mark_dirty();
-    })
-    .await
-    .map_err(|_| ())
-}
-
-async fn dispatch_move_end(bus: &CommandBus) -> Result<(), ()> {
-    bus.dispatch(|editor| {
-        let Some((window_id, buffer_id, cursor)) = active_window_cursor(editor) else {
-            return;
-        };
-        let Some(buffer) = editor.buffers().get(buffer_id) else {
-            return;
-        };
-        let rope = buffer.rope();
-        let line = rope.byte_to_line(cursor);
-        let end = if line + 1 < rope.len_lines() {
-            rope.line_to_byte(line + 1).saturating_sub(1)
-        } else {
-            rope.len_bytes()
-        };
-        if let Some(window) = editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = end;
-        }
-        editor.mark_dirty();
-    })
-    .await
-    .map_err(|_| ())
-}
-
-/// Save the buffer in the active window to its on-disk path.
-///
-/// Fire-and-forget: we spawn a tokio task for the async save so the
-/// input loop can keep processing events while the write is in flight.
-/// Errors (no active window, no path, I/O failure) are logged via
-/// `tracing` — they don't block subsequent input.
-async fn dispatch_save(bus: &CommandBus) -> Result<(), ()> {
-    // Resolve which buffer to save upfront. This does mark the editor
-    // dirty so the modeline re-renders (the in-flight indicator is
-    // visible before the actual write completes).
-    let buffer_id = bus
-        .invoke(|editor| {
-            editor
-                .windows()
-                .active_data()
-                .map(|data| data.buffer_id)
-        })
-        .await
-        .map_err(|_| ())?;
-    let Some(buffer_id) = buffer_id else {
-        tracing::debug!("save: no active window");
-        return Ok(());
-    };
-
-    let bus_clone = bus.clone();
-    tokio::spawn(async move {
-        match arx_core::save_file(&bus_clone, buffer_id).await {
-            Ok(path) => tracing::info!(path = %path.display(), "saved"),
-            Err(err) => tracing::warn!(%err, "save failed"),
-        }
-        // Nudge the renderer so the modeline clears the `[+]` indicator.
-        let _ = bus_clone.dispatch(Editor::mark_dirty).await;
-    });
-    Ok(())
-}
-
-async fn dispatch_scroll(bus: &CommandBus, delta: i32) -> Result<(), ()> {
-    bus.dispatch(move |editor| {
-        let Some(window_id) = editor.windows().active() else {
-            return;
-        };
-        let Some(data) = editor.windows().get(window_id) else {
-            return;
-        };
-        let new_top = if delta >= 0 {
-            data.scroll_top_line.saturating_add(delta as usize)
-        } else {
-            data.scroll_top_line.saturating_sub((-delta) as usize)
-        };
-        if let Some(window) = editor.windows_mut().get_mut(window_id) {
-            window.scroll_top_line = new_top;
-        }
-        editor.mark_dirty();
-    })
-    .await
-    .map_err(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use arx_buffer::BufferId;
-    use arx_core::{Editor, EventLoop};
+    use arx_core::{Editor, EventLoop, WindowId};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use futures_util::stream;
     use tokio::task::JoinHandle;
 
-    /// Spawn an event loop, seed it with a fresh buffer + window, and
-    /// return the join handle plus the seed ids. Callers drop the bus
-    /// and `await` the handle to shut the loop down cleanly.
+    /// Spawn an event loop and seed it with a buffer+window. Returns
+    /// the join handle plus the seed ids.
     async fn seeded_editor() -> (JoinHandle<Editor>, CommandBus, WindowId, BufferId) {
         let (event_loop, bus) = EventLoop::new();
         let loop_handle = tokio::spawn(event_loop.run());
@@ -426,11 +163,6 @@ mod tests {
         (loop_handle, bus, window_id, buffer_id)
     }
 
-    // Wrap events in `io::Result` to match what the real crossterm
-    // `EventStream` yields, so our tests exercise the same code path the
-    // production driver goes through. Clippy's `unnecessary_wraps` lint
-    // wants us to flatten these, but that would diverge from the real
-    // item type. Silence it narrowly.
     #[allow(clippy::unnecessary_wraps)]
     fn key(code: KeyCode) -> std::io::Result<Event> {
         Ok(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
@@ -445,9 +177,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typing_a_character_inserts_and_advances_cursor() {
+    async fn typing_a_character_inserts_via_self_insert_fallback() {
         let (loop_handle, bus, window_id, buffer_id) = seeded_editor().await;
 
+        // Emacs keymap: 'X' is unbound, so this exercises the
+        // printable-fallback path.
         let events = stream::iter(vec![key(KeyCode::Char('X')), ctrl_key('q')]);
         let task = InputTask {
             events,
@@ -459,9 +193,10 @@ mod tests {
 
         let (text, cursor) = bus
             .invoke(move |editor| {
-                let text = editor.buffers().get(buffer_id).unwrap().text();
-                let cursor = editor.windows().get(window_id).unwrap().cursor_byte;
-                (text, cursor)
+                (
+                    editor.buffers().get(buffer_id).unwrap().text(),
+                    editor.windows().get(window_id).unwrap().cursor_byte,
+                )
             })
             .await
             .unwrap();
@@ -473,43 +208,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backspace_deletes_previous_grapheme() {
-        let (loop_handle, bus, _, buffer_id) = seeded_editor().await;
-
-        let events = stream::iter(vec![
-            key(KeyCode::End),
-            key(KeyCode::Backspace),
-            key(KeyCode::Backspace),
-            ctrl_key('q'),
-        ]);
-        let task = InputTask {
-            events,
-            bus: bus.clone(),
-            size: SharedTerminalSize::new(80, 24),
-            shutdown: Shutdown::new(),
-        };
-        task.run().await;
-
-        let text = bus
-            .invoke(move |editor| editor.buffers().get(buffer_id).unwrap().text())
-            .await
-            .unwrap();
-        assert_eq!(text, "hel");
-
-        drop(bus);
-        let _ = loop_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn arrow_keys_move_cursor() {
+    async fn ctrl_f_moves_cursor_right_via_emacs_binding() {
         let (loop_handle, bus, window_id, _) = seeded_editor().await;
 
-        let events = stream::iter(vec![
-            key(KeyCode::End),
-            key(KeyCode::Left),
-            key(KeyCode::Left),
-            ctrl_key('q'),
-        ]);
+        let events = stream::iter(vec![ctrl_key('f'), ctrl_key('f'), ctrl_key('q')]);
         let task = InputTask {
             events,
             bus: bus.clone(),
@@ -522,10 +224,57 @@ mod tests {
             .invoke(move |editor| editor.windows().get(window_id).unwrap().cursor_byte)
             .await
             .unwrap();
-        assert_eq!(cursor, 3);
+        assert_eq!(cursor, 2);
 
         drop(bus);
         let _ = loop_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ctrl_x_ctrl_c_requests_quit_via_keymap() {
+        let (loop_handle, bus, _, _) = seeded_editor().await;
+
+        let shutdown = Shutdown::new();
+        let events = stream::iter(vec![ctrl_key('x'), ctrl_key('c')]);
+        let task = InputTask {
+            events,
+            bus: bus.clone(),
+            size: SharedTerminalSize::new(80, 24),
+            shutdown: shutdown.clone(),
+        };
+        task.run().await;
+
+        // Input task fired shutdown because the keymap resolved
+        // `C-x C-c` → `editor.quit` → `Editor::request_quit()`.
+        assert!(shutdown.is_fired());
+
+        // The event loop has exited (quit_requested drained it), so we
+        // can't invoke the bus any more. Drop it and inspect the
+        // returned editor instead.
+        drop(bus);
+        let editor = loop_handle.await.unwrap();
+        assert!(editor.quit_requested());
+    }
+
+    #[tokio::test]
+    async fn enter_emits_newline() {
+        let (loop_handle, bus, _, buffer_id) = seeded_editor().await;
+
+        let events = stream::iter(vec![key(KeyCode::Enter), ctrl_key('x'), ctrl_key('c')]);
+        let task = InputTask {
+            events,
+            bus: bus.clone(),
+            size: SharedTerminalSize::new(80, 24),
+            shutdown: Shutdown::new(),
+        };
+        task.run().await;
+
+        // Same as above: event loop has exited due to the quit, so we
+        // read state from the returned Editor.
+        drop(bus);
+        let editor = loop_handle.await.unwrap();
+        let text = editor.buffers().get(buffer_id).unwrap().text();
+        assert_eq!(text, "\nhello");
     }
 
     #[tokio::test]
@@ -533,7 +282,7 @@ mod tests {
         let (loop_handle, bus, _, _) = seeded_editor().await;
 
         let size = SharedTerminalSize::new(40, 10);
-        let events = stream::iter(vec![Ok(Event::Resize(120, 32)), ctrl_key('q')]);
+        let events = stream::iter(vec![Ok(Event::Resize(120, 32)), ctrl_key('x'), ctrl_key('c')]);
         let task = InputTask {
             events,
             bus: bus.clone(),
@@ -543,30 +292,6 @@ mod tests {
         task.run().await;
 
         assert_eq!(size.get(), (120, 32));
-
-        drop(bus);
-        let _ = loop_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn ctrl_q_fires_shutdown_notify() {
-        let (loop_handle, bus, _, _) = seeded_editor().await;
-
-        let shutdown = Shutdown::new();
-        let events = stream::iter(vec![ctrl_key('q')]);
-        let task = InputTask {
-            events,
-            bus: bus.clone(),
-            size: SharedTerminalSize::new(80, 24),
-            shutdown: shutdown.clone(),
-        };
-
-        task.run().await;
-        // `Shutdown` is sticky, so we can check after the fact without a race.
-        assert!(shutdown.is_fired());
-        tokio::time::timeout(std::time::Duration::from_millis(100), shutdown.wait())
-            .await
-            .expect("late wait should resolve immediately");
 
         drop(bus);
         let _ = loop_handle.await.unwrap();

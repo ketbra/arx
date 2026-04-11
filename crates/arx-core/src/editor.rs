@@ -12,9 +12,24 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use arx_buffer::{Buffer, BufferId, BufferSnapshot, ByteRange, Edit, EditOrigin};
+use arx_keymap::{FeedOutcome, KeyChord, KeymapEngine, Layer, Profile};
 use tokio::sync::watch;
 
+use crate::command::CommandBus;
+use crate::registry::{CommandContext, CommandRegistry};
 use crate::window::WindowManager;
+
+/// What [`Editor::handle_key`] tells the input task to do next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyHandled {
+    /// A command resolved and was executed. No further action.
+    Executed,
+    /// Key is part of a live prefix — keep accumulating.
+    Pending,
+    /// The key was unbound; the input task should self-insert `ch` if
+    /// present (printable fallback) or ignore the key otherwise.
+    Unbound { printable_fallback: Option<char> },
+}
 
 /// The editor's in-process state.
 ///
@@ -22,17 +37,57 @@ use crate::window::WindowManager;
 /// task only — never shared across threads — so it doesn't need to be
 /// `Sync` (and isn't, deliberately, so we catch accidental cross-task use
 /// at compile time).
-#[derive(Debug, Default)]
 pub struct Editor {
     buffers: BufferManager,
     windows: WindowManager,
+    keymap: KeymapEngine,
+    commands: CommandRegistry,
     dirty: bool,
+    quit_requested: bool,
+}
+
+impl std::fmt::Debug for Editor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Editor")
+            .field("buffers", &self.buffers)
+            .field("windows", &self.windows)
+            .field("commands", &self.commands)
+            .field("dirty", &self.dirty)
+            .field("quit_requested", &self.quit_requested)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for Editor {
+    fn default() -> Self {
+        Self::with_profile(arx_keymap::profiles::default())
+    }
 }
 
 impl Editor {
-    /// Create an empty editor.
+    /// Create an empty editor with the default (Emacs) keymap profile.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create an empty editor with a specific keymap profile already
+    /// installed.
+    pub fn with_profile(profile: Profile) -> Self {
+        let mut keymap = KeymapEngine::new(profile.global);
+        if let Some((id, map)) = profile.startup_layer {
+            keymap.push_layer(Layer::new(id, map));
+        }
+        keymap.set_count_mode(profile.count_mode);
+        let mut commands = CommandRegistry::new();
+        crate::stock::register_stock(&mut commands);
+        Self {
+            buffers: BufferManager::default(),
+            windows: WindowManager::default(),
+            keymap,
+            commands,
+            dirty: false,
+            quit_requested: false,
+        }
     }
 
     /// Borrow the [`BufferManager`].
@@ -55,13 +110,29 @@ impl Editor {
         &mut self.windows
     }
 
+    /// Borrow the keymap engine.
+    pub fn keymap(&self) -> &KeymapEngine {
+        &self.keymap
+    }
+
+    /// Mutably borrow the keymap engine.
+    pub fn keymap_mut(&mut self) -> &mut KeymapEngine {
+        &mut self.keymap
+    }
+
+    /// Borrow the command registry.
+    pub fn commands(&self) -> &CommandRegistry {
+        &self.commands
+    }
+
+    /// Mutably borrow the command registry. Extensions register their
+    /// own commands through this handle in later milestones.
+    pub fn commands_mut(&mut self) -> &mut CommandRegistry {
+        &mut self.commands
+    }
+
     /// Mark the editor as "display-affecting since the last frame" so the
     /// next tick of the event loop will ping the redraw notify (if any).
-    ///
-    /// Commands that mutate visible state — buffer edits, cursor moves,
-    /// scroll changes, window swaps — should call this explicitly. Read-
-    /// only queries (e.g. the render task's `build_view_state`) must not,
-    /// otherwise the render task creates its own redraw feedback loop.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
@@ -71,6 +142,50 @@ impl Editor {
     #[must_use]
     pub fn take_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.dirty, false)
+    }
+
+    /// Request that the driver shut down cleanly. Called by the
+    /// `editor.quit` stock command.
+    pub fn request_quit(&mut self) {
+        self.quit_requested = true;
+        self.mark_dirty();
+    }
+
+    /// Whether a quit has been requested. The driver polls this after
+    /// each command and fires its shutdown signal when it flips.
+    pub fn quit_requested(&self) -> bool {
+        self.quit_requested
+    }
+
+    /// Feed a key to the keymap engine. If it resolves to a command,
+    /// invoke it inline against `&mut self`. Reports the outcome so the
+    /// input task knows whether to fall back to self-insert.
+    ///
+    /// `bus` is cloned into the [`CommandContext`] so commands can spawn
+    /// async follow-ups (e.g. `buffer.save`).
+    pub fn handle_key(&mut self, bus: &CommandBus, chord: KeyChord) -> KeyHandled {
+        match self.keymap.feed(chord) {
+            FeedOutcome::Execute { command, count } => {
+                // Clone the Arc out so we release the borrow of
+                // `self.commands` before taking `&mut self.editor`.
+                let cmd = self.commands.get(&command.name);
+                if let Some(cmd) = cmd {
+                    let mut cx = CommandContext {
+                        editor: self,
+                        bus: bus.clone(),
+                        count,
+                    };
+                    cmd.run(&mut cx);
+                } else {
+                    tracing::warn!(name = %command.name, "unknown command");
+                }
+                KeyHandled::Executed
+            }
+            FeedOutcome::Pending => KeyHandled::Pending,
+            FeedOutcome::Unbound { printable_fallback } => {
+                KeyHandled::Unbound { printable_fallback }
+            }
+        }
     }
 }
 

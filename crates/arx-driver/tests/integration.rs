@@ -23,10 +23,12 @@ fn key(code: KeyCode, mods: KeyModifiers) -> std::io::Result<Event> {
 
 #[tokio::test]
 async fn typing_ends_up_in_the_buffer_and_the_rendered_grid() {
-    // Script: type "X", then Ctrl+Q to quit.
+    // Script: type "X" (self-insert fallback), then `C-x C-c` to quit
+    // via the Emacs keymap profile's `editor.quit` binding.
     let events = stream::iter(vec![
         key(KeyCode::Char('X'), KeyModifiers::NONE),
-        key(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('c'), KeyModifiers::CONTROL),
     ]);
 
     let backend = TestBackend::new(40, 5);
@@ -66,7 +68,8 @@ async fn driver_renders_into_backend_visible_to_caller() {
 
     let events = stream::iter(vec![
         key(KeyCode::Char('X'), KeyModifiers::NONE),
-        key(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('c'), KeyModifiers::CONTROL),
     ]);
 
     let size = SharedTerminalSize::new(40, 5);
@@ -111,12 +114,16 @@ async fn ctrl_s_writes_active_buffer_to_disk() {
     writeln!(tmp, "initial").unwrap();
     let path = tmp.path().to_path_buf();
 
+    // Emacs default profile: save is `C-x C-s`, quit is `C-x C-c`.
+    // `Ctrl+S` alone would be "isearch-forward" in the full Emacs
+    // tradition; we preserve that and expose save via the chord.
     let events = stream::iter(vec![
         key(KeyCode::End, KeyModifiers::NONE),
         key(KeyCode::Char('X'), KeyModifiers::NONE),
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
         key(KeyCode::Char('s'), KeyModifiers::CONTROL),
-        // Give the background save task some time before we quit.
-        key(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('c'), KeyModifiers::CONTROL),
     ]);
 
     let backend = TestBackend::new(40, 5);
@@ -187,7 +194,8 @@ async fn modified_indicator_appears_after_edit_and_clears_after_save() {
         key(KeyCode::End, KeyModifiers::NONE),
         key(KeyCode::Char('!'), KeyModifiers::NONE),
         // After the edit, the modeline should contain [+].
-        key(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('c'), KeyModifiers::CONTROL),
     ]);
 
     let path_for_hook = path.clone();
@@ -211,7 +219,8 @@ async fn arrow_keys_move_cursor_through_driver_pipeline() {
     let events = stream::iter(vec![
         key(KeyCode::End, KeyModifiers::NONE),
         key(KeyCode::Left, KeyModifiers::NONE),
-        key(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('c'), KeyModifiers::CONTROL),
     ]);
     let backend = TestBackend::new(40, 5);
     let size = SharedTerminalSize::new(40, 5);

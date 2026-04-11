@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 arx-buffer = { workspace = true }
 arx-core = { workspace = true }
+arx-keymap = { workspace = true }
 arx-render = { workspace = true }
 crossterm = { workspace = true }
 futures-util = { workspace = true }

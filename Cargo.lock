@@ -83,10 +83,12 @@ name = "arx-core"
 version = "0.1.0"
 dependencies = [
  "arx-buffer",
+ "arx-keymap",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -95,6 +97,7 @@ version = "0.1.0"
 dependencies = [
  "arx-buffer",
  "arx-core",
+ "arx-keymap",
  "arx-render",
  "crossterm",
  "futures-util",
@@ -104,6 +107,14 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "arx-keymap"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "thiserror",
 ]
 
 [[package]]

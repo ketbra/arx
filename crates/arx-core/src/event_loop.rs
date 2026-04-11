@@ -113,6 +113,24 @@ impl EventLoop {
                 }
             }
             count = count.wrapping_add(1);
+            // A command may have requested shutdown (e.g. `editor.quit`).
+            // Drain any remaining queued commands so their dirty state
+            // still flushes, then exit. We don't try to observe anything
+            // further — the driver polls `Editor::quit_requested()` via
+            // its input path to fire its shutdown signal.
+            if self.editor.quit_requested() {
+                trace!("quit_requested; draining and exiting");
+                while let Ok(extra) = self.receiver.try_recv() {
+                    extra(&mut self.editor);
+                    if self.editor.take_dirty() {
+                        if let Some(ref n) = self.redraw {
+                            n.notify_one();
+                        }
+                    }
+                    count = count.wrapping_add(1);
+                }
+                break;
+            }
         }
         trace!(commands_executed = count, "event loop drained");
         self.editor

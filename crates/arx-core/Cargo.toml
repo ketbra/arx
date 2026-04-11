@@ -12,9 +12,11 @@ workspace = true
 
 [dependencies]
 arx-buffer = { workspace = true }
+arx-keymap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
