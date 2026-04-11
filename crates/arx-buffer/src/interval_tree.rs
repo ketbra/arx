@@ -8,9 +8,17 @@
 //! inserts or edit-driven adjustments.
 //!
 //! The representation matches the spec (see `docs/spec.md` §3.8) functionally
-//! if not yet in its asymptotic behaviour — swapping in a treap or an
-//! augmented persistent BST later is an implementation detail behind the
-//! same public API.
+//! if not yet in its asymptotic behaviour.
+//!
+//! ## `TODO(phase-2)`: migrate to `sum_tree`
+//!
+//! When we add multi-cursor selections, undo history, and anchors that need
+//! to survive concurrent edits, this whole module should be reimplemented
+//! on top of a Zed-style `sum_tree<Interval>` with `(max_end, count)` in
+//! the summary — that gives us `O(log n)` overlap queries and `O(log n)`
+//! edit application instead of the current `O(n)`. The public API
+//! (`insert` / `overlapping` / `apply_edit`) is shaped so the swap is a
+//! drop-in for callers.
 
 use std::sync::Arc;
 

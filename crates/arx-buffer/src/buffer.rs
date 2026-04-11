@@ -5,6 +5,17 @@
 //! with the old one) and publishes an immutable [`BufferSnapshot`] that
 //! callers can keep past the edit. Snapshots are `Send + Sync` so they can
 //! be handed to agents, background jobs, and the renderer without locks.
+//!
+//! ## `TODO(phase-2)`: anchors and selections
+//!
+//! Cursors, selections, scroll positions, breakpoints, and search results
+//! are all "positions that should survive edits". Today we'd track them
+//! as raw byte offsets and rely on the caller to update them — the same
+//! pattern the [`crate::PropertyMap`] uses internally. When that gets
+//! painful (multi-cursor + concurrent agent edits is the likely
+//! breaking point), introduce an `Anchor` type backed by a `sum_tree`
+//! that maps `(anchor_id) → byte_offset` automatically through the buffer's
+//! edit history. See `docs/spec.md` §8 (history/OT) and §19 q2 (CRDT).
 
 use std::sync::Arc;
 

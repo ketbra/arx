@@ -117,16 +117,21 @@ fn styled_runs_cover_entire_query() {
 
 #[test]
 fn large_buffer_is_tree_shaped_not_linear() {
-    // 1 MB payload: should produce many leaves but keep depth bounded.
+    // ~1 MB payload: should produce many leaf chunks (Ropey's internal
+    // B-tree handles its own balancing — we just verify the rope doesn't
+    // collapse into one giant leaf).
     let payload = "the quick brown fox jumps over the lazy dog\n".repeat(24_000);
     let rope = Rope::from_str(&payload);
     assert_eq!(rope.len_bytes(), payload.len());
     assert_eq!(rope.len_lines(), payload.matches('\n').count() + 1);
-    assert!(rope.depth() > 4, "expected a non-trivial tree");
-    assert!(rope.depth() <= 32, "tree too deep, rebalancing broken");
+    let chunk_count = rope.chunks().count();
+    assert!(
+        chunk_count > 16,
+        "expected the rope to be split into many chunks, got {chunk_count}"
+    );
 
     // Full round-trip.
-    assert_eq!(rope.to_string(), payload);
+    assert_eq!(rope.text(), payload);
 }
 
 #[test]
