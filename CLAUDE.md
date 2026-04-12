@@ -8,9 +8,11 @@ If this is your first session on the repo: read this file, then skim
 `docs/spec.md` §1–§5 and §18 for vision and current-phase scope.
 Everything else in the spec is forward-looking.
 
-## Current status (end of Phase 1)
+## Current status (Phase 2 in progress — splits landed)
 
-Phase 1 per spec §18 is complete. The editor has:
+Phase 1 per spec §18 is complete. Phase 2 has kicked off with
+**window splits** (the first item on the Phase 2 roadmap). The
+editor has:
 
 - A working daemon/client split with Unix-domain-socket and
   Windows-named-pipe IPC, verified by cross-compilation.
@@ -26,9 +28,17 @@ Phase 1 per spec §18 is complete. The editor has:
   `declare_extension!` macro, and `arx-driver::ext_host` +
   `ext_watcher` that load `cdylib` extensions via `libloading` with
   hot-reload on file change.
+- **(Phase 2)** Multi-pane window splits via an `arx_core::Layout`
+  tree. Horizontal / vertical splits nest arbitrarily, dividers are
+  painted between panes, the active pane is the only one that shows a
+  cursor. New stock commands: `window.split-horizontal`,
+  `window.split-vertical`, `window.close`, `window.focus-next`,
+  `window.focus-prev` — bound to `C-x 2/3/0/o` in Emacs and
+  `C-w s/v/c/q/w/W` in Vim.
 
-**382 tests green.** `cargo clippy --workspace --all-targets` clean
-under the workspace pedantic lint set.
+**295 tests green** (up from Phase 1's 274).
+`cargo clippy --workspace --all-targets` clean under the workspace
+pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.
 
 ## Crate map
@@ -89,38 +99,65 @@ without a very good reason and a commit message that says why.
   arrows) keep shift.
 - **Render task writes viewport dimensions back to `WindowData`.**
   `arx_driver::render::build_view_state` updates
-  `visible_rows` / `visible_cols` on the active window inside the
-  same `bus.invoke` closure as the state read. This is how
-  page-down, word-nav, and `Editor::ensure_active_cursor_visible`
-  know the actual text area size.
+  `visible_rows` / `visible_cols` for **every visible pane** (not
+  just the active one) inside the same `bus.invoke` closure as the
+  state read. This is how page-down, word-nav, and
+  `Editor::ensure_active_cursor_visible` know the actual text-area
+  size *in whichever pane is currently active* after a split.
 - **Stock command descriptions are `&str`, not `&'static str`.**
   The trait method takes `&self` so extension commands can return
   borrows of their runtime-owned `String`. Stock commands still
   return literals; the lifetime change is invisible to them.
+- **Two layout trees.** `arx_core::Layout` is the logical tree the
+  editor mutates (splits, closes, focus cycling). `arx_render::LayoutTree`
+  is the display projection the render layer consumes. The driver's
+  `build_view_layout` helper is the only place that converts between
+  them. Both have a `walk_pane_rects` / `walk_divider_rects`-shaped
+  API so splitters and tests agree on geometry.
+- **Splits share a buffer by default.** `window.split-horizontal` /
+  `window.split-vertical` create a new window on *the same buffer*
+  as the pane being split, giving two views of the same content.
+  Switching one of them to a different buffer is follow-up work.
+- **`window.close` refuses the last pane.** Closing the only leaf
+  would leave the render task with nothing to draw, so the command
+  is a no-op when `layout.leaves().len() <= 1`. `editor.quit` is the
+  command for exiting the editor.
+- **Inactive panes have no cursor.** `arx_render::view::render` only
+  emits a cursor for the window whose id matches
+  `ViewState::active_window`. Inactive panes still paint their text
+  but have no blinking caret, which matches every other terminal
+  editor's convention for "which pane will take my keystrokes".
 
 ## Phase 2 roadmap (spec §18)
 
 Recommended implementation order based on dependencies:
 
-1. **Window splits + layout tree** — unblocks everything else.
-   Touches `arx-core::window`, `arx-render::view_state::LayoutTree`
-   (which already has a `Split` variant stubbed out), and the
-   render loop. The existing `LayoutTree::Split` branch in
-   `arx_render::view::render` is marked `TODO(phase-2)` and ready
-   to be filled in.
+1. ~~**Window splits + layout tree**~~ — **DONE.** Nested splits
+   render correctly, commands for split / close / focus-cycle are
+   wired, per-pane viewport dimensions flow back through
+   `build_view_state`, the pure view renderer paints both panes and
+   a divider glyph. See `arx_core::Layout`,
+   `arx_render::LayoutTree::walk_pane_rects`, and
+   `arx_driver::render::build_view_layout`.
 2. **Undo tree** — self-contained in `arx-buffer` + `arx-core`.
-   Doesn't depend on splits; can run in parallel.
+   Good next pick: doesn't depend on splits and slots into the
+   existing `BufferManager::edit` path.
 3. **Tree-sitter highlighting** — plugs into
    `arx_buffer::PropertyMap` as a new property layer. Spec §4.2.
-4. **LSP client** — needs splits for hover/diagnostic popups.
+4. **LSP client** — now that splits exist it can actually paint
+   hover / diagnostic popups against a real layout.
 5. **Completion framework** — needs LSP.
 6. **Embedded terminal** — mostly standalone (termwiz-based).
 7. **Session management (attach/detach/list)** — builds on the
-   existing Level-1 persistence + daemon architecture. Mostly
-   CLI + daemon protocol work.
+   existing Level-1 persistence + daemon architecture. Note: Level-1
+   sessions **do not yet persist the layout tree** — a restored
+   session collapses to a single-leaf layout on the active window
+   (matching Phase 1's behaviour). Persisting splits across
+   restarts is follow-up work for the session-management task.
 
-**First task recommendation: window splits.** Single biggest blocker
-for every other Phase 2 feature.
+**Next task recommendation: undo tree.** Self-contained, unblocks
+nothing else, and the `BufferManager`'s edit path already exposes
+the `Edit` struct we'd need to snapshot.
 
 ## How to work here
 

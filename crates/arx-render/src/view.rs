@@ -30,13 +30,15 @@ use crate::cell::{Cell, CellFlags, CellGrid};
 use crate::face::{Color, ResolvedFace};
 use crate::render_tree::{CursorRender, CursorStyle, RenderTree};
 use crate::view_state::{
-    GutterConfig, LayoutTree, PaletteView, TerminalSize, ViewState, WindowState,
+    GutterConfig, PaletteView, Rect, SplitDirection, TerminalSize, ViewState, WindowState,
 };
 
 /// Render a complete [`ViewState`] into a [`RenderTree`].
 ///
-/// Phase 1 only draws the single-window case. Splits will be added when
-/// we thread a per-window bounding box through [`render_window`].
+/// Phase 2 handles both single-window layouts and arbitrary nested
+/// [`LayoutTree::Split`] trees. Each leaf is painted inside its
+/// computed rectangle; a 1-cell separator is painted for every
+/// internal split node.
 ///
 /// When [`GlobalState::palette`] is `Some(_)`, the bottom of the
 /// viewport is partitioned like this:
@@ -50,10 +52,12 @@ use crate::view_state::{
 ///     └─── modeline    (1 row) ────────────────────────┘
 /// ```
 ///
-/// The shrinking happens before `render_window` is called so the
-/// primary window's cursor-visibility math (which depends on
-/// [`WindowState::scroll`] and the rect height passed here) doesn't
-/// collide with the overlay.
+/// The shrinking happens before the layout walker runs so per-pane
+/// cursor-visibility math doesn't collide with the overlay.
+///
+/// The terminal cursor is only emitted for the window whose id matches
+/// [`ViewState::active_window`]. Inactive panes still paint their
+/// text, but the cursor visually lives with the focused pane.
 pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
     let TerminalSize { cols, rows } = state.size;
     let mut grid = CellGrid::new(cols, rows);
@@ -92,16 +96,24 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
         }
     }
 
-    match &state.layout {
-        LayoutTree::Single(window_id) => {
-            if let Some(window) = state.windows.iter().find(|w| w.id == *window_id) {
-                render_window(window, Rect::new(0, 0, cols, text_rows), &mut grid, &mut cursors);
-            }
+    let root_rect = Rect::new(0, 0, cols, text_rows);
+    let active = state.active_window;
+
+    // Walk the layout once to paint every visible pane inside its
+    // computed rect.
+    state.layout.walk_pane_rects(root_rect, &mut |id, rect| {
+        if let Some(window) = state.windows.iter().find(|w| w.id == id) {
+            let is_active = active == Some(id);
+            render_window(window, rect, is_active, &mut grid, &mut cursors);
         }
-        LayoutTree::Split { .. } => {
-            // TODO(phase-2): recurse into splits with per-pane bounding boxes.
-        }
-    }
+    });
+
+    // Second walk for separators between panes.
+    state
+        .layout
+        .walk_divider_rects(root_rect, &mut |rect, direction| {
+            paint_divider(&mut grid, rect, direction);
+        });
 
     if let Some(layout) = palette_layout {
         paint_palette(&layout, cols, &mut grid, &mut cursors);
@@ -112,6 +124,36 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
     }
 
     RenderTree::new(grid, cursors, frame_id)
+}
+
+/// Paint a single-cell-wide or single-row-tall separator between two
+/// panes. Uses box-drawing characters on top of the default face.
+fn paint_divider(grid: &mut CellGrid, rect: Rect, direction: SplitDirection) {
+    if rect.is_empty() {
+        return;
+    }
+    let face = ResolvedFace {
+        fg: Color::rgb(0x60, 0x60, 0x60),
+        bg: ResolvedFace::DEFAULT.bg,
+        ..ResolvedFace::DEFAULT
+    };
+    let glyph = match direction {
+        SplitDirection::Vertical => "\u{2502}",  // │
+        SplitDirection::Horizontal => "\u{2500}", // ─
+    };
+    for dy in 0..rect.height {
+        for dx in 0..rect.width {
+            grid.set(
+                rect.x + dx,
+                rect.y + dy,
+                Cell {
+                    grapheme: CompactString::new(glyph),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+        }
+    }
 }
 
 /// Pre-computed palette overlay geometry for the current frame.
@@ -128,14 +170,29 @@ struct PaletteLayout<'a> {
 }
 
 /// Render a single window into its bounding rectangle.
+///
+/// `is_active` controls whether the terminal cursor is emitted for this
+/// pane. In multi-pane layouts only the focused pane gets a cursor so
+/// users can tell at a glance which pane their keystrokes will go to.
 fn render_window(
     window: &WindowState,
     rect: Rect,
+    is_active: bool,
     grid: &mut CellGrid,
     cursors: &mut SmallVec<[CursorRender; 1]>,
 ) {
-    if rect.width == 0 || rect.height == 0 {
+    if rect.is_empty() {
         return;
+    }
+
+    // First clear the pane to the default face so leftover cells from
+    // a previous larger pane can't bleed through after a layout
+    // change. The diff layer will compress this into O(changed) ops on
+    // the next frame regardless.
+    for dy in 0..rect.height {
+        for dx in 0..rect.width {
+            grid.set(rect.x + dx, rect.y + dy, Cell::blank());
+        }
     }
 
     let buffer = &window.buffer;
@@ -175,7 +232,10 @@ fn render_window(
         }
     }
 
-    // Primary cursor position.
+    // Primary cursor position — only for the active pane.
+    if !is_active {
+        return;
+    }
     if let Some(cursor_render) = resolve_cursor(
         window.primary_cursor().byte_offset,
         window,
@@ -771,31 +831,13 @@ fn digit_count(mut n: usize) -> usize {
     c
 }
 
-// ---------------------------------------------------------------------------
-// Little helper rect
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-struct Rect {
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-}
-
-impl Rect {
-    const fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
-        Self { x, y, width, height }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use arx_buffer::{Buffer, BufferId};
     use smallvec::smallvec as sv;
 
-    use crate::view_state::{Cursor, GlobalState, ScrollPosition};
+    use crate::view_state::{Cursor, GlobalState, LayoutTree, ScrollPosition};
 
     fn window_for(text: &str) -> WindowState {
         let buf = Buffer::from_str(BufferId(1), text);
@@ -809,10 +851,12 @@ mod tests {
     }
 
     fn state_for(window: WindowState, cols: u16, rows: u16) -> ViewState {
+        let id = window.id;
         ViewState {
             size: TerminalSize::new(cols, rows),
-            layout: LayoutTree::Single(window.id),
+            layout: LayoutTree::Single(id),
             windows: vec![window],
+            active_window: Some(id),
             global: GlobalState {
                 modeline_left: String::new(),
                 modeline_right: String::new(),
@@ -1008,10 +1052,12 @@ mod tests {
     // ---- Command palette overlay ----
 
     fn state_with_palette(window: WindowState, cols: u16, rows: u16, palette: PaletteView) -> ViewState {
+        let id = window.id;
         ViewState {
             size: TerminalSize::new(cols, rows),
-            layout: LayoutTree::Single(window.id),
+            layout: LayoutTree::Single(id),
             windows: vec![window],
+            active_window: Some(id),
             global: GlobalState {
                 modeline_left: String::new(),
                 modeline_right: String::new(),
@@ -1112,5 +1158,122 @@ mod tests {
         let tree = render(&state, 0);
         assert_eq!(tree.cursors.len(), 1);
         assert_eq!(tree.cursors[0].style, CursorStyle::Bar);
+    }
+
+    // ---- Split layouts ----
+
+    fn window_with_id(id: u64, text: &str) -> WindowState {
+        let buf = Buffer::from_str(BufferId(id), text);
+        WindowState {
+            id: crate::view_state::WindowId(id),
+            buffer: buf.snapshot(),
+            cursors: sv![Cursor::at(0)],
+            scroll: ScrollPosition::default(),
+            gutter: GutterConfig::default(),
+        }
+    }
+
+    #[test]
+    fn vertical_split_paints_both_panes_and_a_divider() {
+        let left = window_with_id(1, "L1\nL2");
+        let right = window_with_id(2, "R1\nR2");
+        let state = ViewState {
+            size: TerminalSize::new(21, 4),
+            layout: LayoutTree::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutTree::Single(left.id)),
+                second: Box::new(LayoutTree::Single(right.id)),
+            },
+            windows: vec![left, right],
+            active_window: Some(crate::view_state::WindowId(1)),
+            global: GlobalState::default(),
+        };
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        // Row 0 must contain text from both panes.
+        assert!(lines[0].contains("L1"), "left pane missing: {:?}", lines[0]);
+        assert!(lines[0].contains("R1"), "right pane missing: {:?}", lines[0]);
+        // Divider column runs vertically through rows 0..text_rows.
+        // The divider char is U+2502 (│).
+        let divider_col = lines[0]
+            .chars()
+            .position(|c| c == '\u{2502}')
+            .expect("divider glyph not painted");
+        // The divider should also appear on row 1.
+        let row1 = lines[1];
+        let row1_divider = row1.chars().position(|c| c == '\u{2502}').unwrap();
+        assert_eq!(divider_col, row1_divider);
+    }
+
+    #[test]
+    fn horizontal_split_paints_both_panes_stacked() {
+        let top = window_with_id(1, "topline");
+        let bot = window_with_id(2, "botline");
+        let state = ViewState {
+            size: TerminalSize::new(20, 7),
+            layout: LayoutTree::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutTree::Single(top.id)),
+                second: Box::new(LayoutTree::Single(bot.id)),
+            },
+            windows: vec![top, bot],
+            active_window: Some(crate::view_state::WindowId(2)),
+            global: GlobalState::default(),
+        };
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        // Top pane lives on row 0 (inside its rect).
+        assert!(lines[0].contains("topline"), "top row: {:?}", lines[0]);
+        // Bottom pane lives somewhere on rows >= top-half + 1.
+        let bot_row = lines
+            .iter()
+            .position(|l| l.contains("botline"))
+            .expect("botline not painted");
+        assert!(bot_row > 0);
+    }
+
+    #[test]
+    fn inactive_pane_does_not_emit_a_cursor() {
+        let mut a = window_with_id(1, "aaa");
+        a.cursors = sv![Cursor::at(1)];
+        let mut b = window_with_id(2, "bbb");
+        b.cursors = sv![Cursor::at(2)];
+        let state = ViewState {
+            size: TerminalSize::new(21, 4),
+            layout: LayoutTree::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutTree::Single(a.id)),
+                second: Box::new(LayoutTree::Single(b.id)),
+            },
+            windows: vec![a, b],
+            active_window: Some(crate::view_state::WindowId(2)),
+            global: GlobalState::default(),
+        };
+        let tree = render(&state, 0);
+        // Exactly one cursor, and it belongs to the active (right) pane.
+        // Active window `b` has text "bbb" with cursor at byte 2 so the
+        // cursor must land somewhere in the right half of the layout
+        // (col > divider).
+        assert_eq!(tree.cursors.len(), 1);
+        let divider_col = {
+            let t = tree.cells.to_debug_text();
+            t.split('\n')
+                .next()
+                .unwrap()
+                .chars()
+                .position(|c| c == '\u{2502}')
+                .unwrap() as u16
+        };
+        assert!(
+            tree.cursors[0].col > divider_col,
+            "cursor at col {} should be right of divider at {}",
+            tree.cursors[0].col,
+            divider_col
+        );
     }
 }

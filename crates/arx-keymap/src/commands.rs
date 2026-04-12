@@ -65,3 +65,17 @@ pub const COMMAND_PALETTE_NEXT: &str = "command-palette.next";
 pub const COMMAND_PALETTE_PREV: &str = "command-palette.prev";
 /// Remove the last character from the palette query.
 pub const COMMAND_PALETTE_BACKSPACE: &str = "command-palette.backspace";
+
+/// Split the active window horizontally — stacking a new pane beneath
+/// it. Vim `:split` / Emacs `C-x 2`.
+pub const WINDOW_SPLIT_HORIZONTAL: &str = "window.split-horizontal";
+/// Split the active window vertically — placing a new pane beside it.
+/// Vim `:vsplit` / Emacs `C-x 3`.
+pub const WINDOW_SPLIT_VERTICAL: &str = "window.split-vertical";
+/// Close the active window, collapsing its enclosing split into the
+/// surviving sibling. No-op when only one window is left.
+pub const WINDOW_CLOSE: &str = "window.close";
+/// Cycle focus to the next window in depth-first layout order.
+pub const WINDOW_FOCUS_NEXT: &str = "window.focus-next";
+/// Cycle focus to the previous window in depth-first layout order.
+pub const WINDOW_FOCUS_PREV: &str = "window.focus-prev";

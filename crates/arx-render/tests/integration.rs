@@ -27,10 +27,12 @@ fn window(text: &str) -> WindowState {
 }
 
 fn state_with(window: WindowState, cols: u16, rows: u16) -> ViewState {
+    let id = window.id;
     ViewState {
         size: TerminalSize::new(cols, rows),
-        layout: LayoutTree::Single(window.id),
+        layout: LayoutTree::Single(id),
         windows: vec![window],
+        active_window: Some(id),
         global: GlobalState::default(),
     }
 }

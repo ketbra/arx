@@ -90,4 +90,4 @@ pub use file::{OpenFileError, SaveFileError, open_file, save_file, save_file_as}
 pub use palette::{CommandPalette, PaletteMatch};
 pub use registry::{Command, CommandContext, CommandRegistry};
 pub use session::{SerializedBuffer, SerializedWindow, Session, SessionFile};
-pub use window::{WindowData, WindowId, WindowManager};
+pub use window::{Layout, SplitAxis, WindowData, WindowId, WindowManager};

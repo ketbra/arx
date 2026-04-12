@@ -21,7 +21,8 @@ use crate::commands::{
     COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN, COMMAND_PALETTE_PREV, CURSOR_BUFFER_END,
     CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
     CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_QUIT,
-    MODE_ENTER_INSERT, MODE_LEAVE_INSERT, SCROLL_PAGE_DOWN, SCROLL_PAGE_UP,
+    MODE_ENTER_INSERT, MODE_LEAVE_INSERT, SCROLL_PAGE_DOWN, SCROLL_PAGE_UP, WINDOW_CLOSE,
+    WINDOW_FOCUS_NEXT, WINDOW_FOCUS_PREV, WINDOW_SPLIT_HORIZONTAL, WINDOW_SPLIT_VERTICAL,
 };
 use crate::engine::CountMode;
 use crate::keymap::Keymap;
@@ -88,6 +89,12 @@ pub fn emacs() -> Profile {
     m.bind_str("C-x C-s", BUFFER_SAVE).unwrap();
     m.bind_str("C-x C-c", EDITOR_QUIT).unwrap();
     m.bind_str("C-x C-q", EDITOR_QUIT).unwrap();
+
+    // Window splits (Emacs conventions).
+    m.bind_str("C-x 2", WINDOW_SPLIT_HORIZONTAL).unwrap();
+    m.bind_str("C-x 3", WINDOW_SPLIT_VERTICAL).unwrap();
+    m.bind_str("C-x 0", WINDOW_CLOSE).unwrap();
+    m.bind_str("C-x o", WINDOW_FOCUS_NEXT).unwrap();
 
     // Command palette.
     m.bind_str("M-x", COMMAND_PALETTE_OPEN).unwrap();
@@ -166,6 +173,13 @@ pub fn vim() -> Profile {
     // Rescue save/quit bindings that work in every mode.
     global.bind_str("C-s", BUFFER_SAVE).unwrap();
     global.bind_str("C-q", EDITOR_QUIT).unwrap();
+    // Window splits (Vim conventions — prefix is `C-w`).
+    global.bind_str("C-w s", WINDOW_SPLIT_HORIZONTAL).unwrap();
+    global.bind_str("C-w v", WINDOW_SPLIT_VERTICAL).unwrap();
+    global.bind_str("C-w c", WINDOW_CLOSE).unwrap();
+    global.bind_str("C-w q", WINDOW_CLOSE).unwrap();
+    global.bind_str("C-w w", WINDOW_FOCUS_NEXT).unwrap();
+    global.bind_str("C-w W", WINDOW_FOCUS_PREV).unwrap();
     // Command palette. `:` is Vim's usual command-line trigger; in
     // Phase 1 we point it at the generic palette since we don't have
     // a distinct ex-command-line yet.

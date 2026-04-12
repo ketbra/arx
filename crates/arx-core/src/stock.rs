@@ -18,6 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::Editor;
 use crate::registry::{Command, CommandContext, CommandRegistry};
+use crate::window::SplitAxis;
 
 /// Register every stock command into `reg`. Call once at editor start.
 pub fn register_stock(reg: &mut CommandRegistry) {
@@ -46,6 +47,11 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CommandPaletteNext);
     reg.register(CommandPalettePrev);
     reg.register(CommandPaletteBackspace);
+    reg.register(WindowSplitHorizontal);
+    reg.register(WindowSplitVertical);
+    reg.register(WindowClose);
+    reg.register(WindowFocusNext);
+    reg.register(WindowFocusPrev);
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +778,112 @@ impl CommandPaletteBackspace {
     fn run_impl(cx: &mut CommandContext<'_>) {
         cx.editor.palette_mut().backspace();
         cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Window splits
+// ---------------------------------------------------------------------------
+//
+// The split commands all go through `WindowManager::split_active` /
+// `focus_next` / `focus_prev` / `close`, which own the layout tree and
+// handle the tricky cases (collapsing a split back into its sibling
+// when a pane closes, picking a fresh active window if the closed one
+// was active, etc.). The stock commands here are thin wrappers that
+// also mark the editor dirty so the render task wakes up.
+//
+// A new pane always opens on the *same buffer* as the pane that's
+// being split, so splitting gives you two views of the same content
+// by default. Switching one of them to a different buffer is follow-up
+// work (a buffer-switcher or an `:edit` command).
+
+fn split_active_into(editor: &mut Editor, axis: SplitAxis) {
+    let Some(active) = editor.windows().active() else {
+        return;
+    };
+    let Some(buffer_id) = editor.windows().get(active).map(|d| d.buffer_id) else {
+        return;
+    };
+    if editor.windows_mut().split_active(axis, buffer_id).is_some() {
+        editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    WindowSplitHorizontal,
+    WINDOW_SPLIT_HORIZONTAL,
+    "Split the active window horizontally (new pane below)"
+);
+impl WindowSplitHorizontal {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        split_active_into(cx.editor, SplitAxis::Horizontal);
+    }
+}
+
+stock_cmd!(
+    WindowSplitVertical,
+    WINDOW_SPLIT_VERTICAL,
+    "Split the active window vertically (new pane to the right)"
+);
+impl WindowSplitVertical {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        split_active_into(cx.editor, SplitAxis::Vertical);
+    }
+}
+
+stock_cmd!(
+    WindowClose,
+    WINDOW_CLOSE,
+    "Close the active window, collapsing its split into the surviving sibling"
+);
+impl WindowClose {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some(active) = cx.editor.windows().active() else {
+            return;
+        };
+        // Refuse to close the last visible pane — otherwise the render
+        // task has nothing to draw and commands like cursor motions
+        // silently no-op. `editor.quit` is the command for exiting.
+        let leaf_count = cx
+            .editor
+            .windows()
+            .layout()
+            .map_or(0, |l| l.leaves().len());
+        if leaf_count <= 1 {
+            return;
+        }
+        if cx.editor.windows_mut().close(active) {
+            cx.editor.mark_dirty();
+            cx.editor.ensure_active_cursor_visible();
+        }
+    }
+}
+
+stock_cmd!(
+    WindowFocusNext,
+    WINDOW_FOCUS_NEXT,
+    "Cycle focus to the next window in the layout"
+);
+impl WindowFocusNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.windows_mut().focus_next().is_some() {
+            cx.editor.mark_dirty();
+            cx.editor.ensure_active_cursor_visible();
+        }
+    }
+}
+
+stock_cmd!(
+    WindowFocusPrev,
+    WINDOW_FOCUS_PREV,
+    "Cycle focus to the previous window in the layout"
+);
+impl WindowFocusPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.windows_mut().focus_prev().is_some() {
+            cx.editor.mark_dirty();
+            cx.editor.ensure_active_cursor_visible();
+        }
     }
 }
 
