@@ -118,11 +118,18 @@ pub async fn open_file(
         .invoke(move |editor| {
             let buffer_id = editor
                 .buffers_mut()
-                .create_from_text(&contents, Some(stored_path));
+                .create_from_text(&contents, Some(stored_path.clone()));
             if let Some(buf) = editor.buffers_mut().get_mut(buffer_id) {
                 // Brand-new buffer loaded from disk: already clean.
                 buf.mark_saved();
             }
+            // Attach syntax highlighting if the file extension maps
+            // to a known grammar.
+            let ext = stored_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_owned);
+            editor.attach_highlight(buffer_id, ext.as_deref());
             let window_id = editor.windows_mut().open(buffer_id);
             editor.windows_mut().set_active(window_id);
             editor.mark_dirty();

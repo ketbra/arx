@@ -5,6 +5,7 @@ members = [
     "crates/arx-buffer",
     "crates/arx-core",
     "crates/arx-driver",
+    "crates/arx-highlight",
     "crates/arx-keymap",
     "crates/arx-protocol",
     "crates/arx-render",
@@ -28,6 +29,7 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 arx-buffer = { path = "crates/arx-buffer" }
+arx-highlight = { path = "crates/arx-highlight" }
 arx-core = { path = "crates/arx-core" }
 arx-render = { path = "crates/arx-render" }
 arx-driver = { path = "crates/arx-driver" }

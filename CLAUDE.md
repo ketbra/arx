@@ -8,11 +8,11 @@ If this is your first session on the repo: read this file, then skim
 `docs/spec.md` §1–§5 and §18 for vision and current-phase scope.
 Everything else in the spec is forward-looking.
 
-## Current status (Phase 2 in progress — splits + undo tree landed)
+## Current status (Phase 2 in progress — splits + undo tree + tree-sitter)
 
-Phase 1 per spec §18 is complete. Phase 2 has two of seven items
-done: **window splits** (item 1) and **undo tree** (item 2). The
-editor has:
+Phase 1 per spec §18 is complete. Phase 2 has three of seven items
+done: **window splits** (item 1), **undo tree** (item 2), and
+**tree-sitter highlighting** (item 3). The editor has:
 
 - A working daemon/client split with Unix-domain-socket and
   Windows-named-pipe IPC, verified by cross-compilation.
@@ -55,7 +55,24 @@ editor has:
   history isn't lost. Bound to `C-/`, `C-_`, `C-x u` (undo) and
   `M-_` (redo) in Emacs; `u` and `C-r` in Vim normal mode.
 
-**326 tests green** (up from Phase 1's 274).
+- **(Phase 2)** **Tree-sitter syntax highlighting** via the new
+  `arx-highlight` crate. Bundled grammars for Rust, Python, C, and
+  JSON; a `LanguageRegistry` maps file extensions to grammars; a
+  `Theme` (One-Dark-flavoured) maps capture names to
+  `arx_buffer::Face` values with hierarchical fallback. A per-buffer
+  `Highlighter` holds the parser + tree + compiled query; incremental
+  re-parse on each edit is typically sub-millisecond. Highlights are
+  written as `PropertyValue::Decoration(Face)` into the buffer's
+  `"syntax"` property layer with `InvalidateOnEdit` policy — the
+  render pipeline picks them up via the existing
+  `PropertyMap::styled_runs` path with zero changes to `arx-render`.
+  `Editor::edit_with_highlight` and `Editor::attach_highlight` wire
+  it into the edit and file-open paths; gated behind a `syntax`
+  Cargo feature on `arx-core` (default-on) so the workspace can
+  still cross-compile for `x86_64-pc-windows-gnu` without a MinGW
+  C compiler.
+
+**338 tests green** (up from Phase 1's 274).
 `cargo clippy --workspace --all-targets` clean under the workspace
 pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.
@@ -65,7 +82,8 @@ pedantic lint set.
 | Crate | Role |
 |---|---|
 | `arx-buffer` | Rope buffer, property map, interval tree, buffer snapshots. |
-| `arx-core` | `Editor`, event loop, command bus, buffer/window managers, session, palette, stock commands. Single-writer state lives here. |
+| `arx-core` | `Editor`, event loop, command bus, buffer/window managers, session, palette, stock commands. Single-writer state lives here. Depends on `arx-highlight` (feature-gated behind `syntax`). |
+| `arx-highlight` | Tree-sitter syntax highlighting. `HighlightManager`, per-buffer `Highlighter`, `LanguageRegistry`, `Theme`. Depends on `tree-sitter` + grammar crates (C build via `cc`). |
 | `arx-keymap` | Keymap engine, chord parser, Emacs + Vim profiles, command name constants. |
 | `arx-render` | `ViewState → RenderTree → Diff → Backend`. Includes `CrosstermBackend` and `TestBackend`. |
 | `arx-protocol` | Wire types, postcard framing, cross-platform IPC transport. |
@@ -193,8 +211,13 @@ Recommended implementation order based on dependencies:
    `last_active_child` picks the most recently visited branch for
    redo. Not yet exposed: branch-next/prev keybindings and an undo
    visualiser (both straightforward follow-ups).
-3. **Tree-sitter highlighting** — plugs into
-   `arx_buffer::PropertyMap` as a new property layer. Spec §4.2.
+3. ~~**Tree-sitter highlighting**~~ — **DONE.** `arx-highlight`
+   crate with bundled grammars (Rust, Python, C, JSON), One-Dark
+   theme, per-buffer `Highlighter` with incremental re-parse.
+   Highlights flow through `PropertyMap::styled_runs` into the
+   render pipeline with no renderer changes. Gated behind
+   `arx-core`'s `syntax` Cargo feature for environments without
+   a C cross-compiler.
 4. **LSP client** — now that splits exist it can actually paint
    hover / diagnostic popups against a real layout.
 5. **Completion framework** — needs LSP.
@@ -207,11 +230,9 @@ Recommended implementation order based on dependencies:
    state capture. Undo trees are **not** persisted to disk yet;
    that's a follow-up.
 
-**Next task recommendation: tree-sitter highlighting.** The
-rendering pipeline already honours `PropertyMap` styled runs, so
-the work is mostly about wiring up a tree-sitter parser (and its
-grammars) as a new property layer and scheduling incremental
-re-parses on buffer edits.
+**Next task recommendation: LSP client.** Now that splits and
+highlighting exist, LSP hover/diagnostic popups have a real layout
+to paint against and syntax tokens to cross-reference.
 
 ## How to work here
 
@@ -219,7 +240,9 @@ Common commands:
 
 - Run all tests: `cargo test --workspace`
 - Clippy (workspace pedantic lint set): `cargo clippy --workspace --all-targets`
-- Windows cross-check: `cargo check --workspace --target x86_64-pc-windows-gnu`
+- Windows cross-check (pure-Rust crates only — `arx-highlight` needs
+  MinGW for tree-sitter's C build):
+  `cargo check --workspace --target x86_64-pc-windows-gnu --exclude arx-highlight --exclude arx-core --exclude arx-driver --exclude arx-sdk --exclude ext-hello --exclude arx`
   (one-off `rustup target add x86_64-pc-windows-gnu` first).
 - Run the daemon locally: `cargo run --bin arx -- daemon --no-session --no-extensions`
   (skips persistence + extension loading for quick iteration).

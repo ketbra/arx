@@ -428,9 +428,9 @@ fn user_edit(
     let offset = range.start;
     let inserted_text = text.to_owned();
 
+    // Apply the edit and update syntax highlights in one step.
     let applied = editor
-        .buffers_mut()
-        .edit(buffer_id, range, text, EditOrigin::User)
+        .edit_with_highlight(buffer_id, range, text, EditOrigin::User)
         .is_some();
     if !applied {
         return false;

@@ -10,8 +10,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["syntax"]
+syntax = ["dep:arx-highlight"]
+
 [dependencies]
 arx-buffer = { workspace = true }
+arx-highlight = { workspace = true, optional = true }
 arx-keymap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -17,6 +17,9 @@ use tokio::sync::watch;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+#[cfg(feature = "syntax")]
+use arx_highlight::HighlightManager;
+
 use crate::command::CommandBus;
 use crate::palette::CommandPalette;
 use crate::registry::{CommandContext, CommandRegistry};
@@ -46,6 +49,8 @@ pub struct Editor {
     keymap: KeymapEngine,
     commands: CommandRegistry,
     palette: CommandPalette,
+    #[cfg(feature = "syntax")]
+    highlight: HighlightManager,
     dirty: bool,
     quit_requested: bool,
 }
@@ -91,6 +96,8 @@ impl Editor {
             keymap,
             commands,
             palette: CommandPalette::new(),
+            #[cfg(feature = "syntax")]
+            highlight: HighlightManager::new(),
             dirty: false,
             quit_requested: false,
         }
@@ -145,6 +152,44 @@ impl Editor {
     /// Mutably borrow the command palette state.
     pub fn palette_mut(&mut self) -> &mut CommandPalette {
         &mut self.palette
+    }
+
+    /// Attach syntax highlighting to `buffer_id` based on `extension`.
+    /// No-op if the extension doesn't map to a known grammar or if the
+    /// `syntax` feature is disabled. Uses disjoint field borrowing so
+    /// the highlight manager and buffer manager can both be touched
+    /// without a double-borrow.
+    pub fn attach_highlight(
+        &mut self,
+        id: arx_buffer::BufferId,
+        extension: Option<&str>,
+    ) {
+        #[cfg(feature = "syntax")]
+        if let Some(buffer) = self.buffers.get_mut(id) {
+            self.highlight.attach_buffer(buffer, extension);
+        }
+        #[cfg(not(feature = "syntax"))]
+        { let _ = (id, extension); }
+    }
+
+    /// Apply a user edit to `buffer_id` and update syntax highlights
+    /// in one step. Uses disjoint field borrowing so the highlight
+    /// manager and the buffer manager can both be touched in the same
+    /// call without a double-borrow. Falls back to a plain
+    /// `buffers.edit()` when the `syntax` feature is disabled.
+    pub fn edit_with_highlight(
+        &mut self,
+        id: arx_buffer::BufferId,
+        range: arx_buffer::ByteRange,
+        text: &str,
+        origin: arx_buffer::EditOrigin,
+    ) -> Option<arx_buffer::Edit> {
+        let edit = self.buffers.edit(id, range, text, origin)?;
+        #[cfg(feature = "syntax")]
+        if let Some(buffer) = self.buffers.get_mut(id) {
+            self.highlight.on_edit(buffer, &edit);
+        }
+        Some(edit)
     }
 
     /// Handle a printable character that the keymap layer reported as
