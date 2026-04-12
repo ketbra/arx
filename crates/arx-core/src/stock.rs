@@ -58,6 +58,11 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(BufferRedo);
     reg.register(LspNextDiagnostic);
     reg.register(LspPrevDiagnostic);
+    reg.register(CompletionTrigger);
+    reg.register(CompletionAccept);
+    reg.register(CompletionDismiss);
+    reg.register(CompletionNext);
+    reg.register(CompletionPrev);
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,6 +1157,166 @@ impl LspPrevDiagnostic {
             }
             cx.editor.mark_dirty();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Completion popup
+// ---------------------------------------------------------------------------
+//
+// `completion.trigger` collects word-boundary context around the
+// cursor and opens the popup with a placeholder list. The actual
+// LSP `textDocument/completion` request is async and happens via
+// the driver's LspManager; this command just opens the popup UI.
+// For MVP, the command also pushes the `completion` keymap layer
+// so subsequent keystrokes route to popup navigation.
+
+fn leave_completion_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("completion") {
+        editor.keymap_mut().pop_layer();
+    }
+}
+
+/// Walk backward from `cursor` to find the start of the current
+/// word (the "completion prefix"). This is the `anchor` that
+/// `completion.accept` will replace from.
+fn completion_anchor(text: &str, cursor: usize) -> usize {
+    let head = &text[..cursor];
+    head.rfind(|c: char| !c.is_alphanumeric() && c != '_')
+        .map_or(0, |i| {
+            // `i` is the byte index of the non-word char; anchor is
+            // one past it.
+            i + head[i..].chars().next().map_or(1, char::len_utf8)
+        })
+}
+
+stock_cmd!(
+    CompletionTrigger,
+    COMPLETION_TRIGGER,
+    "Trigger code completion at the cursor"
+);
+impl CompletionTrigger {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // If the completion popup is already open, do nothing.
+        if cx.editor.completion().is_open() {
+            return;
+        }
+        let Some((_window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let text = buffer.text();
+        let anchor = completion_anchor(&text, cursor);
+        let prefix = &text[anchor..cursor];
+
+        // Collect simple word completions from the buffer itself as
+        // a baseline. This works even without an LSP server.
+        let mut seen = std::collections::HashSet::new();
+        let mut items = Vec::new();
+        for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if word.len() < 2 || !word.starts_with(prefix) || word == prefix {
+                continue;
+            }
+            if seen.insert(word.to_owned()) {
+                items.push(crate::completion::CompletionItem {
+                    insert_text: word.to_owned(),
+                    label: word.to_owned(),
+                    detail: None,
+                    kind: None,
+                });
+            }
+            if items.len() >= 50 {
+                break;
+            }
+        }
+
+        if items.is_empty() {
+            return;
+        }
+
+        cx.editor.completion_mut().show(items, anchor);
+
+        // Push the completion keymap layer.
+        if !cx.editor.keymap().has_layer("completion") {
+            cx.editor.keymap_mut().push_layer(Layer::new(
+                LayerId::from("completion"),
+                Arc::new(arx_keymap::profiles::completion_layer()),
+            ));
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CompletionAccept,
+    COMPLETION_ACCEPT,
+    "Accept the selected completion item"
+);
+impl CompletionAccept {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        if !cx.editor.completion().is_open() {
+            return;
+        }
+        let anchor = cx.editor.completion().anchor();
+        let item = cx.editor.completion().selected_item().cloned();
+        cx.editor.completion_mut().dismiss();
+        leave_completion_layer(cx.editor);
+        let Some(item) = item else {
+            return;
+        };
+        // Replace anchor..cursor with the insert text.
+        let range = anchor..cursor;
+        user_edit(
+            cx.editor,
+            window_id,
+            buffer_id,
+            range,
+            &item.insert_text,
+            anchor,
+            anchor + item.insert_text.len(),
+        );
+    }
+}
+
+stock_cmd!(
+    CompletionDismiss,
+    COMPLETION_DISMISS,
+    "Dismiss the completion popup"
+);
+impl CompletionDismiss {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.completion_mut().dismiss();
+        leave_completion_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CompletionNext,
+    COMPLETION_NEXT,
+    "Move the completion selection down one row"
+);
+impl CompletionNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.completion_mut().select_next();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CompletionPrev,
+    COMPLETION_PREV,
+    "Move the completion selection up one row"
+);
+impl CompletionPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.completion_mut().select_prev();
+        cx.editor.mark_dirty();
     }
 }
 

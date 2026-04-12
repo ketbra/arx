@@ -21,6 +21,7 @@ use unicode_width::UnicodeWidthStr;
 use arx_highlight::HighlightManager;
 
 use crate::command::CommandBus;
+use crate::completion::CompletionPopup;
 use crate::palette::CommandPalette;
 use crate::registry::{CommandContext, CommandRegistry};
 use crate::window::WindowManager;
@@ -49,6 +50,7 @@ pub struct Editor {
     keymap: KeymapEngine,
     commands: CommandRegistry,
     palette: CommandPalette,
+    completion: CompletionPopup,
     #[cfg(feature = "syntax")]
     highlight: HighlightManager,
     #[cfg(feature = "lsp")]
@@ -98,6 +100,7 @@ impl Editor {
             keymap,
             commands,
             palette: CommandPalette::new(),
+            completion: CompletionPopup::new(),
             #[cfg(feature = "syntax")]
             highlight: HighlightManager::new(),
             #[cfg(feature = "lsp")]
@@ -194,6 +197,16 @@ impl Editor {
             self.highlight.on_edit(buffer, &edit);
         }
         Some(edit)
+    }
+
+    /// Borrow the completion popup state.
+    pub fn completion(&self) -> &CompletionPopup {
+        &self.completion
+    }
+
+    /// Mutably borrow the completion popup state.
+    pub fn completion_mut(&mut self) -> &mut CompletionPopup {
+        &mut self.completion
     }
 
     /// Set the LSP event notifier. Called by the driver at startup

@@ -346,6 +346,40 @@ pub struct GlobalState {
     /// reserve the corresponding rows before drawing the primary
     /// window.
     pub palette: Option<PaletteView>,
+    /// Completion popup overlay state. `None` when no completion is
+    /// in progress. `Some(...)` means the view layer should paint a
+    /// popup near the cursor.
+    pub completion: Option<CompletionView>,
+}
+
+/// What the view layer needs to draw a completion popup. A direct
+/// projection of `arx_core::CompletionPopup` flattened into
+/// display-friendly types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionView {
+    /// The completion items.
+    pub items: Vec<CompletionEntry>,
+    /// Index into `items` for the highlighted row.
+    pub selected: usize,
+    /// Maximum number of rows to draw.
+    pub max_rows: u16,
+    /// Column where the popup should be anchored (typically the
+    /// cursor column at the time completion was triggered).
+    pub anchor_col: u16,
+    /// Row where the popup should start (typically just below the
+    /// cursor row).
+    pub anchor_row: u16,
+}
+
+/// One row in the completion popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionEntry {
+    /// The label displayed in the popup.
+    pub label: String,
+    /// Optional detail shown beside the label.
+    pub detail: String,
+    /// Kind indicator (`"fn"`, `"var"`, ...).
+    pub kind: String,
 }
 
 /// What the view layer needs to know to draw a command-palette

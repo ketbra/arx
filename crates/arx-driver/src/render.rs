@@ -21,9 +21,9 @@ use tracing::{debug, trace, warn};
 
 use arx_core::{CommandBus, Layout as CoreLayout, SplitAxis, WindowId as CoreWindowId};
 use arx_render::{
-    Backend, Cursor, GlobalState, GutterConfig, LayoutTree, PaletteEntry, PaletteView, Rect,
-    RenderTree, ScrollPosition, SplitDirection, TerminalSize, ViewState,
-    WindowId as ViewWindowId, WindowState, diff, initial_paint, render,
+    Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree,
+    PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SplitDirection, TerminalSize,
+    ViewState, WindowId as ViewWindowId, WindowState, diff, initial_paint, render,
 };
 
 use crate::state::{SharedTerminalSize, Shutdown};
@@ -315,6 +315,44 @@ fn build_global_state(
     } else {
         None
     };
+    let completion_view = if editor.completion().is_open() {
+        const MAX_COMPLETION_ROWS: u16 = 8;
+        let items = editor
+            .completion()
+            .items()
+            .iter()
+            .map(|i| CompletionEntry {
+                label: i.label.clone(),
+                detail: i.detail.clone().unwrap_or_default(),
+                kind: i.kind.clone().unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        // Compute anchor position: where the cursor is on screen.
+        let cursor_line = snapshot
+            .rope()
+            .byte_to_line(active_data.cursor_byte);
+        let cursor_row =
+            cursor_line.saturating_sub(active_data.scroll_top_line) as u16;
+        let line_start = snapshot.rope().line_to_byte(cursor_line);
+        let cursor_col = (active_data.cursor_byte - line_start) as u16;
+        // Account for gutter width.
+        let gutter_w = if GutterConfig::default().line_numbers {
+            let digits = digit_count(snapshot.rope().len_lines().max(1));
+            (digits.max(GutterConfig::default().min_width as usize) as u16) + 1
+        } else {
+            0
+        };
+        Some(CompletionView {
+            items,
+            selected: editor.completion().selected_index(),
+            max_rows: MAX_COMPLETION_ROWS,
+            anchor_col: gutter_w + cursor_col,
+            anchor_row: cursor_row,
+        })
+    } else {
+        None
+    };
+
     Some(GlobalState {
         modeline_left: format!(
             "{label}{modified_tag}  (ln {}/{})",
@@ -323,6 +361,7 @@ fn build_global_state(
         ),
         modeline_right: format!("{} bytes", text.len()),
         palette: palette_view,
+        completion: completion_view,
     })
 }
 

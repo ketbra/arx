@@ -18,7 +18,8 @@ use std::sync::Arc;
 use crate::commands::{
     BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_NEWLINE, BUFFER_REDO, BUFFER_SAVE,
     BUFFER_UNDO, COMMAND_PALETTE_BACKSPACE, COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE,
-    COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN, COMMAND_PALETTE_PREV, CURSOR_BUFFER_END,
+    COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN, COMMAND_PALETTE_PREV, COMPLETION_ACCEPT,
+    COMPLETION_DISMISS, COMPLETION_NEXT, COMPLETION_PREV, COMPLETION_TRIGGER, CURSOR_BUFFER_END,
     CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
     CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_QUIT,
     LSP_NEXT_DIAGNOSTIC, LSP_PREV_DIAGNOSTIC, MODE_ENTER_INSERT, MODE_LEAVE_INSERT,
@@ -99,6 +100,9 @@ pub fn emacs() -> Profile {
     m.bind_str("C-x u", BUFFER_UNDO).unwrap();
     m.bind_str("M-_", BUFFER_REDO).unwrap();
 
+    // Completion.
+    m.bind_str("M-/", COMPLETION_TRIGGER).unwrap();
+
     // Diagnostic navigation.
     m.bind_str("M-n", LSP_NEXT_DIAGNOSTIC).unwrap();
     m.bind_str("M-p", LSP_PREV_DIAGNOSTIC).unwrap();
@@ -143,6 +147,26 @@ pub fn palette_layer() -> Keymap {
     m.bind_str("C-p", COMMAND_PALETTE_PREV).unwrap();
     m.bind_str("C-n", COMMAND_PALETTE_NEXT).unwrap();
     m.bind_str("<Backspace>", COMMAND_PALETTE_BACKSPACE).unwrap();
+    m
+}
+
+/// Keymap pushed when the completion popup opens. `<Tab>` / `<Enter>`
+/// accept, `<Esc>` dismisses, `<Up>` / `<Down>` (or `C-p` / `C-n`)
+/// navigate. Unbound printable keys fall through to self-insert,
+/// which is what the user expects — typing more characters with the
+/// popup open should narrow the filter (though actual filtering is a
+/// follow-up; for now the popup just stays open until the user
+/// accepts or dismisses).
+pub fn completion_layer() -> Keymap {
+    let mut m = Keymap::named("completion");
+    m.bind_str("<Tab>", COMPLETION_ACCEPT).unwrap();
+    m.bind_str("<Enter>", COMPLETION_ACCEPT).unwrap();
+    m.bind_str("<Esc>", COMPLETION_DISMISS).unwrap();
+    m.bind_str("C-g", COMPLETION_DISMISS).unwrap();
+    m.bind_str("<Up>", COMPLETION_PREV).unwrap();
+    m.bind_str("<Down>", COMPLETION_NEXT).unwrap();
+    m.bind_str("C-p", COMPLETION_PREV).unwrap();
+    m.bind_str("C-n", COMPLETION_NEXT).unwrap();
     m
 }
 
@@ -193,6 +217,8 @@ pub fn vim() -> Profile {
     global.bind_str("C-w q", WINDOW_CLOSE).unwrap();
     global.bind_str("C-w w", WINDOW_FOCUS_NEXT).unwrap();
     global.bind_str("C-w W", WINDOW_FOCUS_PREV).unwrap();
+    // Completion (works in insert mode via the global layer).
+    global.bind_str("C-x C-o", COMPLETION_TRIGGER).unwrap();
     // Command palette. `:` is Vim's usual command-line trigger; in
     // Phase 1 we point it at the generic palette since we don't have
     // a distinct ex-command-line yet.

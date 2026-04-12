@@ -90,3 +90,14 @@ pub const WINDOW_FOCUS_PREV: &str = "window.focus-prev";
 pub const LSP_NEXT_DIAGNOSTIC: &str = "lsp.next-diagnostic";
 /// Jump to the previous diagnostic in the current buffer.
 pub const LSP_PREV_DIAGNOSTIC: &str = "lsp.prev-diagnostic";
+
+/// Trigger code completion at the cursor position.
+pub const COMPLETION_TRIGGER: &str = "completion.trigger";
+/// Accept the currently-selected completion item.
+pub const COMPLETION_ACCEPT: &str = "completion.accept";
+/// Dismiss the completion popup.
+pub const COMPLETION_DISMISS: &str = "completion.dismiss";
+/// Move the completion selection down one row.
+pub const COMPLETION_NEXT: &str = "completion.next";
+/// Move the completion selection up one row.
+pub const COMPLETION_PREV: &str = "completion.prev";

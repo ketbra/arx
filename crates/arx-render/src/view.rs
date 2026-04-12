@@ -119,6 +119,10 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
         paint_palette(&layout, cols, &mut grid, &mut cursors);
     }
 
+    if let Some(ref completion) = state.global.completion {
+        paint_completion(completion, cols, text_rows, &mut grid);
+    }
+
     if let Some(row) = modeline_row {
         render_modeline(&state.global, row, cols, &mut grid);
     }
@@ -811,6 +815,131 @@ fn render_modeline(global: &crate::view_state::GlobalState, row: u16, cols: u16,
 
 /// Compute the width of the gutter for a window. Ensures the largest
 /// visible line number fits in the gutter (plus one cell of padding).
+#[allow(clippy::too_many_lines)]
+/// Paint a completion popup near the cursor. The popup is a small
+/// floating box showing completion items with the selected one
+/// highlighted. Positioned just below the anchor row, clamped to
+/// fit within the terminal.
+fn paint_completion(
+    view: &crate::view_state::CompletionView,
+    cols: u16,
+    max_height: u16,
+    grid: &mut CellGrid,
+) {
+    if view.items.is_empty() {
+        return;
+    }
+    let visible_rows = view.max_rows.min(view.items.len() as u16).min(max_height);
+    if visible_rows == 0 {
+        return;
+    }
+    // Position: just below the anchor row, at the anchor column.
+    let start_row = (view.anchor_row + 1).min(max_height.saturating_sub(visible_rows));
+    let start_col = view.anchor_col.min(cols.saturating_sub(1));
+
+    // Compute popup width: max label length + kind + padding, capped.
+    let max_label: u16 = view
+        .items
+        .iter()
+        .map(|e| e.label.len() as u16 + if e.kind.is_empty() { 0 } else { e.kind.len() as u16 + 1 })
+        .max()
+        .unwrap_or(10)
+        .clamp(10, 40);
+    let popup_width = (max_label + 4).min(cols - start_col);
+
+    let normal_face = ResolvedFace {
+        fg: Color::rgb(0xD0, 0xD0, 0xD0),
+        bg: Color::rgb(0x2C, 0x2C, 0x3C),
+        ..ResolvedFace::DEFAULT
+    };
+    let selected_face = ResolvedFace {
+        fg: Color::BLACK,
+        bg: Color::rgb(0x61, 0xAF, 0xEF),
+        bold: true,
+        ..ResolvedFace::DEFAULT
+    };
+    let kind_face = ResolvedFace {
+        fg: Color::rgb(0xE5, 0xC0, 0x7B),
+        bg: normal_face.bg,
+        ..ResolvedFace::DEFAULT
+    };
+    let kind_selected_face = ResolvedFace {
+        fg: Color::rgb(0x30, 0x30, 0x30),
+        bg: selected_face.bg,
+        ..ResolvedFace::DEFAULT
+    };
+
+    // Scroll to keep selection visible.
+    let scroll_top = if view.selected < visible_rows as usize {
+        0
+    } else {
+        view.selected - visible_rows as usize + 1
+    };
+
+    for row_idx in 0..visible_rows {
+        let y = start_row + row_idx;
+        if y >= max_height {
+            break;
+        }
+        let item_idx = scroll_top + row_idx as usize;
+        let Some(entry) = view.items.get(item_idx) else {
+            continue;
+        };
+        let is_sel = item_idx == view.selected;
+        let face = if is_sel { selected_face } else { normal_face };
+        let kf = if is_sel { kind_selected_face } else { kind_face };
+
+        // Clear the row.
+        for dx in 0..popup_width {
+            grid.set(
+                start_col + dx,
+                y,
+                Cell {
+                    grapheme: CompactString::const_new(" "),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+        }
+        // Paint kind indicator.
+        let mut x = start_col + 1;
+        if !entry.kind.is_empty() {
+            for ch in entry.kind.chars() {
+                if x >= start_col + popup_width {
+                    break;
+                }
+                grid.set(
+                    x,
+                    y,
+                    Cell {
+                        grapheme: CompactString::new(ch.encode_utf8(&mut [0; 4])),
+                        face: kf,
+                        flags: CellFlags::empty(),
+                    },
+                );
+                x += 1;
+            }
+            x += 1; // space after kind
+        }
+        // Paint label.
+        for ch in entry.label.chars() {
+            if x >= start_col + popup_width - 1 {
+                break;
+            }
+            grid.set(
+                x,
+                y,
+                Cell {
+                    grapheme: CompactString::new(ch.encode_utf8(&mut [0; 4])),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+            x += 1;
+        }
+    }
+}
+
 fn compute_gutter_width(config: GutterConfig, last_line: usize) -> u16 {
     if !config.line_numbers {
         return 0;
@@ -861,6 +990,7 @@ mod tests {
                 modeline_left: String::new(),
                 modeline_right: String::new(),
                 palette: None,
+                completion: None,
             },
         }
     }
@@ -1062,6 +1192,7 @@ mod tests {
                 modeline_left: String::new(),
                 modeline_right: String::new(),
                 palette: Some(palette),
+                completion: None,
             },
         }
     }

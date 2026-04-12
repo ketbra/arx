@@ -8,12 +8,12 @@ If this is your first session on the repo: read this file, then skim
 `docs/spec.md` §1–§5 and §18 for vision and current-phase scope.
 Everything else in the spec is forward-looking.
 
-## Current status (Phase 2 in progress — splits + undo tree + tree-sitter + LSP)
+## Current status (Phase 2 in progress — splits + undo tree + tree-sitter + LSP + completion)
 
-Phase 1 per spec §18 is complete. Phase 2 has four of seven items
+Phase 1 per spec §18 is complete. Phase 2 has five of seven items
 done: **window splits** (item 1), **undo tree** (item 2),
-**tree-sitter highlighting** (item 3), and **LSP client** (item 4).
-The editor has:
+**tree-sitter highlighting** (item 3), **LSP client** (item 4),
+and **completion framework** (item 5). The editor has:
 
 - A working daemon/client split with Unix-domain-socket and
   Windows-named-pipe IPC, verified by cross-compilation.
@@ -90,6 +90,19 @@ The editor has:
   from the edit and file-open paths. Diagnostic navigation commands
   `lsp.next-diagnostic` / `lsp.prev-diagnostic` bound to `M-n`/`M-p`
   in Emacs, `]d`/`[d` in Vim normal mode.
+
+- **(Phase 2)** **Completion framework** with a popup overlay near
+  the cursor. `CompletionPopup` on `Editor` holds the item list,
+  selection index, and anchor byte offset. The renderer paints a
+  floating box with highlighted-row selection (scrollable, max 8
+  rows). MVP trigger (`completion.trigger` / `M-/` in Emacs,
+  `C-x C-o` in Vim) collects word-based completions from the buffer
+  itself; LSP-based `textDocument/completion` is ready to plug in
+  (the transport supports it, just needs an async dispatch path).
+  A `completion` keymap layer routes `<Tab>`/`<Enter>` to accept,
+  `<Esc>` to dismiss, `<Up>`/`<Down>` (`C-p`/`C-n`) to navigate.
+  Accepting replaces the prefix (`anchor..cursor`) with the selected
+  item's insert text via the `user_edit` path (so it's undoable).
 
 **352 tests green** (up from Phase 1's 274).
 `cargo clippy --workspace --all-targets` clean under the workspace
@@ -251,7 +264,11 @@ Recommended implementation order based on dependencies:
    `"diagnostics"` property layer via the `CommandBus`. A dedicated
    per-server notification task handles server → editor dispatching
    so the main event loop is never blocked on LSP I/O.
-5. **Completion framework** — needs LSP.
+5. ~~**Completion framework**~~ — **DONE.** `CompletionPopup` state
+   on `Editor`, floating popup overlay in the renderer, word-based
+   trigger as MVP, `completion` keymap layer for navigation/accept/
+   dismiss. LSP-completion-request plumbing is ready for a follow-up
+   async dispatch.
 6. **Embedded terminal** — mostly standalone (termwiz-based).
 7. **Session management (attach/detach/list)** — builds on the
    existing Level-1 persistence + daemon architecture. Level-1 now
@@ -261,10 +278,11 @@ Recommended implementation order based on dependencies:
    state capture. Undo trees are **not** persisted to disk yet;
    that's a follow-up.
 
-**Next task recommendation: completion framework.** The LSP
-transport already supports `textDocument/completion`; the work is
-mostly a popup overlay in the render layer (similar to the palette)
-and a stock command that triggers it.
+**Next task recommendation: embedded terminal.** The remaining items
+(embedded terminal and session management) are mostly standalone.
+The embedded terminal would use a PTY crate to run a shell inside a
+split pane; session management is CLI + daemon protocol work
+(`arx attach` / `arx detach` / `arx list`).
 
 ## How to work here
 
