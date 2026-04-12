@@ -51,6 +51,8 @@ pub struct Editor {
     palette: CommandPalette,
     #[cfg(feature = "syntax")]
     highlight: HighlightManager,
+    #[cfg(feature = "lsp")]
+    lsp_notifier: Option<tokio::sync::mpsc::Sender<arx_lsp::LspEvent>>,
     dirty: bool,
     quit_requested: bool,
 }
@@ -98,6 +100,8 @@ impl Editor {
             palette: CommandPalette::new(),
             #[cfg(feature = "syntax")]
             highlight: HighlightManager::new(),
+            #[cfg(feature = "lsp")]
+            lsp_notifier: None,
             dirty: false,
             quit_requested: false,
         }
@@ -191,6 +195,26 @@ impl Editor {
         }
         Some(edit)
     }
+
+    /// Set the LSP event notifier. Called by the driver at startup
+    /// once the LSP manager task is running.
+    #[cfg(feature = "lsp")]
+    pub fn set_lsp_notifier(&mut self, tx: tokio::sync::mpsc::Sender<arx_lsp::LspEvent>) {
+        self.lsp_notifier = Some(tx);
+    }
+
+    /// Send an LSP event (best-effort, non-blocking). No-op if the
+    /// `lsp` feature is disabled or no notifier is set.
+    #[cfg(feature = "lsp")]
+    pub fn notify_lsp(&self, event: arx_lsp::LspEvent) {
+        if let Some(tx) = &self.lsp_notifier {
+            let _ = tx.try_send(event);
+        }
+    }
+
+    /// Stub when the `lsp` feature is off.
+    #[cfg(not(feature = "lsp"))]
+    pub fn notify_lsp(&self, _event: ()) {}
 
     /// Handle a printable character that the keymap layer reported as
     /// unbound. Single entry point called by the driver's input task

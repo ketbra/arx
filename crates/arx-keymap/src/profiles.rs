@@ -21,8 +21,9 @@ use crate::commands::{
     COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN, COMMAND_PALETTE_PREV, CURSOR_BUFFER_END,
     CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
     CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_QUIT,
-    MODE_ENTER_INSERT, MODE_LEAVE_INSERT, SCROLL_PAGE_DOWN, SCROLL_PAGE_UP, WINDOW_CLOSE,
-    WINDOW_FOCUS_NEXT, WINDOW_FOCUS_PREV, WINDOW_SPLIT_HORIZONTAL, WINDOW_SPLIT_VERTICAL,
+    LSP_NEXT_DIAGNOSTIC, LSP_PREV_DIAGNOSTIC, MODE_ENTER_INSERT, MODE_LEAVE_INSERT,
+    SCROLL_PAGE_DOWN, SCROLL_PAGE_UP, WINDOW_CLOSE, WINDOW_FOCUS_NEXT, WINDOW_FOCUS_PREV,
+    WINDOW_SPLIT_HORIZONTAL, WINDOW_SPLIT_VERTICAL,
 };
 use crate::engine::CountMode;
 use crate::keymap::Keymap;
@@ -97,6 +98,10 @@ pub fn emacs() -> Profile {
     m.bind_str("C-_", BUFFER_UNDO).unwrap();
     m.bind_str("C-x u", BUFFER_UNDO).unwrap();
     m.bind_str("M-_", BUFFER_REDO).unwrap();
+
+    // Diagnostic navigation.
+    m.bind_str("M-n", LSP_NEXT_DIAGNOSTIC).unwrap();
+    m.bind_str("M-p", LSP_PREV_DIAGNOSTIC).unwrap();
 
     // Window splits (Emacs conventions).
     m.bind_str("C-x 2", WINDOW_SPLIT_HORIZONTAL).unwrap();
@@ -220,6 +225,9 @@ pub fn vim() -> Profile {
     // Undo / redo: Vim's canonical `u` in normal mode, `C-r` for redo.
     normal.bind_str("u", BUFFER_UNDO).unwrap();
     normal.bind_str("C-r", BUFFER_REDO).unwrap();
+    // Diagnostic navigation.
+    normal.bind_str("] d", LSP_NEXT_DIAGNOSTIC).unwrap();
+    normal.bind_str("[ d", LSP_PREV_DIAGNOSTIC).unwrap();
     // Shift-Z Shift-Z → save and quit. Minimalist vim exit.
     // Ex-command line (`:w`, `:q`) is a follow-up milestone.
 

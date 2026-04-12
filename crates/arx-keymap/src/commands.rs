@@ -85,3 +85,8 @@ pub const WINDOW_CLOSE: &str = "window.close";
 pub const WINDOW_FOCUS_NEXT: &str = "window.focus-next";
 /// Cycle focus to the previous window in depth-first layout order.
 pub const WINDOW_FOCUS_PREV: &str = "window.focus-prev";
+
+/// Jump to the next diagnostic in the current buffer.
+pub const LSP_NEXT_DIAGNOSTIC: &str = "lsp.next-diagnostic";
+/// Jump to the previous diagnostic in the current buffer.
+pub const LSP_PREV_DIAGNOSTIC: &str = "lsp.prev-diagnostic";

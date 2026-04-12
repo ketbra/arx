@@ -8,11 +8,12 @@ If this is your first session on the repo: read this file, then skim
 `docs/spec.md` §1–§5 and §18 for vision and current-phase scope.
 Everything else in the spec is forward-looking.
 
-## Current status (Phase 2 in progress — splits + undo tree + tree-sitter)
+## Current status (Phase 2 in progress — splits + undo tree + tree-sitter + LSP)
 
-Phase 1 per spec §18 is complete. Phase 2 has three of seven items
-done: **window splits** (item 1), **undo tree** (item 2), and
-**tree-sitter highlighting** (item 3). The editor has:
+Phase 1 per spec §18 is complete. Phase 2 has four of seven items
+done: **window splits** (item 1), **undo tree** (item 2),
+**tree-sitter highlighting** (item 3), and **LSP client** (item 4).
+The editor has:
 
 - A working daemon/client split with Unix-domain-socket and
   Windows-named-pipe IPC, verified by cross-compilation.
@@ -72,7 +73,25 @@ done: **window splits** (item 1), **undo tree** (item 2), and
   still cross-compile for `x86_64-pc-windows-gnu` without a MinGW
   C compiler.
 
-**338 tests green** (up from Phase 1's 274).
+- **(Phase 2)** **LSP client** via the new `arx-lsp` crate.
+  Hand-rolled JSON-RPC 2.0 transport over stdio (no heavy framework
+  deps — just `lsp-types` for protocol structs). `LspClient` wraps
+  the transport with typed methods: `initialize`, `did_open`,
+  `did_change`, `did_close`, `hover`, `shutdown`. `LspTransport`
+  spawns the server process and runs reader/writer tokio tasks;
+  responses are dispatched to per-request oneshot channels,
+  notifications to an mpsc channel. Position helpers translate
+  between LSP UTF-16 offsets and Arx byte offsets. Diagnostic
+  converter maps `lsp_types::Diagnostic` → `arx_buffer::Diagnostic`
+  + underline face via the property map. Hardcoded server configs
+  for rust-analyzer, pyright, clangd, gopls. Editor gains an
+  `LspNotifier` channel (feature-gated behind `lsp` on `arx-core`)
+  that pushes `BufferOpened`/`BufferEdited`/`BufferClosed` events
+  from the edit and file-open paths. Diagnostic navigation commands
+  `lsp.next-diagnostic` / `lsp.prev-diagnostic` bound to `M-n`/`M-p`
+  in Emacs, `]d`/`[d` in Vim normal mode.
+
+**352 tests green** (up from Phase 1's 274).
 `cargo clippy --workspace --all-targets` clean under the workspace
 pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.
@@ -84,6 +103,7 @@ pedantic lint set.
 | `arx-buffer` | Rope buffer, property map, interval tree, buffer snapshots. |
 | `arx-core` | `Editor`, event loop, command bus, buffer/window managers, session, palette, stock commands. Single-writer state lives here. Depends on `arx-highlight` (feature-gated behind `syntax`). |
 | `arx-highlight` | Tree-sitter syntax highlighting. `HighlightManager`, per-buffer `Highlighter`, `LanguageRegistry`, `Theme`. Depends on `tree-sitter` + grammar crates (C build via `cc`). |
+| `arx-lsp` | LSP client. JSON-RPC transport over stdio, `LspClient`, position helpers, diagnostic conversion, server config registry. Depends on `lsp-types`. |
 | `arx-keymap` | Keymap engine, chord parser, Emacs + Vim profiles, command name constants. |
 | `arx-render` | `ViewState → RenderTree → Diff → Backend`. Includes `CrosstermBackend` and `TestBackend`. |
 | `arx-protocol` | Wire types, postcard framing, cross-platform IPC transport. |
@@ -218,8 +238,16 @@ Recommended implementation order based on dependencies:
    render pipeline with no renderer changes. Gated behind
    `arx-core`'s `syntax` Cargo feature for environments without
    a C cross-compiler.
-4. **LSP client** — now that splits exist it can actually paint
-   hover / diagnostic popups against a real layout.
+4. ~~**LSP client**~~ — **DONE.** `arx-lsp` crate with JSON-RPC
+   transport, typed `LspClient` (initialize/didOpen/didChange/hover
+   /shutdown), position helpers (UTF-16 ↔ byte), diagnostic
+   conversion, server config registry (rust-analyzer/pyright/clangd
+   /gopls). Editor wired with `LspNotifier` channel for buffer
+   events. Diagnostic navigation commands `lsp.next-diagnostic` /
+   `lsp.prev-diagnostic`. Feature-gated behind `lsp` on `arx-core`.
+   Remaining: driver-side `LspManager` task that actually spawns
+   servers and processes incoming notifications (the plumbing is in
+   place, the driver wiring is the next step).
 5. **Completion framework** — needs LSP.
 6. **Embedded terminal** — mostly standalone (termwiz-based).
 7. **Session management (attach/detach/list)** — builds on the
@@ -230,9 +258,10 @@ Recommended implementation order based on dependencies:
    state capture. Undo trees are **not** persisted to disk yet;
    that's a follow-up.
 
-**Next task recommendation: LSP client.** Now that splits and
-highlighting exist, LSP hover/diagnostic popups have a real layout
-to paint against and syntax tokens to cross-reference.
+**Next task recommendation: completion framework.** The LSP
+transport already supports `textDocument/completion`; the work is
+mostly a popup overlay in the render layer (similar to the palette)
+and a stock command that triggers it.
 
 ## How to work here
 

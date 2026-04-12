@@ -56,6 +56,8 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(WindowFocusPrev);
     reg.register(BufferUndo);
     reg.register(BufferRedo);
+    reg.register(LspNextDiagnostic);
+    reg.register(LspPrevDiagnostic);
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +449,14 @@ fn user_edit(
             cursor_before,
             cursor_after,
             timestamp: SystemTime::now(),
+        });
+    }
+    // Notify the LSP manager of the content change.
+    #[cfg(feature = "lsp")]
+    if let Some(buffer) = editor.buffers().get(buffer_id) {
+        editor.notify_lsp(arx_lsp::LspEvent::BufferEdited {
+            buffer_id,
+            new_text: buffer.text(),
         });
     }
     editor.mark_dirty();
@@ -1069,6 +1079,78 @@ impl BufferRedo {
                 break;
             };
             apply_redo_record(cx.editor, window_id, buffer_id, &record);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic navigation
+// ---------------------------------------------------------------------------
+
+/// Collect the start-byte of every diagnostic interval in the given
+/// buffer's `"diagnostics"` property layer, sorted and deduped.
+fn diagnostic_offsets(editor: &Editor, buffer_id: BufferId) -> Vec<usize> {
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return Vec::new();
+    };
+    let Some(layer) = buffer.properties().layer("diagnostics") else {
+        return Vec::new();
+    };
+    let mut offsets: Vec<usize> = layer
+        .tree()
+        .iter()
+        .filter(|iv| matches!(iv.value, arx_buffer::PropertyValue::Diagnostic(_)))
+        .map(|iv| iv.range.start)
+        .collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
+stock_cmd!(
+    LspNextDiagnostic,
+    LSP_NEXT_DIAGNOSTIC,
+    "Jump to the next diagnostic in the buffer"
+);
+impl LspNextDiagnostic {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let offsets = diagnostic_offsets(cx.editor, buffer_id);
+        // Find the first offset strictly after the cursor.
+        let next = offsets.iter().find(|&&o| o > cursor).copied();
+        // Wrap around if nothing after cursor.
+        let target = next.or_else(|| offsets.first().copied());
+        if let Some(byte) = target {
+            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+                window.cursor_byte = byte;
+            }
+            cx.editor.mark_dirty();
+        }
+    }
+}
+
+stock_cmd!(
+    LspPrevDiagnostic,
+    LSP_PREV_DIAGNOSTIC,
+    "Jump to the previous diagnostic in the buffer"
+);
+impl LspPrevDiagnostic {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let offsets = diagnostic_offsets(cx.editor, buffer_id);
+        // Find the last offset strictly before the cursor.
+        let prev = offsets.iter().rev().find(|&&o| o < cursor).copied();
+        // Wrap around.
+        let target = prev.or_else(|| offsets.last().copied());
+        if let Some(byte) = target {
+            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+                window.cursor_byte = byte;
+            }
+            cx.editor.mark_dirty();
         }
     }
 }
