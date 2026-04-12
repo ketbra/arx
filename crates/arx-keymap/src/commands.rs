@@ -45,6 +45,10 @@ pub const BUFFER_UNDO: &str = "buffer.undo";
 /// Re-apply the last undone edit, walking the buffer's undo tree back
 /// down toward the most recent leaf.
 pub const BUFFER_REDO: &str = "buffer.redo";
+/// Switch the undo tree's redo branch to the next sibling.
+pub const BUFFER_UNDO_BRANCH_NEXT: &str = "buffer.undo-branch-next";
+/// Switch the undo tree's redo branch to the previous sibling.
+pub const BUFFER_UNDO_BRANCH_PREV: &str = "buffer.undo-branch-prev";
 
 /// Scroll the active window up by one page.
 pub const SCROLL_PAGE_UP: &str = "scroll.page-up";
@@ -86,6 +90,8 @@ pub const WINDOW_FOCUS_NEXT: &str = "window.focus-next";
 /// Cycle focus to the previous window in depth-first layout order.
 pub const WINDOW_FOCUS_PREV: &str = "window.focus-prev";
 
+/// Show hover information (type, docs) at the cursor position.
+pub const LSP_HOVER: &str = "lsp.hover";
 /// Jump to the next diagnostic in the current buffer.
 pub const LSP_NEXT_DIAGNOSTIC: &str = "lsp.next-diagnostic";
 /// Jump to the previous diagnostic in the current buffer.

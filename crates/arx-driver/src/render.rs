@@ -298,6 +298,10 @@ fn write_back_pane_dimensions(
             window.visible_rows = rect.height;
             window.visible_cols = text_width;
         }
+        // Resize terminal panes to match their allocated rect.
+        if let Some(term) = editor.terminal(id) {
+            term.resize(rect.width, rect.height);
+        }
     }
 }
 
@@ -384,12 +388,20 @@ fn build_global_state(
         None
     };
 
-    Some(GlobalState {
-        modeline_left: format!(
+    // If there's a status message (hover info, LSP status), show it
+    // in the modeline instead of the default line/byte info.
+    let left = if let Some(status) = editor.status_message() {
+        status.to_owned()
+    } else {
+        format!(
             "{label}{modified_tag}  (ln {}/{})",
             snapshot.rope().byte_to_line(active_data.cursor_byte) + 1,
             snapshot.rope().len_lines(),
-        ),
+        )
+    };
+
+    Some(GlobalState {
+        modeline_left: left,
         modeline_right: format!("{} bytes", text.len()),
         palette: palette_view,
         completion: completion_view,

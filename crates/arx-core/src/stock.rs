@@ -56,6 +56,9 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(WindowFocusPrev);
     reg.register(BufferUndo);
     reg.register(BufferRedo);
+    reg.register(BufferUndoBranchNext);
+    reg.register(BufferUndoBranchPrev);
+    reg.register(LspHover);
     reg.register(LspNextDiagnostic);
     reg.register(LspPrevDiagnostic);
     reg.register(CompletionTrigger);
@@ -1089,9 +1092,96 @@ impl BufferRedo {
     }
 }
 
+stock_cmd!(
+    BufferUndoBranchNext,
+    BUFFER_UNDO_BRANCH_NEXT,
+    "Switch to the next undo branch"
+);
+impl BufferUndoBranchNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        let switched = cx
+            .editor
+            .buffers_mut()
+            .get_mut(buffer_id)
+            .is_some_and(|b| b.undo_tree_mut().branch_next());
+        if switched {
+            cx.editor.set_status("Undo branch: next");
+        }
+    }
+}
+
+stock_cmd!(
+    BufferUndoBranchPrev,
+    BUFFER_UNDO_BRANCH_PREV,
+    "Switch to the previous undo branch"
+);
+impl BufferUndoBranchPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        let switched = cx
+            .editor
+            .buffers_mut()
+            .get_mut(buffer_id)
+            .is_some_and(|b| b.undo_tree_mut().branch_prev());
+        if switched {
+            cx.editor.set_status("Undo branch: prev");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Diagnostic navigation
 // ---------------------------------------------------------------------------
+
+stock_cmd!(
+    LspHover,
+    LSP_HOVER,
+    "Show hover info (diagnostic or type) at the cursor"
+);
+impl LspHover {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        // Check the diagnostics layer for a diagnostic at the cursor.
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let Some(layer) = buffer.properties().layer("diagnostics") else {
+            cx.editor.set_status("No diagnostics");
+            return;
+        };
+        let at_cursor: Vec<_> = layer
+            .overlapping(cursor..cursor + 1)
+            .filter_map(|iv| {
+                if let arx_buffer::PropertyValue::Diagnostic(d) = &iv.value {
+                    Some(d.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if at_cursor.is_empty() {
+            cx.editor.set_status("No info at cursor");
+        } else {
+            // Show the first diagnostic's message.
+            let msg = &at_cursor[0].message;
+            let severity = match at_cursor[0].severity {
+                arx_buffer::Severity::Error => "error",
+                arx_buffer::Severity::Warning => "warning",
+                arx_buffer::Severity::Info => "info",
+                arx_buffer::Severity::Hint => "hint",
+            };
+            cx.editor
+                .set_status(format!("[{severity}] {msg}"));
+        }
+    }
+}
 
 /// Collect the start-byte of every diagnostic interval in the given
 /// buffer's `"diagnostics"` property layer, sorted and deduped.

@@ -60,6 +60,9 @@ pub struct Editor {
     terminal_redraw: Option<Arc<tokio::sync::Notify>>,
     #[cfg(feature = "lsp")]
     lsp_notifier: Option<tokio::sync::mpsc::Sender<arx_lsp::LspEvent>>,
+    /// Transient message shown in the modeline (e.g. hover info, LSP
+    /// status). Cleared on the next user keystroke.
+    status_message: Option<String>,
     dirty: bool,
     quit_requested: bool,
 }
@@ -112,6 +115,7 @@ impl Editor {
             highlight: HighlightManager::new(),
             #[cfg(feature = "lsp")]
             lsp_notifier: None,
+            status_message: None,
             dirty: false,
             quit_requested: false,
         }
@@ -331,6 +335,23 @@ impl Editor {
         }
     }
 
+    /// Set a transient status message shown in the modeline. Cleared
+    /// on the next keystroke via [`Self::clear_status`].
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some(msg.into());
+        self.mark_dirty();
+    }
+
+    /// Clear the status message.
+    pub fn clear_status(&mut self) {
+        self.status_message = None;
+    }
+
+    /// The current status message, if any.
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message.as_deref()
+    }
+
     /// Mark the editor as "display-affecting since the last frame" so the
     /// next tick of the event loop will ping the redraw notify (if any).
     pub fn mark_dirty(&mut self) {
@@ -367,6 +388,8 @@ impl Editor {
     /// movement or buffer edit that pushed the cursor off-screen pulls
     /// the scroll position along with it.
     pub fn handle_key(&mut self, bus: &CommandBus, chord: KeyChord) -> KeyHandled {
+        // Clear the transient status message on every keystroke.
+        self.status_message = None;
         let outcome = match self.keymap.feed(chord) {
             FeedOutcome::Execute { command, count } => {
                 // Clone the Arc out so we release the borrow of

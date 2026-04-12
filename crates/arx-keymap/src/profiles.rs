@@ -20,7 +20,7 @@ use crate::commands::{
     BUFFER_UNDO, COMMAND_PALETTE_BACKSPACE, COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE,
     COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN, COMMAND_PALETTE_PREV, COMPLETION_ACCEPT,
     COMPLETION_DISMISS, COMPLETION_NEXT, COMPLETION_PREV, COMPLETION_TRIGGER, CURSOR_BUFFER_END,
-    TERMINAL_OPEN,
+    LSP_HOVER, TERMINAL_OPEN,
     CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
     CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_QUIT,
     LSP_NEXT_DIAGNOSTIC, LSP_PREV_DIAGNOSTIC, MODE_ENTER_INSERT, MODE_LEAVE_INSERT,
@@ -104,7 +104,8 @@ pub fn emacs() -> Profile {
     // Completion.
     m.bind_str("M-/", COMPLETION_TRIGGER).unwrap();
 
-    // Diagnostic navigation.
+    // LSP / diagnostic.
+    m.bind_str("C-c l h", LSP_HOVER).unwrap();
     m.bind_str("M-n", LSP_NEXT_DIAGNOSTIC).unwrap();
     m.bind_str("M-p", LSP_PREV_DIAGNOSTIC).unwrap();
 
@@ -221,6 +222,8 @@ pub fn vim() -> Profile {
     global.bind_str("C-w q", WINDOW_CLOSE).unwrap();
     global.bind_str("C-w w", WINDOW_FOCUS_NEXT).unwrap();
     global.bind_str("C-w W", WINDOW_FOCUS_PREV).unwrap();
+    // Terminal.
+    global.bind_str("C-w t", TERMINAL_OPEN).unwrap();
     // Completion (works in insert mode via the global layer).
     global.bind_str("C-x C-o", COMPLETION_TRIGGER).unwrap();
     // Command palette. `:` is Vim's usual command-line trigger; in
@@ -255,7 +258,8 @@ pub fn vim() -> Profile {
     // Undo / redo: Vim's canonical `u` in normal mode, `C-r` for redo.
     normal.bind_str("u", BUFFER_UNDO).unwrap();
     normal.bind_str("C-r", BUFFER_REDO).unwrap();
-    // Diagnostic navigation.
+    // LSP / diagnostic navigation.
+    normal.bind_str("K", LSP_HOVER).unwrap();
     normal.bind_str("] d", LSP_NEXT_DIAGNOSTIC).unwrap();
     normal.bind_str("[ d", LSP_PREV_DIAGNOSTIC).unwrap();
     // Shift-Z Shift-Z → save and quit. Minimalist vim exit.
