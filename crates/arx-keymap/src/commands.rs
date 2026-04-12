@@ -85,6 +85,10 @@ pub const EDITOR_CANCEL: &str = "editor.cancel";
 /// Recenter the view so the cursor is in the middle of the window.
 pub const SCROLL_RECENTER: &str = "scroll.recenter";
 
+/// Describe what a key sequence is bound to. Prompts for a key,
+/// then shows the bound command in the status bar.
+pub const EDITOR_DESCRIBE_KEY: &str = "editor.describe-key";
+
 /// Enter Vim-style insert mode (push an `insert` layer over `vim.normal`).
 pub const MODE_ENTER_INSERT: &str = "mode.enter-insert";
 /// Leave insert mode (pop the top layer back to the enclosing mode).

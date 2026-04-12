@@ -54,6 +54,7 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(BufferSave);
     reg.register(EditorQuit);
     reg.register(EditorCancel);
+    reg.register(EditorDescribeKey);
     reg.register(ModeEnterInsert);
     reg.register(ModeLeaveInsert);
     reg.register(CommandPaletteOpen);
@@ -1013,6 +1014,17 @@ impl EditorCancel {
             cx.editor.clear_mark(id);
         }
         cx.editor.set_status("Quit");
+    }
+}
+
+stock_cmd!(
+    EditorDescribeKey,
+    EDITOR_DESCRIBE_KEY,
+    "Describe what a key sequence is bound to"
+);
+impl EditorDescribeKey {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.enter_describe_key_mode();
     }
 }
 

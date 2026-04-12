@@ -350,9 +350,19 @@ fn build_global_state(
             .palette()
             .matches()
             .iter()
-            .map(|m| PaletteEntry {
-                name: m.name.clone(),
-                description: m.description.clone(),
+            .map(|m| {
+                // Append the keybinding shortcut to the description
+                // so the user can discover bindings from the palette.
+                let binding = editor.keymap().binding_for(&m.name);
+                let desc = match binding {
+                    Some(keys) if m.description.is_empty() => keys,
+                    Some(keys) => format!("{} ({})", m.description, keys),
+                    None => m.description.clone(),
+                };
+                PaletteEntry {
+                    name: m.name.clone(),
+                    description: desc,
+                }
             })
             .collect::<Vec<_>>();
         Some(PaletteView {

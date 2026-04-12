@@ -124,7 +124,8 @@ impl<'a> Parser<'a> {
             return self.parse_bracketed();
         }
 
-        // Bare form: modifier prefixes followed by a single char.
+        // Bare form: modifier prefixes followed by a single char or
+        // a bracketed key name.
         while let Some(m) = self.try_parse_modifier_prefix() {
             match m {
                 'C' => modifiers.ctrl = true,
@@ -132,6 +133,18 @@ impl<'a> Parser<'a> {
                 'S' => modifiers.shift = true,
                 _ => unreachable!(),
             }
+        }
+
+        // After consuming modifier prefixes, a `<` starts a
+        // bracketed name (e.g. `C-<Space>`, `M-<Enter>`). But a
+        // bare `<` without a closing `>` is just the literal `<`
+        // character (as in `M-<` for buffer-start).
+        if self.peek() == Some('<') && self.src[self.pos..].contains('>') {
+            let mut chord = self.parse_bracketed()?;
+            chord.modifiers.ctrl |= modifiers.ctrl;
+            chord.modifiers.alt |= modifiers.alt;
+            chord.modifiers.shift |= modifiers.shift;
+            return Ok(chord);
         }
 
         let ch = self.advance().ok_or(ParseError::EmptyChord { pos: start })?;

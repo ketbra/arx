@@ -60,6 +60,9 @@ pub struct Editor {
     terminal_redraw: Option<Arc<tokio::sync::Notify>>,
     #[cfg(feature = "lsp")]
     lsp_notifier: Option<tokio::sync::mpsc::Sender<arx_lsp::LspEvent>>,
+    /// When true, the next keystroke in `handle_key` is described
+    /// (command name shown in the status bar) rather than executed.
+    describe_key_mode: bool,
     /// Kill ring — a stack of killed (cut/copied) text for yank.
     kill_ring: Vec<String>,
     /// Per-window mark (selection anchor) byte offsets.
@@ -119,6 +122,7 @@ impl Editor {
             highlight: HighlightManager::new(),
             #[cfg(feature = "lsp")]
             lsp_notifier: None,
+            describe_key_mode: false,
             kill_ring: Vec::new(),
             marks: HashMap::new(),
             status_message: None,
@@ -341,6 +345,14 @@ impl Editor {
         }
     }
 
+    /// Enter describe-key mode. The next keystroke will be looked up
+    /// in the keymap and its binding shown in the status bar instead of
+    /// being executed.
+    pub fn enter_describe_key_mode(&mut self) {
+        self.describe_key_mode = true;
+        self.set_status("Describe key: press a key...");
+    }
+
     /// Push text onto the kill ring.
     pub fn kill_ring_push(&mut self, text: String) {
         self.kill_ring.push(text);
@@ -435,6 +447,32 @@ impl Editor {
     pub fn handle_key(&mut self, bus: &CommandBus, chord: KeyChord) -> KeyHandled {
         // Clear the transient status message on every keystroke.
         self.status_message = None;
+
+        // Describe-key mode: look up the chord but show the binding
+        // instead of executing.
+        if self.describe_key_mode {
+            self.describe_key_mode = false;
+            let outcome = self.keymap.feed(chord.clone());
+            let description = match outcome {
+                FeedOutcome::Execute { command, .. } => {
+                    // Look up the description from the registry.
+                    let desc = self
+                        .commands
+                        .get(&command.name)
+                        .map_or(String::new(), |c| c.description().to_owned());
+                    if desc.is_empty() {
+                        format!("{chord} → {}", command.name)
+                    } else {
+                        format!("{chord} → {} — {desc}", command.name)
+                    }
+                }
+                FeedOutcome::Pending => format!("{chord} is a prefix key"),
+                FeedOutcome::Unbound { .. } => format!("{chord} is not bound"),
+            };
+            self.set_status(description);
+            return KeyHandled::Executed;
+        }
+
         let outcome = match self.keymap.feed(chord) {
             FeedOutcome::Execute { command, count } => {
                 // Clone the Arc out so we release the borrow of

@@ -127,6 +127,39 @@ impl Keymap {
     pub fn top_level_len(&self) -> usize {
         self.root.len()
     }
+
+    /// Find the shortest key sequence bound to `command_name` in this
+    /// keymap. Returns `None` if the command has no binding. Used by
+    /// the command palette to show shortcuts next to command names.
+    pub fn binding_for(&self, command_name: &str) -> Option<Vec<KeyChord>> {
+        let mut result: Option<Vec<KeyChord>> = None;
+        walk_bindings(&self.root, &mut Vec::new(), command_name, &mut result);
+        result
+    }
+}
+
+fn walk_bindings(
+    map: &HashMap<KeyChord, Node>,
+    prefix: &mut Vec<KeyChord>,
+    target: &str,
+    result: &mut Option<Vec<KeyChord>>,
+) {
+    for (chord, node) in map {
+        prefix.push(chord.clone());
+        match node {
+            Node::Command(cmd) if cmd.name.as_ref() == target => {
+                let seq = prefix.clone();
+                if result.as_ref().is_none_or(|r| seq.len() < r.len()) {
+                    *result = Some(seq);
+                }
+            }
+            Node::Branch(children) => {
+                walk_bindings(children, prefix, target, result);
+            }
+            _ => {}
+        }
+        prefix.pop();
+    }
 }
 
 /// Outcome of a keymap lookup.
