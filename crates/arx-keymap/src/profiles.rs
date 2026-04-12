@@ -21,15 +21,17 @@ use crate::commands::{
     BUFFER_NEWLINE, BUFFER_OPEN_LINE, BUFFER_REDO, BUFFER_SAVE, BUFFER_SET_MARK, BUFFER_SWITCH,
     BUFFER_TRANSPOSE_CHARS, BUFFER_UNDO, BUFFER_YANK, COMMAND_PALETTE_BACKSPACE,
     COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE, COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN,
-    COMMAND_PALETTE_PREV, COMPLETION_ACCEPT, COMPLETION_DISMISS, COMPLETION_NEXT, COMPLETION_PREV,
+    COMMAND_PALETTE_PREV, COMMAND_PALETTE_HISTORY_NEXT, COMMAND_PALETTE_HISTORY_PREV,
+    COMPLETION_ACCEPT, COMPLETION_DISMISS, COMPLETION_NEXT,
+    COMPLETION_PAGE_DOWN, COMPLETION_PAGE_UP, COMPLETION_PREV,
     COMPLETION_TRIGGER, CURSOR_BUFFER_END,
     LSP_HOVER, TERMINAL_OPEN,
     CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
     CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_CANCEL,
     EDITOR_DESCRIBE_KEY, EDITOR_QUIT, LSP_NEXT_DIAGNOSTIC, LSP_PREV_DIAGNOSTIC,
     MODE_ENTER_INSERT, MODE_LEAVE_INSERT,
-    SCROLL_PAGE_DOWN, SCROLL_PAGE_UP, SCROLL_RECENTER, WINDOW_CLOSE, WINDOW_FOCUS_NEXT,
-    WINDOW_FOCUS_PREV,
+    SCROLL_PAGE_DOWN, SCROLL_PAGE_UP, SCROLL_RECENTER, WINDOW_CLOSE, WINDOW_DELETE_OTHER,
+    WINDOW_FOCUS_NEXT, WINDOW_FOCUS_PREV,
     WINDOW_SPLIT_HORIZONTAL, WINDOW_SPLIT_VERTICAL,
 };
 use crate::engine::CountMode;
@@ -137,6 +139,7 @@ pub fn emacs() -> Profile {
     m.bind_str("C-x t", TERMINAL_OPEN).unwrap();
 
     // Window splits (Emacs conventions).
+    m.bind_str("C-x 1", WINDOW_DELETE_OTHER).unwrap();
     m.bind_str("C-x 2", WINDOW_SPLIT_HORIZONTAL).unwrap();
     m.bind_str("C-x 3", WINDOW_SPLIT_VERTICAL).unwrap();
     m.bind_str("C-x 0", WINDOW_CLOSE).unwrap();
@@ -175,6 +178,8 @@ pub fn palette_layer() -> Keymap {
     m.bind_str("<Down>", COMMAND_PALETTE_NEXT).unwrap();
     m.bind_str("C-p", COMMAND_PALETTE_PREV).unwrap();
     m.bind_str("C-n", COMMAND_PALETTE_NEXT).unwrap();
+    m.bind_str("M-p", COMMAND_PALETTE_HISTORY_PREV).unwrap();
+    m.bind_str("M-n", COMMAND_PALETTE_HISTORY_NEXT).unwrap();
     m.bind_str("<Backspace>", COMMAND_PALETTE_BACKSPACE).unwrap();
     m
 }
@@ -196,6 +201,10 @@ pub fn completion_layer() -> Keymap {
     m.bind_str("<Down>", COMPLETION_NEXT).unwrap();
     m.bind_str("C-p", COMPLETION_PREV).unwrap();
     m.bind_str("C-n", COMPLETION_NEXT).unwrap();
+    m.bind_str("C-v", COMPLETION_PAGE_DOWN).unwrap();
+    m.bind_str("M-v", COMPLETION_PAGE_UP).unwrap();
+    m.bind_str("<PageDown>", COMPLETION_PAGE_DOWN).unwrap();
+    m.bind_str("<PageUp>", COMPLETION_PAGE_UP).unwrap();
     m
 }
 
@@ -244,6 +253,7 @@ pub fn vim() -> Profile {
     global.bind_str("C-w v", WINDOW_SPLIT_VERTICAL).unwrap();
     global.bind_str("C-w c", WINDOW_CLOSE).unwrap();
     global.bind_str("C-w q", WINDOW_CLOSE).unwrap();
+    global.bind_str("C-w o", WINDOW_DELETE_OTHER).unwrap();
     global.bind_str("C-w w", WINDOW_FOCUS_NEXT).unwrap();
     global.bind_str("C-w W", WINDOW_FOCUS_PREV).unwrap();
     // Terminal.

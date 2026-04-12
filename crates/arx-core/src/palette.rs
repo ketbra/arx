@@ -94,6 +94,17 @@ pub struct CommandPalette {
     candidates: Vec<Candidate>,
     /// Current filtered + scored + sorted view of `candidates`.
     matches: Vec<PaletteMatch>,
+    /// Per-mode command history. Most recent last.
+    command_history: Vec<String>,
+    /// Per-mode find-file history.
+    find_file_history: Vec<String>,
+    /// Index into the active history list while browsing with M-p/M-n.
+    /// `None` means the user is typing a fresh query (not browsing
+    /// history). `Some(i)` is a reverse index: 0 = most recent.
+    history_index: Option<usize>,
+    /// Saved query text from before the user started history browsing,
+    /// so M-n past the newest entry can restore it.
+    saved_query: String,
 }
 
 /// Immutable candidate entry — what `open()` captures from the
@@ -170,6 +181,8 @@ impl CommandPalette {
         "M-x ".clone_into(&mut self.prompt);
         self.query.clear();
         self.selected = 0;
+        self.history_index = None;
+        self.saved_query.clear();
         self.candidates = entries
             .into_iter()
             .map(|(name, description)| Candidate { name, description })
@@ -185,6 +198,8 @@ impl CommandPalette {
         "Switch buffer: ".clone_into(&mut self.prompt);
         self.query.clear();
         self.selected = 0;
+        self.history_index = None;
+        self.saved_query.clear();
         self.candidates = entries
             .into_iter()
             .map(|(name, description)| Candidate { name, description })
@@ -201,6 +216,8 @@ impl CommandPalette {
         "Find file: ".clone_into(&mut self.prompt);
         self.query.clear();
         self.selected = 0;
+        self.history_index = None;
+        self.saved_query.clear();
         self.refresh_find_file();
     }
 
@@ -298,12 +315,15 @@ impl CommandPalette {
         self.prompt.clear();
         self.query.clear();
         self.selected = 0;
+        self.history_index = None;
+        self.saved_query.clear();
         self.candidates.clear();
         self.matches.clear();
     }
 
     /// Append one character to the query and refilter.
     pub fn append_char(&mut self, c: char) {
+        self.history_index = None;
         self.query.push(c);
         if self.mode == PaletteMode::FindFile {
             self.refresh_find_file();
@@ -314,6 +334,7 @@ impl CommandPalette {
 
     /// Remove one character from the query (if non-empty) and refilter.
     pub fn backspace(&mut self) {
+        self.history_index = None;
         if self.query.pop().is_some() {
             if self.mode == PaletteMode::FindFile {
                 self.refresh_find_file();
@@ -338,6 +359,79 @@ impl CommandPalette {
     /// Move the selection highlight up one row (saturates at 0).
     pub fn select_prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Record a successfully executed entry into the history for the
+    /// current mode. Deduplicates: if the entry is already the most
+    /// recent, skip; otherwise push it to the end.
+    pub fn push_history(&mut self, entry: String, mode: PaletteMode) {
+        let history = match mode {
+            PaletteMode::Command => &mut self.command_history,
+            PaletteMode::FindFile => &mut self.find_file_history,
+            PaletteMode::SwitchBuffer => return, // no history for buffer switch
+        };
+        // Deduplicate: remove any prior occurrence so the entry
+        // moves to the end (most recent).
+        history.retain(|h| h != &entry);
+        history.push(entry);
+    }
+
+    /// Navigate to the previous (older) history entry. Replaces the
+    /// query with the history entry and refilters.
+    pub fn history_prev(&mut self) {
+        let history = match self.mode {
+            PaletteMode::Command => &self.command_history,
+            PaletteMode::FindFile => &self.find_file_history,
+            PaletteMode::SwitchBuffer => return,
+        };
+        if history.is_empty() {
+            return;
+        }
+        let next_idx = match self.history_index {
+            None => {
+                // First press: save current query and go to most recent.
+                self.saved_query = self.query.clone();
+                0
+            }
+            Some(i) if i + 1 < history.len() => i + 1,
+            Some(_) => return, // already at oldest
+        };
+        self.history_index = Some(next_idx);
+        // Reverse index: 0 = most recent = last element.
+        let entry = &history[history.len() - 1 - next_idx];
+        self.query = entry.clone();
+        if self.mode == PaletteMode::FindFile {
+            self.refresh_find_file();
+        } else {
+            self.refresh();
+        }
+    }
+
+    /// Navigate to the next (newer) history entry. If we're at the
+    /// newest entry, restore the saved query.
+    pub fn history_next(&mut self) {
+        let Some(idx) = self.history_index else {
+            return; // not browsing history
+        };
+        let history = match self.mode {
+            PaletteMode::Command => &self.command_history,
+            PaletteMode::FindFile => &self.find_file_history,
+            PaletteMode::SwitchBuffer => return,
+        };
+        if idx == 0 {
+            // Move past newest entry → restore saved query.
+            self.history_index = None;
+            self.query = std::mem::take(&mut self.saved_query);
+        } else {
+            self.history_index = Some(idx - 1);
+            let entry = &history[history.len() - idx];
+            self.query = entry.clone();
+        }
+        if self.mode == PaletteMode::FindFile {
+            self.refresh_find_file();
+        } else {
+            self.refresh();
+        }
     }
 
     /// Recompute `matches` from `candidates` under the current query.

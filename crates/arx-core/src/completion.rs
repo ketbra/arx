@@ -103,6 +103,19 @@ impl CompletionPopup {
     pub fn select_prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
     }
+
+    /// Move the selection down by `n` rows (saturates at the last item).
+    pub fn select_next_n(&mut self, n: usize) {
+        if self.items.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + n).min(self.items.len() - 1);
+    }
+
+    /// Move the selection up by `n` rows (saturates at 0).
+    pub fn select_prev_n(&mut self, n: usize) {
+        self.selected = self.selected.saturating_sub(n);
+    }
 }
 
 #[cfg(test)]

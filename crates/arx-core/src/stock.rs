@@ -64,9 +64,12 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CommandPaletteNext);
     reg.register(CommandPalettePrev);
     reg.register(CommandPaletteBackspace);
+    reg.register(CommandPaletteHistoryPrev);
+    reg.register(CommandPaletteHistoryNext);
     reg.register(WindowSplitHorizontal);
     reg.register(WindowSplitVertical);
     reg.register(WindowClose);
+    reg.register(WindowDeleteOther);
     reg.register(WindowFocusNext);
     reg.register(WindowFocusPrev);
     reg.register(BufferUndo);
@@ -82,6 +85,8 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CompletionDismiss);
     reg.register(CompletionNext);
     reg.register(CompletionPrev);
+    reg.register(CompletionPageDown);
+    reg.register(CompletionPageUp);
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,6 +1219,7 @@ stock_cmd!(
     "Execute the selected command in the palette"
 );
 impl CommandPaletteExecute {
+    #[allow(clippy::too_many_lines)]
     fn run_impl(cx: &mut CommandContext<'_>) {
         let mode = cx.editor.palette().mode();
         match mode {
@@ -1241,6 +1247,10 @@ impl CommandPaletteExecute {
                     cx.editor.mark_dirty();
                     return;
                 }
+                cx.editor.palette_mut().push_history(
+                    path.clone(),
+                    crate::palette::PaletteMode::FindFile,
+                );
                 cx.editor.palette_mut().close();
                 leave_palette_layer(cx.editor);
                 cx.editor.mark_dirty();
@@ -1304,6 +1314,12 @@ impl CommandPaletteExecute {
                     .palette()
                     .selected_match()
                     .map(|m| m.name.clone());
+                if let Some(ref name) = selected_name {
+                    cx.editor.palette_mut().push_history(
+                        name.clone(),
+                        crate::palette::PaletteMode::Command,
+                    );
+                }
                 cx.editor.palette_mut().close();
                 leave_palette_layer(cx.editor);
                 cx.editor.mark_dirty();
@@ -1358,6 +1374,30 @@ stock_cmd!(
 impl CommandPaletteBackspace {
     fn run_impl(cx: &mut CommandContext<'_>) {
         cx.editor.palette_mut().backspace();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CommandPaletteHistoryPrev,
+    COMMAND_PALETTE_HISTORY_PREV,
+    "Navigate to the previous palette history entry"
+);
+impl CommandPaletteHistoryPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().history_prev();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CommandPaletteHistoryNext,
+    COMMAND_PALETTE_HISTORY_NEXT,
+    "Navigate to the next palette history entry"
+);
+impl CommandPaletteHistoryNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().history_next();
         cx.editor.mark_dirty();
     }
 }
@@ -1434,6 +1474,20 @@ impl WindowClose {
             return;
         }
         if cx.editor.windows_mut().close(active) {
+            cx.editor.mark_dirty();
+            cx.editor.ensure_active_cursor_visible();
+        }
+    }
+}
+
+stock_cmd!(
+    WindowDeleteOther,
+    WINDOW_DELETE_OTHER,
+    "Close all windows except the active one"
+);
+impl WindowDeleteOther {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.windows_mut().delete_other() {
             cx.editor.mark_dirty();
             cx.editor.ensure_active_cursor_visible();
         }
@@ -1929,6 +1983,38 @@ stock_cmd!(
 impl CompletionPrev {
     fn run_impl(cx: &mut CommandContext<'_>) {
         cx.editor.completion_mut().select_prev();
+        cx.editor.mark_dirty();
+    }
+}
+
+/// Page size for the completion popup — matches the max visible rows
+/// the renderer shows (8).
+const COMPLETION_PAGE_SIZE: usize = 8;
+
+stock_cmd!(
+    CompletionPageDown,
+    COMPLETION_PAGE_DOWN,
+    "Move the completion selection down one page"
+);
+impl CompletionPageDown {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor
+            .completion_mut()
+            .select_next_n(COMPLETION_PAGE_SIZE);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CompletionPageUp,
+    COMPLETION_PAGE_UP,
+    "Move the completion selection up one page"
+);
+impl CompletionPageUp {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor
+            .completion_mut()
+            .select_prev_n(COMPLETION_PAGE_SIZE);
         cx.editor.mark_dirty();
     }
 }

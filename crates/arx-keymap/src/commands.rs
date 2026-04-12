@@ -108,6 +108,10 @@ pub const COMMAND_PALETTE_NEXT: &str = "command-palette.next";
 pub const COMMAND_PALETTE_PREV: &str = "command-palette.prev";
 /// Remove the last character from the palette query.
 pub const COMMAND_PALETTE_BACKSPACE: &str = "command-palette.backspace";
+/// Navigate to the previous (older) palette history entry.
+pub const COMMAND_PALETTE_HISTORY_PREV: &str = "command-palette.history-prev";
+/// Navigate to the next (newer) palette history entry.
+pub const COMMAND_PALETTE_HISTORY_NEXT: &str = "command-palette.history-next";
 
 /// Split the active window horizontally — stacking a new pane beneath
 /// it. Vim `:split` / Emacs `C-x 2`.
@@ -118,6 +122,9 @@ pub const WINDOW_SPLIT_VERTICAL: &str = "window.split-vertical";
 /// Close the active window, collapsing its enclosing split into the
 /// surviving sibling. No-op when only one window is left.
 pub const WINDOW_CLOSE: &str = "window.close";
+/// Close all windows except the active one, collapsing the layout to
+/// a single leaf. Emacs `C-x 1` / Vim `C-w o`.
+pub const WINDOW_DELETE_OTHER: &str = "window.delete-other";
 /// Cycle focus to the next window in depth-first layout order.
 pub const WINDOW_FOCUS_NEXT: &str = "window.focus-next";
 /// Cycle focus to the previous window in depth-first layout order.
@@ -140,6 +147,10 @@ pub const COMPLETION_DISMISS: &str = "completion.dismiss";
 pub const COMPLETION_NEXT: &str = "completion.next";
 /// Move the completion selection up one row.
 pub const COMPLETION_PREV: &str = "completion.prev";
+/// Move the completion selection down one page.
+pub const COMPLETION_PAGE_DOWN: &str = "completion.page-down";
+/// Move the completion selection up one page.
+pub const COMPLETION_PAGE_UP: &str = "completion.page-up";
 
 /// Open an embedded terminal in a split pane.
 pub const TERMINAL_OPEN: &str = "terminal.open";

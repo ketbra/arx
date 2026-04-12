@@ -20,7 +20,7 @@ use crossterm::event::Event;
 use futures_util::StreamExt;
 use tracing::{debug, trace};
 
-use arx_core::{CommandBus, KeyHandled};
+use arx_core::{CommandBus, Editor, KeyHandled};
 use arx_keymap::KeyChord;
 
 use crate::state::{SharedTerminalSize, Shutdown};
@@ -133,6 +133,7 @@ async fn handle_with_pending(
         Event::Key(key) => handle_key(key, bus).await,
         Event::Resize(cols, rows) => {
             size.set(cols, rows);
+            let _ = bus.dispatch(Editor::mark_dirty).await;
             (ControlFlow::Continue(()), false)
         }
         _ => (ControlFlow::Continue(()), false),
