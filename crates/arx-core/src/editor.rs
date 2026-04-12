@@ -60,6 +60,9 @@ pub struct Editor {
     terminal_redraw: Option<Arc<tokio::sync::Notify>>,
     #[cfg(feature = "lsp")]
     lsp_notifier: Option<tokio::sync::mpsc::Sender<arx_lsp::LspEvent>>,
+    /// Which-key overlay: list of `(key, command)` pairs to show
+    /// when the user pauses on a prefix chord.
+    which_key: Option<Vec<(String, String)>>,
     /// When true, the next keystroke in `handle_key` is described
     /// (command name shown in the status bar) rather than executed.
     describe_key_mode: bool,
@@ -122,6 +125,7 @@ impl Editor {
             highlight: HighlightManager::new(),
             #[cfg(feature = "lsp")]
             lsp_notifier: None,
+            which_key: None,
             describe_key_mode: false,
             kill_ring: Vec::new(),
             marks: HashMap::new(),
@@ -345,6 +349,22 @@ impl Editor {
         }
     }
 
+    /// Populate the which-key overlay with the available completions
+    /// for the current pending prefix. Called by the input task after
+    /// a timeout.
+    pub fn show_which_key(&mut self) {
+        let completions = self.keymap.pending_completions();
+        if !completions.is_empty() {
+            self.which_key = Some(completions);
+            self.mark_dirty();
+        }
+    }
+
+    /// Get the which-key completions, if any.
+    pub fn which_key(&self) -> Option<&[(String, String)]> {
+        self.which_key.as_deref()
+    }
+
     /// Enter describe-key mode. The next keystroke will be looked up
     /// in the keymap and its binding shown in the status bar instead of
     /// being executed.
@@ -445,8 +465,9 @@ impl Editor {
     /// movement or buffer edit that pushed the cursor off-screen pulls
     /// the scroll position along with it.
     pub fn handle_key(&mut self, bus: &CommandBus, chord: KeyChord) -> KeyHandled {
-        // Clear the transient status message on every keystroke.
+        // Clear transient UI on every keystroke.
         self.status_message = None;
+        self.which_key = None;
 
         // Describe-key mode: look up the chord but show the binding
         // instead of executing.

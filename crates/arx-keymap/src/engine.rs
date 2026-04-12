@@ -162,6 +162,24 @@ impl KeymapEngine {
         None
     }
 
+    /// List the available completions from the current pending prefix.
+    /// Searches the stack top-down and merges results. Returns
+    /// `(chord_display, command_or_prefix)` pairs for the which-key
+    /// overlay.
+    pub fn pending_completions(&self) -> Vec<(String, String)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for layer in self.stack.iter().rev() {
+            for (chord, label) in layer.map.completions_after(&self.pending) {
+                let key = chord.to_string();
+                if seen.insert(key.clone()) {
+                    out.push((key, label));
+                }
+            }
+        }
+        out
+    }
+
     pub fn set_count_mode(&mut self, mode: CountMode) {
         self.count_mode = mode;
     }

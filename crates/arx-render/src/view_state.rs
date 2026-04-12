@@ -355,6 +355,20 @@ pub struct GlobalState {
     /// in progress. `Some(...)` means the view layer should paint a
     /// popup near the cursor.
     pub completion: Option<CompletionView>,
+    /// Which-key overlay: shows available completions for a pending
+    /// key prefix. `None` when no prefix is pending or the timeout
+    /// hasn't fired yet.
+    pub which_key: Option<Vec<WhichKeyEntry>>,
+}
+
+/// One entry in the which-key overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhichKeyEntry {
+    /// The next key to press (e.g. `"C-s"`).
+    pub key: String,
+    /// The command it resolves to (e.g. `"buffer.save"`) or
+    /// `"+prefix"` if it's another prefix level.
+    pub command: String,
 }
 
 /// What the view layer needs to draw a completion popup. A direct

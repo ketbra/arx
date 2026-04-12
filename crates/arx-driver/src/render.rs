@@ -23,7 +23,8 @@ use arx_core::{CommandBus, Layout as CoreLayout, SplitAxis, WindowId as CoreWind
 use arx_render::{
     Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree,
     PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SplitDirection, TerminalSize,
-    TerminalViewCell, TerminalViewState, ViewState, WindowId as ViewWindowId, WindowState, diff,
+    TerminalViewCell, TerminalViewState, ViewState, WhichKeyEntry, WindowId as ViewWindowId,
+    WindowState, diff,
     initial_paint, render,
 };
 
@@ -321,6 +322,7 @@ fn write_back_pane_dimensions(
 
 /// Build the global (modeline + palette overlay) state from the
 /// currently-active pane.
+#[allow(clippy::too_many_lines)]
 fn build_global_state(
     editor: &arx_core::Editor,
     active: CoreWindowId,
@@ -424,11 +426,22 @@ fn build_global_state(
         )
     };
 
+    let which_key = editor.which_key().map(|entries| {
+        entries
+            .iter()
+            .map(|(key, cmd)| WhichKeyEntry {
+                key: key.clone(),
+                command: cmd.clone(),
+            })
+            .collect()
+    });
+
     Some(GlobalState {
         modeline_left: left,
         modeline_right: format!("{} bytes", text.len()),
         palette: palette_view,
         completion: completion_view,
+        which_key,
     })
 }
 
