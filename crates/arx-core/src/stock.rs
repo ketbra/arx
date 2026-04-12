@@ -81,6 +81,17 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(LspPrevDiagnostic);
     reg.register(CompletionTrigger);
     reg.register(TerminalOpen);
+    reg.register(SearchOpen);
+    reg.register(SearchClose);
+    reg.register(SearchExecute);
+    reg.register(SearchNext);
+    reg.register(SearchPrev);
+    reg.register(SearchPageDown);
+    reg.register(SearchPageUp);
+    reg.register(SearchToggleMode);
+    reg.register(SearchBackspace);
+    reg.register(SearchHistoryPrev);
+    reg.register(SearchHistoryNext);
     reg.register(CompletionAccept);
     reg.register(CompletionDismiss);
     reg.register(CompletionNext);
@@ -1824,6 +1835,321 @@ stock_cmd!(
 impl TerminalOpen {
     fn run_impl(cx: &mut CommandContext<'_>) {
         cx.editor.open_terminal(SplitAxis::Horizontal);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive buffer search
+// ---------------------------------------------------------------------------
+//
+// Swiper / telescope-style line search. The user types a query, sees
+// matching lines in a bottom overlay, and navigates between them with
+// the buffer scrolling in real time. Enter accepts (cursor stays at
+// the match); Escape cancels (cursor returns to original position).
+
+fn ensure_search_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("search") {
+        return;
+    }
+    editor.keymap_mut().push_layer(Layer::new(
+        LayerId::from("search"),
+        Arc::new(arx_keymap::profiles::search_layer()),
+    ));
+    editor
+        .keymap_mut()
+        .set_count_mode(arx_keymap::CountMode::Reject);
+}
+
+fn leave_search_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("search") {
+        editor.keymap_mut().pop_layer();
+        editor
+            .keymap_mut()
+            .set_count_mode(arx_keymap::CountMode::Accept);
+    }
+}
+
+/// Jump the active window's cursor to the currently selected search
+/// match. Called after every navigation action so the buffer scrolls
+/// in real time.
+fn apply_search_preview(editor: &mut Editor) {
+    let Some(m) = editor.search().selected_match().cloned() else {
+        return;
+    };
+    let Some(window_id) = editor.windows().active() else {
+        return;
+    };
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = m.byte_start + m.match_offset;
+    }
+    editor.ensure_active_cursor_visible();
+}
+
+/// Write search-match highlights into the buffer's `"search"` property
+/// layer so the render pipeline paints them. Clears previous highlights
+/// first. The selected match gets a brighter face; other matches get a
+/// dimmer one.
+fn apply_search_highlights(editor: &mut Editor) {
+    use arx_buffer::{AdjustmentPolicy, Face, Interval, PropertyValue, StickyBehavior};
+
+    let Some(window_id) = editor.windows().active() else {
+        return;
+    };
+    let Some(buffer_id) = editor.windows().get(window_id).map(|d| d.buffer_id) else {
+        return;
+    };
+    let selected_idx = editor.search().selected_index();
+    let matches: Vec<(usize, usize, bool)> = editor
+        .search()
+        .matches()
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.match_len > 0)
+        .map(|(i, m)| {
+            let start = m.byte_start + m.match_offset;
+            let end = start + m.match_len;
+            (start, end, i == selected_idx)
+        })
+        .collect();
+
+    let Some(buf) = editor.buffers_mut().get_mut(buffer_id) else {
+        return;
+    };
+    let layer = buf
+        .properties_mut()
+        .ensure_layer("search", AdjustmentPolicy::Static);
+    layer.clear();
+
+    // Dim yellow background for non-selected matches.
+    let other_face = Face {
+        bg: Some(0x50_50_00),
+        priority: 50,
+        ..Face::default()
+    };
+    // Bright yellow background + black text for the selected match.
+    let selected_face = Face {
+        fg: Some(0x00_00_00),
+        bg: Some(0xE6_C8_3C),
+        bold: Some(true),
+        priority: 60,
+        ..Face::default()
+    };
+
+    for (start, end, is_selected) in &matches {
+        if start >= end {
+            continue;
+        }
+        let face = if *is_selected {
+            selected_face.clone()
+        } else {
+            other_face.clone()
+        };
+        layer.insert(Interval::new(
+            *start..*end,
+            PropertyValue::Decoration(face),
+            StickyBehavior::Shrink,
+        ));
+    }
+}
+
+/// Clear search highlights from the buffer's property map.
+fn clear_search_highlights(editor: &mut Editor) {
+    let Some(window_id) = editor.windows().active() else {
+        return;
+    };
+    let Some(buffer_id) = editor.windows().get(window_id).map(|d| d.buffer_id) else {
+        return;
+    };
+    if let Some(buf) = editor.buffers_mut().get_mut(buffer_id) {
+        buf.properties_mut().remove_layer("search");
+    }
+}
+
+stock_cmd!(SearchOpen, SEARCH_OPEN, "Open interactive buffer search");
+impl SearchOpen {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.search().is_open() {
+            return;
+        }
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let scroll = cx
+            .editor
+            .windows()
+            .get(window_id)
+            .map_or(0, |d| d.scroll_top_line);
+        let text = cx
+            .editor
+            .buffers()
+            .get(buffer_id)
+            .map_or_else(String::new, arx_buffer::Buffer::text);
+        cx.editor.search_mut().open(&text, cursor, scroll);
+        ensure_search_layer(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchClose,
+    SEARCH_CLOSE,
+    "Close search and restore cursor to original position"
+);
+impl SearchClose {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Restore saved position.
+        let saved_cursor = cx.editor.search().saved_cursor();
+        let saved_scroll = cx.editor.search().saved_scroll();
+        if let Some(window_id) = cx.editor.windows().active() {
+            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+                window.cursor_byte = saved_cursor;
+                window.scroll_top_line = saved_scroll;
+            }
+        }
+        clear_search_highlights(cx.editor);
+        cx.editor.search_mut().close();
+        leave_search_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchExecute,
+    SEARCH_EXECUTE,
+    "Accept the selected search match and jump to it"
+);
+impl SearchExecute {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Record history before closing.
+        let query = cx.editor.search().query().to_owned();
+        if !query.is_empty() {
+            cx.editor.search_mut().push_history(query);
+        }
+        // Jump cursor to the match (already there from preview,
+        // but make sure).
+        apply_search_preview(cx.editor);
+        clear_search_highlights(cx.editor);
+        cx.editor.search_mut().close();
+        leave_search_layer(cx.editor);
+        cx.editor.mark_dirty();
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+stock_cmd!(
+    SearchNext,
+    SEARCH_NEXT,
+    "Move the search selection down one row"
+);
+impl SearchNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().select_next();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchPrev,
+    SEARCH_PREV,
+    "Move the search selection up one row"
+);
+impl SearchPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().select_prev();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+const SEARCH_PAGE_SIZE: usize = 8;
+
+stock_cmd!(
+    SearchPageDown,
+    SEARCH_PAGE_DOWN,
+    "Move the search selection down one page"
+);
+impl SearchPageDown {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().select_next_n(SEARCH_PAGE_SIZE);
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchPageUp,
+    SEARCH_PAGE_UP,
+    "Move the search selection up one page"
+);
+impl SearchPageUp {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().select_prev_n(SEARCH_PAGE_SIZE);
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchToggleMode,
+    SEARCH_TOGGLE_MODE,
+    "Cycle search mode: fuzzy / literal / regex"
+);
+impl SearchToggleMode {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().toggle_mode();
+        let label = cx.editor.search().mode().label();
+        cx.editor.set_status(format!("Search mode: {label}"));
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchBackspace,
+    SEARCH_BACKSPACE,
+    "Delete the last character from the search query"
+);
+impl SearchBackspace {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().backspace();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchHistoryPrev,
+    SEARCH_HISTORY_PREV,
+    "Navigate to the previous search history entry"
+);
+impl SearchHistoryPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().history_prev();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchHistoryNext,
+    SEARCH_HISTORY_NEXT,
+    "Navigate to the next search history entry"
+);
+impl SearchHistoryNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().history_next();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
     }
 }
 

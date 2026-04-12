@@ -133,6 +133,7 @@ dependencies = [
  "arx-lsp",
  "arx-terminal",
  "postcard",
+ "regex",
  "serde",
  "tempfile",
  "thiserror 2.0.18",

@@ -52,6 +52,7 @@ pub struct Editor {
     commands: CommandRegistry,
     palette: CommandPalette,
     completion: CompletionPopup,
+    search: crate::search::BufferSearch,
     #[cfg(feature = "syntax")]
     highlight: HighlightManager,
     terminals: HashMap<crate::WindowId, arx_terminal::TerminalPane>,
@@ -119,6 +120,7 @@ impl Editor {
             commands,
             palette: CommandPalette::new(),
             completion: CompletionPopup::new(),
+            search: crate::search::BufferSearch::new(),
             terminals: HashMap::new(),
             terminal_redraw: None,
             #[cfg(feature = "syntax")]
@@ -184,6 +186,16 @@ impl Editor {
     /// Mutably borrow the command palette state.
     pub fn palette_mut(&mut self) -> &mut CommandPalette {
         &mut self.palette
+    }
+
+    /// Borrow the interactive buffer search state.
+    pub fn search(&self) -> &crate::search::BufferSearch {
+        &self.search
+    }
+
+    /// Mutably borrow the interactive buffer search state.
+    pub fn search_mut(&mut self) -> &mut crate::search::BufferSearch {
+        &mut self.search
     }
 
     /// Attach syntax highlighting to `buffer_id` based on `extension`.
@@ -343,6 +355,9 @@ impl Editor {
     pub fn handle_printable_fallback(&mut self, ch: char) {
         if self.palette.is_open() {
             self.palette.append_char(ch);
+            self.mark_dirty();
+        } else if self.search.is_open() {
+            self.search.append_char(ch);
             self.mark_dirty();
         } else {
             crate::stock::insert_at_cursor(self, &ch.to_string());

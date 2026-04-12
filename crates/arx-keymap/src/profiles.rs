@@ -23,6 +23,9 @@ use crate::commands::{
     COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE, COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN,
     COMMAND_PALETTE_PREV, COMMAND_PALETTE_HISTORY_NEXT, COMMAND_PALETTE_HISTORY_PREV,
     COMPLETION_ACCEPT, COMPLETION_DISMISS, COMPLETION_NEXT,
+    SEARCH_BACKSPACE, SEARCH_CLOSE, SEARCH_EXECUTE, SEARCH_HISTORY_NEXT,
+    SEARCH_HISTORY_PREV, SEARCH_NEXT, SEARCH_OPEN, SEARCH_PAGE_DOWN, SEARCH_PAGE_UP,
+    SEARCH_PREV, SEARCH_TOGGLE_MODE,
     COMPLETION_PAGE_DOWN, COMPLETION_PAGE_UP, COMPLETION_PREV,
     COMPLETION_TRIGGER, CURSOR_BUFFER_END,
     LSP_HOVER, TERMINAL_OPEN,
@@ -130,6 +133,9 @@ pub fn emacs() -> Profile {
     // Completion.
     m.bind_str("M-/", COMPLETION_TRIGGER).unwrap();
 
+    // Interactive buffer search (swiper-style).
+    m.bind_str("C-s", SEARCH_OPEN).unwrap();
+
     // LSP / diagnostic.
     m.bind_str("C-c l h", LSP_HOVER).unwrap();
     m.bind_str("M-n", LSP_NEXT_DIAGNOSTIC).unwrap();
@@ -205,6 +211,34 @@ pub fn completion_layer() -> Keymap {
     m.bind_str("M-v", COMPLETION_PAGE_UP).unwrap();
     m.bind_str("<PageDown>", COMPLETION_PAGE_DOWN).unwrap();
     m.bind_str("<PageUp>", COMPLETION_PAGE_UP).unwrap();
+    m
+}
+
+// ---------------------------------------------------------------------------
+// Interactive buffer search
+// ---------------------------------------------------------------------------
+
+/// Keymap pushed when the interactive search overlay opens. Similar to
+/// the palette layer: `<Enter>` accepts, `<Esc>` / `C-g` cancels,
+/// arrows and `C-n` / `C-p` navigate, printable keys fall through to
+/// the query via `handle_printable_fallback`.
+pub fn search_layer() -> Keymap {
+    let mut m = Keymap::named("search");
+    m.bind_str("<Enter>", SEARCH_EXECUTE).unwrap();
+    m.bind_str("<Esc>", SEARCH_CLOSE).unwrap();
+    m.bind_str("C-g", SEARCH_CLOSE).unwrap();
+    m.bind_str("<Up>", SEARCH_PREV).unwrap();
+    m.bind_str("<Down>", SEARCH_NEXT).unwrap();
+    m.bind_str("C-p", SEARCH_PREV).unwrap();
+    m.bind_str("C-n", SEARCH_NEXT).unwrap();
+    m.bind_str("C-v", SEARCH_PAGE_DOWN).unwrap();
+    m.bind_str("M-v", SEARCH_PAGE_UP).unwrap();
+    m.bind_str("<PageDown>", SEARCH_PAGE_DOWN).unwrap();
+    m.bind_str("<PageUp>", SEARCH_PAGE_UP).unwrap();
+    m.bind_str("M-s", SEARCH_TOGGLE_MODE).unwrap();
+    m.bind_str("<Backspace>", SEARCH_BACKSPACE).unwrap();
+    m.bind_str("M-p", SEARCH_HISTORY_PREV).unwrap();
+    m.bind_str("M-n", SEARCH_HISTORY_NEXT).unwrap();
     m
 }
 
@@ -289,6 +323,8 @@ pub fn vim() -> Profile {
     normal.bind_str("a", MODE_ENTER_INSERT).unwrap(); // simplified: no trailing cursor move yet
     normal.bind_str("o", MODE_ENTER_INSERT).unwrap(); // simplified: no newline-below yet
     normal.bind_str("x", BUFFER_DELETE_FORWARD).unwrap();
+    // Interactive buffer search (Vim `/` in normal mode).
+    normal.bind_str("/", SEARCH_OPEN).unwrap();
     // Undo / redo: Vim's canonical `u` in normal mode, `C-r` for redo.
     normal.bind_str("u", BUFFER_UNDO).unwrap();
     normal.bind_str("C-r", BUFFER_REDO).unwrap();

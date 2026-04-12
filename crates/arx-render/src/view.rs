@@ -87,10 +87,34 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
         }
     });
     if let Some(layout) = palette_layout.as_ref() {
-        // Shrink the text area to make room for the overlay. `prompt_row`
-        // being `None` would mean the terminal is too short for a useful
-        // overlay — in that case we leave text_rows alone and skip
-        // painting the palette below.
+        if let Some(prompt) = layout.prompt_row {
+            text_rows = prompt;
+        }
+    }
+
+    // Search overlay — same bottom-overlay geometry as the palette.
+    // Search and palette are mutually exclusive; the search overlay
+    // only paints if no palette is open.
+    let search_layout = if palette_layout.is_none() {
+        state.global.search.as_ref().map(|s| {
+            let matches_rows = s.max_rows.min(text_rows);
+            let prompt_row = if matches_rows < text_rows {
+                Some(text_rows - matches_rows - 1)
+            } else {
+                None
+            };
+            let matches_top = prompt_row.map(|r| r + 1);
+            SearchLayout {
+                view: s,
+                prompt_row,
+                matches_top,
+                matches_rows,
+            }
+        })
+    } else {
+        None
+    };
+    if let Some(ref layout) = search_layout {
         if let Some(prompt) = layout.prompt_row {
             text_rows = prompt;
         }
@@ -120,6 +144,10 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
 
     if let Some(layout) = palette_layout {
         paint_palette(&layout, cols, &mut grid, &mut cursors);
+    }
+
+    if let Some(layout) = search_layout {
+        paint_search(&layout, cols, &mut grid, &mut cursors);
     }
 
     if let Some(ref completion) = state.global.completion {
@@ -890,6 +918,153 @@ fn paint_palette_text(
     col
 }
 
+// ---------------------------------------------------------------------------
+// Search overlay
+// ---------------------------------------------------------------------------
+
+/// Pre-computed search overlay geometry for the current frame.
+struct SearchLayout<'a> {
+    view: &'a crate::view_state::SearchView,
+    prompt_row: Option<u16>,
+    matches_top: Option<u16>,
+    matches_rows: u16,
+}
+
+fn paint_search(
+    layout: &SearchLayout<'_>,
+    cols: u16,
+    grid: &mut CellGrid,
+    cursors: &mut SmallVec<[CursorRender; 1]>,
+) {
+    let Some(prompt_row) = layout.prompt_row else {
+        return;
+    };
+    let prompt_face = ResolvedFace {
+        fg: Color::WHITE,
+        bg: Color::rgb(0x1a, 0x20, 0x30),
+        ..ResolvedFace::DEFAULT
+    };
+    let selected_face = ResolvedFace {
+        fg: Color::BLACK,
+        bg: Color::rgb(0xd0, 0xd0, 0xe0),
+        bold: true,
+        ..ResolvedFace::DEFAULT
+    };
+
+    // Paint the prompt row: "Search (fuzzy): <query>  [N matches]"
+    clear_row(grid, prompt_row, cols, prompt_face);
+    let mut x: u16 = 0;
+    // Paint prompt text.
+    x = paint_palette_text(&layout.view.prompt, x, prompt_row, cols, prompt_face, grid);
+    // Paint query text.
+    let cursor_col = {
+        let before = x;
+        for g in layout.view.query.graphemes(true) {
+            if x >= cols {
+                break;
+            }
+            let w = UnicodeWidthStr::width(g).clamp(1, 2) as u16;
+            grid.set(
+                x,
+                prompt_row,
+                Cell {
+                    grapheme: CompactString::new(g),
+                    face: prompt_face,
+                    flags: CellFlags::empty(),
+                },
+            );
+            if w == 2 && x + 1 < cols {
+                grid.set(x + 1, prompt_row, Cell::wide_continuation(prompt_face));
+            }
+            x = x.saturating_add(w);
+        }
+        if x == before { before } else { x }
+    };
+    // Paint match count on the right side.
+    let count_str = format!("  [{} matches]", layout.view.total_matches);
+    if x + count_str.len() as u16 + 2 < cols {
+        let count_face = ResolvedFace {
+            fg: Color::rgb(0x80, 0x80, 0x90),
+            ..prompt_face
+        };
+        paint_palette_text(&count_str, x, prompt_row, cols, count_face, grid);
+    }
+
+    // Cursor at the end of the query.
+    cursors.clear();
+    cursors.push(CursorRender {
+        col: cursor_col.min(cols.saturating_sub(1)),
+        row: prompt_row,
+        style: CursorStyle::Bar,
+    });
+
+    // Paint match rows.
+    if let Some(matches_top) = layout.matches_top {
+        paint_search_matches(
+            layout.view,
+            matches_top,
+            layout.matches_rows,
+            cols,
+            prompt_face,
+            selected_face,
+            grid,
+        );
+    }
+}
+
+fn paint_search_matches(
+    view: &crate::view_state::SearchView,
+    matches_top: u16,
+    matches_rows: u16,
+    cols: u16,
+    face: ResolvedFace,
+    selected_face: ResolvedFace,
+    grid: &mut CellGrid,
+) {
+    if matches_rows == 0 {
+        return;
+    }
+    let total = view.matches.len();
+    let selected = view.selected.min(total.saturating_sub(1));
+    let rows_cap = matches_rows as usize;
+    let scroll_top = if total <= rows_cap || selected < rows_cap / 2 {
+        0
+    } else if selected + rows_cap / 2 >= total {
+        total - rows_cap
+    } else {
+        selected - rows_cap / 2
+    };
+
+    let line_num_face = ResolvedFace {
+        fg: Color::rgb(0x80, 0x80, 0x90),
+        ..face
+    };
+
+    for row_idx in 0..matches_rows {
+        let y = matches_top + row_idx;
+        let match_idx = scroll_top + row_idx as usize;
+        let Some(entry) = view.matches.get(match_idx) else {
+            clear_row(grid, y, cols, face);
+            continue;
+        };
+        let row_face = if match_idx == selected {
+            selected_face
+        } else {
+            face
+        };
+        let num_face = if match_idx == selected {
+            selected_face
+        } else {
+            line_num_face
+        };
+        clear_row(grid, y, cols, row_face);
+        // Paint "  NNN: line text"
+        let num_str = format!("{:>5}: ", entry.line_number + 1);
+        let col = paint_palette_text(&num_str, 0, y, cols, num_face, grid);
+        paint_palette_text(&entry.line_text, col, y, cols, row_face, grid);
+    }
+}
+
 /// Fill every cell in `row` with a space of `face`.
 fn clear_row(grid: &mut CellGrid, row: u16, cols: u16, face: ResolvedFace) {
     for x in 0..cols {
@@ -1258,6 +1433,7 @@ mod tests {
                 palette: None,
                 completion: None,
                 which_key: None,
+                search: None,
             },
         }
     }
@@ -1462,6 +1638,7 @@ mod tests {
                 palette: Some(palette),
                 completion: None,
                 which_key: None,
+                search: None,
             },
         }
     }

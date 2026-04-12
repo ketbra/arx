@@ -152,5 +152,28 @@ pub const COMPLETION_PAGE_DOWN: &str = "completion.page-down";
 /// Move the completion selection up one page.
 pub const COMPLETION_PAGE_UP: &str = "completion.page-up";
 
+/// Open interactive buffer search (swiper / telescope style).
+pub const SEARCH_OPEN: &str = "search.open";
+/// Close the search overlay and restore cursor to original position.
+pub const SEARCH_CLOSE: &str = "search.close";
+/// Accept the selected search match and jump to it.
+pub const SEARCH_EXECUTE: &str = "search.execute";
+/// Move the search selection down one row.
+pub const SEARCH_NEXT: &str = "search.next";
+/// Move the search selection up one row.
+pub const SEARCH_PREV: &str = "search.prev";
+/// Move the search selection down one page.
+pub const SEARCH_PAGE_DOWN: &str = "search.page-down";
+/// Move the search selection up one page.
+pub const SEARCH_PAGE_UP: &str = "search.page-up";
+/// Cycle search mode: fuzzy → literal → regex → fuzzy.
+pub const SEARCH_TOGGLE_MODE: &str = "search.toggle-mode";
+/// Remove the last character from the search query.
+pub const SEARCH_BACKSPACE: &str = "search.backspace";
+/// Navigate to the previous (older) search history entry.
+pub const SEARCH_HISTORY_PREV: &str = "search.history-prev";
+/// Navigate to the next (newer) search history entry.
+pub const SEARCH_HISTORY_NEXT: &str = "search.history-next";
+
 /// Open an embedded terminal in a split pane.
 pub const TERMINAL_OPEN: &str = "terminal.open";

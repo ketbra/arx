@@ -22,7 +22,8 @@ use tracing::{debug, trace, warn};
 use arx_core::{CommandBus, Layout as CoreLayout, SplitAxis, WindowId as CoreWindowId};
 use arx_render::{
     Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree,
-    PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SplitDirection, TerminalSize,
+    PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SearchEntry, SearchView,
+    SplitDirection, TerminalSize,
     TerminalViewCell, TerminalViewState, ViewState, WhichKeyEntry, WindowId as ViewWindowId,
     WindowState, diff,
     initial_paint, render,
@@ -437,12 +438,37 @@ fn build_global_state(
             .collect()
     });
 
+    let search_view = if editor.search().is_open() {
+        const MAX_SEARCH_ROWS: u16 = 10;
+        let total = editor.search().matches().len();
+        let entries = editor
+            .search()
+            .matches()
+            .iter()
+            .map(|m| SearchEntry {
+                line_number: m.line_number,
+                line_text: m.line_text.clone(),
+            })
+            .collect::<Vec<_>>();
+        Some(SearchView {
+            prompt: format!("Search ({}): ", editor.search().mode().label()),
+            query: editor.search().query().to_owned(),
+            matches: entries,
+            selected: editor.search().selected_index(),
+            max_rows: MAX_SEARCH_ROWS,
+            total_matches: total,
+        })
+    } else {
+        None
+    };
+
     Some(GlobalState {
         modeline_left: left,
         modeline_right: format!("{} bytes", text.len()),
         palette: palette_view,
         completion: completion_view,
         which_key,
+        search: search_view,
     })
 }
 
