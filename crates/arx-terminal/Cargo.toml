@@ -1,0 +1,17 @@
+[package]
+name = "arx-terminal"
+description = "Embedded terminal emulator for the Arx editor (alacritty_terminal + portable-pty)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+tokio = { workspace = true }
+tracing = { workspace = true }

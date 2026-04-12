@@ -47,11 +47,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
+use crate::window::{Layout, SplitAxis};
 use crate::{CommandBus, WindowId};
 use arx_buffer::BufferId;
 
 /// Top-level on-disk session file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionFile {
     /// Schema version. Start at 1; bump on incompatible changes.
     pub version: u32,
@@ -60,7 +61,14 @@ pub struct SessionFile {
 }
 
 impl SessionFile {
-    pub const CURRENT_VERSION: u32 = 1;
+    /// Current on-disk schema version.
+    ///
+    /// * **v1** — Phase 1. No layout tree; sessions restored to a
+    ///   single-leaf layout on the active window.
+    /// * **v2** — Phase 2. Adds an optional [`SerializedLayout`] so
+    ///   nested splits survive a restart. v1 files still load through
+    ///   the backward-compat path in [`Session::load_from_path`].
+    pub const CURRENT_VERSION: u32 = 2;
 
     pub fn new(session: Session) -> Self {
         Self {
@@ -71,7 +79,11 @@ impl SessionFile {
 }
 
 /// A serialisable snapshot of the editor's persistent state.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// Changing the shape of this struct is a schema break — bump
+/// [`SessionFile::CURRENT_VERSION`] and add a compat branch in
+/// [`Session::load_from_path`] to parse the older on-disk layout.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Session {
     /// All open buffers at snapshot time.
     pub buffers: Vec<SerializedBuffer>,
@@ -79,6 +91,131 @@ pub struct Session {
     pub windows: Vec<SerializedWindow>,
     /// Which window was active.
     pub active_window: Option<u64>,
+    /// The logical layout tree at snapshot time. `None` for sessions
+    /// that were saved before Phase 2 introduced splits (v1 on disk);
+    /// in that case restore collapses to a single-leaf layout on the
+    /// active window, matching Phase-1 behaviour.
+    pub layout: Option<SerializedLayout>,
+}
+
+/// Backward-compat helper for the v1 on-disk schema. Identical to
+/// [`Session`] minus the `layout` field. Parsed when a v1 file is
+/// encountered in [`Session::load_from_path`] and then lifted into the
+/// current [`Session`] shape with `layout = None`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+struct LegacySessionV1 {
+    buffers: Vec<SerializedBuffer>,
+    windows: Vec<SerializedWindow>,
+    active_window: Option<u64>,
+}
+
+impl From<LegacySessionV1> for Session {
+    fn from(v1: LegacySessionV1) -> Self {
+        Session {
+            buffers: v1.buffers,
+            windows: v1.windows,
+            active_window: v1.active_window,
+            layout: None,
+        }
+    }
+}
+
+/// Serialisable mirror of [`crate::window::Layout`]. Uses raw `u64`
+/// window ids (so old and new ids can be remapped on restore) and a
+/// local copy of [`crate::window::SplitAxis`] so `Session` doesn't
+/// depend on postcard's willingness to serialise foreign enums.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SerializedLayout {
+    /// A single pane containing the window with this saved id.
+    Leaf(u64),
+    /// A split of two child layouts.
+    Split {
+        axis: SerializedSplitAxis,
+        ratio: f32,
+        first: Box<SerializedLayout>,
+        second: Box<SerializedLayout>,
+    },
+}
+
+/// Local copy of [`crate::window::SplitAxis`] for on-disk encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SerializedSplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl From<SplitAxis> for SerializedSplitAxis {
+    fn from(axis: SplitAxis) -> Self {
+        match axis {
+            SplitAxis::Horizontal => SerializedSplitAxis::Horizontal,
+            SplitAxis::Vertical => SerializedSplitAxis::Vertical,
+        }
+    }
+}
+
+impl From<SerializedSplitAxis> for SplitAxis {
+    fn from(axis: SerializedSplitAxis) -> Self {
+        match axis {
+            SerializedSplitAxis::Horizontal => SplitAxis::Horizontal,
+            SerializedSplitAxis::Vertical => SplitAxis::Vertical,
+        }
+    }
+}
+
+impl SerializedLayout {
+    /// Snapshot a [`Layout`] for storage. The saved ids are the
+    /// current in-memory [`WindowId`]s; the restore path remaps them
+    /// to the freshly-allocated ids of reopened windows.
+    pub fn from_layout(layout: &Layout) -> Self {
+        match layout {
+            Layout::Leaf(id) => SerializedLayout::Leaf(id.0),
+            Layout::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => SerializedLayout::Split {
+                axis: (*axis).into(),
+                ratio: *ratio,
+                first: Box::new(SerializedLayout::from_layout(first)),
+                second: Box::new(SerializedLayout::from_layout(second)),
+            },
+        }
+    }
+
+    /// Rehydrate a [`Layout`] using `remap` to translate saved window
+    /// ids into the current editor's [`WindowId`]s.
+    ///
+    /// Leaves whose saved id isn't in `remap` (because the window
+    /// couldn't be restored — its buffer was skipped, for example) are
+    /// dropped and their enclosing [`Layout::Split`] is collapsed into
+    /// the surviving sibling. Returns `None` if every leaf in this
+    /// subtree was dropped.
+    #[must_use]
+    pub fn to_layout(&self, remap: &HashMap<u64, WindowId>) -> Option<Layout> {
+        match self {
+            SerializedLayout::Leaf(old_id) => remap.get(old_id).map(|id| Layout::Leaf(*id)),
+            SerializedLayout::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let new_first = first.to_layout(remap);
+                let new_second = second.to_layout(remap);
+                match (new_first, new_second) {
+                    (Some(a), Some(b)) => Some(Layout::Split {
+                        axis: (*axis).into(),
+                        ratio: *ratio,
+                        first: Box::new(a),
+                        second: Box::new(b),
+                    }),
+                    (Some(only), None) | (None, Some(only)) => Some(only),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
 }
 
 /// A single buffer entry in a session.
@@ -148,10 +285,12 @@ impl Session {
             })
             .collect();
         let active_window = editor.windows().active().map(|id| id.0);
+        let layout = editor.windows().layout().map(SerializedLayout::from_layout);
         Session {
             buffers,
             windows,
             active_window,
+            layout,
         }
     }
 
@@ -230,9 +369,14 @@ impl Session {
 
     /// Load a session from `path`. Returns `Ok(None)` if the file
     /// doesn't exist (expected on first run); returns
-    /// `Err(SessionIoError::VersionMismatch)` if the version is newer
-    /// than we know how to parse, and bubbles any other I/O or decode
+    /// `Err(SessionIoError::VersionMismatch)` for versions this build
+    /// doesn't know how to parse, and bubbles any other I/O or decode
     /// errors to the caller.
+    ///
+    /// v1 files (pre-Phase-2) are read via a separate compat schema
+    /// that doesn't know about the layout tree; they come back with
+    /// `layout = None` and restore to a single-leaf layout on the
+    /// active window, matching the Phase-1 experience.
     pub async fn load_from_path(path: &Path) -> Result<Option<Self>, SessionIoError> {
         let bytes = match tokio::fs::read(path).await {
             Ok(b) => b,
@@ -244,24 +388,41 @@ impl Session {
                 });
             }
         };
-        let file: SessionFile =
-            postcard::from_bytes(&bytes).map_err(SessionIoError::Decode)?;
-        if file.version != SessionFile::CURRENT_VERSION {
-            return Err(SessionIoError::VersionMismatch {
-                found: file.version,
+        // `SessionFile` encodes as `varint(version) ++ encode(session)`
+        // with no struct delimiters (postcard is field-concatenation),
+        // so we can peel the version off the front and then branch on
+        // it to pick the right schema for the rest of the bytes.
+        let (version, rest): (u32, &[u8]) =
+            postcard::take_from_bytes(&bytes).map_err(SessionIoError::Decode)?;
+        match version {
+            1 => {
+                let legacy: LegacySessionV1 =
+                    postcard::from_bytes(rest).map_err(SessionIoError::Decode)?;
+                Ok(Some(legacy.into()))
+            }
+            2 => {
+                let session: Session =
+                    postcard::from_bytes(rest).map_err(SessionIoError::Decode)?;
+                Ok(Some(session))
+            }
+            _ => Err(SessionIoError::VersionMismatch {
+                found: version,
                 expected: SessionFile::CURRENT_VERSION,
-            });
+            }),
         }
-        Ok(Some(file.session))
     }
 
     /// Apply this session to an editor: re-open each buffer that has
-    /// a path, open a window per [`SerializedWindow`], and restore
-    /// cursor / scroll / active-window state.
+    /// a path, open a window per [`SerializedWindow`], restore
+    /// cursor / scroll / active-window state, and — if the session
+    /// was saved with a layout tree — rebuild the split layout.
     ///
     /// This is best-effort: buffers whose files failed to read (e.g.
     /// the user moved them since last session) are skipped, and any
-    /// windows pointing at skipped buffers are dropped.
+    /// windows pointing at skipped buffers are dropped. The layout
+    /// tree's [`SerializedLayout::to_layout`] collapses splits whose
+    /// leaves disappeared, so a partial restore still produces a
+    /// well-formed tree.
     ///
     /// Goes through the command bus so it respects the single-writer
     /// invariant — callers can invoke it from anywhere with access to
@@ -314,13 +475,17 @@ impl Session {
             }
         }
 
-        // Re-open windows in the same order they were saved.
+        // Re-open windows in the same order they were saved, building
+        // the saved-id → new-id remap alongside so the layout tree
+        // (if any) can be rehydrated afterwards.
         let windows = self.windows.clone();
         let active_source_id = self.active_window;
-        let restored = bus
+        let serialized_layout = self.layout.clone();
+        let (restored, layout_applied) = bus
             .invoke(move |editor| {
                 let mut restored = 0usize;
                 let mut new_active: Option<crate::WindowId> = None;
+                let mut window_id_remap: HashMap<u64, crate::WindowId> = HashMap::new();
                 for w in &windows {
                     let Some(&buffer_id) = id_remap.get(&w.buffer_id) else {
                         continue;
@@ -331,19 +496,33 @@ impl Session {
                         data.scroll_top_line = w.scroll_top_line;
                         data.scroll_left_col = w.scroll_left_col;
                     }
+                    window_id_remap.insert(w.id, window_id);
                     if active_source_id == Some(w.id) {
                         new_active = Some(window_id);
                     }
                     restored += 1;
                 }
+
+                // Rehydrate the saved layout against the new ids and
+                // install it. When the session has no layout (v1 on
+                // disk, or an empty editor) or when every leaf was
+                // pruned, fall through to the Phase-1 behaviour where
+                // `set_active` below resets the layout to a single
+                // leaf on the active window.
+                let layout_applied = serialized_layout
+                    .as_ref()
+                    .and_then(|l| l.to_layout(&window_id_remap))
+                    .is_some_and(|rebuilt| editor.windows_mut().set_layout(rebuilt));
+
                 if let Some(id) = new_active {
                     editor.windows_mut().set_active(id);
                 }
                 editor.mark_dirty();
-                restored
+                (restored, layout_applied)
             })
             .await?;
         summary.restored_windows = restored;
+        summary.restored_layout = layout_applied;
         Ok(summary)
     }
 }
@@ -356,6 +535,13 @@ pub struct RestoreSummary {
     pub restored_buffers: usize,
     pub skipped_buffers: usize,
     pub restored_windows: usize,
+    /// Whether a saved layout tree was rehydrated and installed on
+    /// the editor. `false` either means the session had no layout
+    /// (pre-Phase-2 v1 file, or an empty editor at save time) or
+    /// that every leaf got pruned because its window couldn't be
+    /// restored. In both cases the editor falls back to the Phase-1
+    /// "single-leaf on active window" behaviour.
+    pub restored_layout: bool,
 }
 
 /// Errors from [`Session::save_to_path`] / [`Session::load_from_path`].
@@ -428,6 +614,7 @@ mod tests {
                 scroll_left_col: 0,
             }],
             active_window: Some(1),
+            layout: Some(SerializedLayout::Leaf(1)),
         };
         let file = SessionFile::new(session.clone());
         let bytes = postcard::to_stdvec(&file).unwrap();
@@ -456,6 +643,7 @@ mod tests {
                 scroll_left_col: 4,
             }],
             active_window: Some(7),
+            layout: Some(SerializedLayout::Leaf(7)),
         };
         session.save_to_path(&path).await.unwrap();
         assert!(path.exists());
@@ -603,6 +791,7 @@ mod tests {
                 scroll_left_col: 0,
             }],
             active_window: Some(1),
+            layout: Some(SerializedLayout::Leaf(1)),
         };
         // `open_file` treats NotFound as "start empty", so a missing
         // file does not, in fact, fail restore — it comes back as an
@@ -613,6 +802,270 @@ mod tests {
         let summary = session.restore(&bus).await.unwrap();
         assert_eq!(summary.restored_buffers, 1);
         assert_eq!(summary.restored_windows, 1);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- Layout persistence (Phase 2) ----
+
+    /// A v1-on-disk `SessionFile` for backward-compat coverage. Must
+    /// match the v1 wire shape exactly so postcard's field-by-field
+    /// decoder rebuilds the same bytes.
+    #[derive(Serialize)]
+    struct LegacySessionFileV1 {
+        version: u32,
+        session: LegacySessionV1,
+    }
+
+    #[test]
+    fn serialized_layout_roundtrips_through_window_layout() {
+        let original = Layout::Split {
+            axis: SplitAxis::Vertical,
+            ratio: 0.5,
+            first: Box::new(Layout::Leaf(WindowId(1))),
+            second: Box::new(Layout::Split {
+                axis: SplitAxis::Horizontal,
+                ratio: 0.7,
+                first: Box::new(Layout::Leaf(WindowId(2))),
+                second: Box::new(Layout::Leaf(WindowId(3))),
+            }),
+        };
+        let serialized = SerializedLayout::from_layout(&original);
+        let mut remap: HashMap<u64, WindowId> = HashMap::new();
+        remap.insert(1, WindowId(1));
+        remap.insert(2, WindowId(2));
+        remap.insert(3, WindowId(3));
+        let rehydrated = serialized.to_layout(&remap).unwrap();
+        assert_eq!(rehydrated, original);
+    }
+
+    #[test]
+    fn serialized_layout_remaps_ids_correctly() {
+        let saved = SerializedLayout::Split {
+            axis: SerializedSplitAxis::Vertical,
+            ratio: 0.5,
+            first: Box::new(SerializedLayout::Leaf(10)),
+            second: Box::new(SerializedLayout::Leaf(20)),
+        };
+        let mut remap = HashMap::new();
+        remap.insert(10, WindowId(101));
+        remap.insert(20, WindowId(202));
+        let layout = saved.to_layout(&remap).unwrap();
+        assert_eq!(
+            layout.leaves(),
+            vec![WindowId(101), WindowId(202)],
+        );
+    }
+
+    #[test]
+    fn serialized_layout_drops_unmapped_leaves() {
+        // Simulate a session where window id 2 couldn't be restored:
+        // the split should collapse into the surviving leaf (id 1).
+        let saved = SerializedLayout::Split {
+            axis: SerializedSplitAxis::Vertical,
+            ratio: 0.5,
+            first: Box::new(SerializedLayout::Leaf(1)),
+            second: Box::new(SerializedLayout::Leaf(2)),
+        };
+        let mut remap = HashMap::new();
+        remap.insert(1, WindowId(100));
+        let layout = saved.to_layout(&remap).unwrap();
+        assert_eq!(layout, Layout::Leaf(WindowId(100)));
+    }
+
+    #[test]
+    fn serialized_layout_returns_none_when_everything_pruned() {
+        let saved = SerializedLayout::Split {
+            axis: SerializedSplitAxis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(SerializedLayout::Leaf(1)),
+            second: Box::new(SerializedLayout::Leaf(2)),
+        };
+        let remap = HashMap::new();
+        assert!(saved.to_layout(&remap).is_none());
+    }
+
+    #[tokio::test]
+    async fn from_editor_captures_split_layout() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let a = editor
+                .buffers_mut()
+                .create_from_text("one", Some(PathBuf::from("/tmp/a.rs")));
+            editor.windows_mut().open(a);
+            editor
+                .windows_mut()
+                .split_active(SplitAxis::Vertical, a)
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        let session = bus
+            .invoke(|editor| Session::from_editor(editor))
+            .await
+            .unwrap();
+        let layout = session.layout.expect("layout captured");
+        match layout {
+            SerializedLayout::Split {
+                axis: SerializedSplitAxis::Vertical,
+                ..
+            } => {}
+            other => panic!("expected vertical split, got {other:?}"),
+        }
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_rebuilds_split_layout_with_new_ids() {
+        // Write two files to disk, open both in a single-pane session
+        // and split, save, then restore into a fresh editor and
+        // verify the layout tree has the same shape (two leaves,
+        // vertical split).
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        tokio::fs::write(&file_a, "aaaa").await.unwrap();
+        tokio::fs::write(&file_b, "bbbb").await.unwrap();
+        let session_path = dir.path().join("session.postcard");
+
+        // Session 1: two windows split vertically, second pane active.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        let path_a = file_a.clone();
+        let path_b = file_b.clone();
+        bus.invoke(move |editor| {
+            let a = editor.buffers_mut().create_from_text(
+                &std::fs::read_to_string(&path_a).unwrap(),
+                Some(path_a),
+            );
+            let b = editor.buffers_mut().create_from_text(
+                &std::fs::read_to_string(&path_b).unwrap(),
+                Some(path_b),
+            );
+            editor.windows_mut().open(a);
+            editor.windows_mut().split_active(SplitAxis::Vertical, b).unwrap();
+        })
+        .await
+        .unwrap();
+        let session = bus
+            .invoke(|editor| Session::from_editor(editor))
+            .await
+            .unwrap();
+        session.save_to_path(&session_path).await.unwrap();
+        drop(bus);
+        let _ = handle.await.unwrap();
+
+        // Session 2: restore and inspect the layout.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        let loaded = Session::load_from_path(&session_path).await.unwrap().unwrap();
+        let summary = loaded.restore(&bus).await.unwrap();
+        assert_eq!(summary.restored_buffers, 2);
+        assert_eq!(summary.restored_windows, 2);
+        assert!(summary.restored_layout, "layout should be rehydrated");
+
+        let shape = bus
+            .invoke(|editor| {
+                let layout = editor.windows().layout().unwrap().clone();
+                let leaves = layout.leaves().len();
+                let is_vertical_split = matches!(
+                    layout,
+                    Layout::Split {
+                        axis: SplitAxis::Vertical,
+                        ..
+                    }
+                );
+                (leaves, is_vertical_split)
+            })
+            .await
+            .unwrap();
+        assert_eq!(shape.0, 2, "two leaves after restore");
+        assert!(shape.1, "should be a vertical split at the root");
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_from_path_reads_v1_files_as_session_without_layout() {
+        // Hand-craft a v1-on-disk session (no layout field), write it
+        // out, and verify load_from_path lifts it into the current
+        // Session shape with layout = None.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.postcard");
+        let legacy = LegacySessionFileV1 {
+            version: 1,
+            session: LegacySessionV1 {
+                buffers: vec![SerializedBuffer {
+                    id: 1,
+                    path: Some(PathBuf::from("/tmp/old.rs")),
+                }],
+                windows: vec![SerializedWindow {
+                    id: 1,
+                    buffer_id: 1,
+                    cursor_byte: 7,
+                    scroll_top_line: 0,
+                    scroll_left_col: 0,
+                }],
+                active_window: Some(1),
+            },
+        };
+        let bytes = postcard::to_stdvec(&legacy).unwrap();
+        tokio::fs::write(&path, &bytes).await.unwrap();
+
+        let loaded = Session::load_from_path(&path).await.unwrap().unwrap();
+        assert_eq!(loaded.buffers.len(), 1);
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.active_window, Some(1));
+        assert!(
+            loaded.layout.is_none(),
+            "v1 file should have no layout after load",
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_v1_session_falls_back_to_single_leaf_layout() {
+        // A v1 session restore has no layout — the restored editor
+        // should still have a single-leaf layout on the active
+        // window, matching the Phase-1 experience.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("legacy.txt");
+        tokio::fs::write(&file, "legacy content").await.unwrap();
+
+        let session = Session {
+            buffers: vec![SerializedBuffer {
+                id: 1,
+                path: Some(file.clone()),
+            }],
+            windows: vec![SerializedWindow {
+                id: 1,
+                buffer_id: 1,
+                cursor_byte: 3,
+                scroll_top_line: 0,
+                scroll_left_col: 0,
+            }],
+            active_window: Some(1),
+            layout: None,
+        };
+
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        let summary = session.restore(&bus).await.unwrap();
+        assert!(!summary.restored_layout);
+
+        let leaves_and_active = bus
+            .invoke(|editor| {
+                let layout = editor.windows().layout().unwrap().clone();
+                let active = editor.windows().active().unwrap();
+                (layout.leaves().len(), active, layout)
+            })
+            .await
+            .unwrap();
+        assert_eq!(leaves_and_active.0, 1);
+        assert_eq!(leaves_and_active.2, Layout::Leaf(leaves_and_active.1));
+
         drop(bus);
         let _ = handle.await.unwrap();
     }

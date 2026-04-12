@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arx_buffer::{Buffer, BufferId, BufferSnapshot, ByteRange, Edit, EditOrigin};
 use arx_keymap::{FeedOutcome, KeyChord, KeymapEngine, Layer, Profile};
@@ -17,7 +18,11 @@ use tokio::sync::watch;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+#[cfg(feature = "syntax")]
+use arx_highlight::HighlightManager;
+
 use crate::command::CommandBus;
+use crate::completion::CompletionPopup;
 use crate::palette::CommandPalette;
 use crate::registry::{CommandContext, CommandRegistry};
 use crate::window::WindowManager;
@@ -46,6 +51,25 @@ pub struct Editor {
     keymap: KeymapEngine,
     commands: CommandRegistry,
     palette: CommandPalette,
+    completion: CompletionPopup,
+    #[cfg(feature = "syntax")]
+    highlight: HighlightManager,
+    terminals: HashMap<crate::WindowId, arx_terminal::TerminalPane>,
+    /// Redraw notify shared with terminal panes so they can wake the
+    /// render task when PTY output arrives.
+    terminal_redraw: Option<Arc<tokio::sync::Notify>>,
+    #[cfg(feature = "lsp")]
+    lsp_notifier: Option<tokio::sync::mpsc::Sender<arx_lsp::LspEvent>>,
+    /// When true, the next keystroke in `handle_key` is described
+    /// (command name shown in the status bar) rather than executed.
+    describe_key_mode: bool,
+    /// Kill ring — a stack of killed (cut/copied) text for yank.
+    kill_ring: Vec<String>,
+    /// Per-window mark (selection anchor) byte offsets.
+    marks: HashMap<crate::WindowId, usize>,
+    /// Transient message shown in the modeline (e.g. hover info, LSP
+    /// status). Cleared on the next user keystroke.
+    status_message: Option<String>,
     dirty: bool,
     quit_requested: bool,
 }
@@ -91,6 +115,17 @@ impl Editor {
             keymap,
             commands,
             palette: CommandPalette::new(),
+            completion: CompletionPopup::new(),
+            terminals: HashMap::new(),
+            terminal_redraw: None,
+            #[cfg(feature = "syntax")]
+            highlight: HighlightManager::new(),
+            #[cfg(feature = "lsp")]
+            lsp_notifier: None,
+            describe_key_mode: false,
+            kill_ring: Vec::new(),
+            marks: HashMap::new(),
+            status_message: None,
             dirty: false,
             quit_requested: false,
         }
@@ -147,6 +182,151 @@ impl Editor {
         &mut self.palette
     }
 
+    /// Attach syntax highlighting to `buffer_id` based on `extension`.
+    /// No-op if the extension doesn't map to a known grammar or if the
+    /// `syntax` feature is disabled. Uses disjoint field borrowing so
+    /// the highlight manager and buffer manager can both be touched
+    /// without a double-borrow.
+    pub fn attach_highlight(
+        &mut self,
+        id: arx_buffer::BufferId,
+        extension: Option<&str>,
+    ) {
+        #[cfg(feature = "syntax")]
+        if let Some(buffer) = self.buffers.get_mut(id) {
+            self.highlight.attach_buffer(buffer, extension);
+        }
+        #[cfg(not(feature = "syntax"))]
+        { let _ = (id, extension); }
+    }
+
+    /// Apply a user edit to `buffer_id` and update syntax highlights
+    /// in one step. Uses disjoint field borrowing so the highlight
+    /// manager and the buffer manager can both be touched in the same
+    /// call without a double-borrow. Falls back to a plain
+    /// `buffers.edit()` when the `syntax` feature is disabled.
+    pub fn edit_with_highlight(
+        &mut self,
+        id: arx_buffer::BufferId,
+        range: arx_buffer::ByteRange,
+        text: &str,
+        origin: arx_buffer::EditOrigin,
+    ) -> Option<arx_buffer::Edit> {
+        let edit = self.buffers.edit(id, range, text, origin)?;
+        #[cfg(feature = "syntax")]
+        if let Some(buffer) = self.buffers.get_mut(id) {
+            self.highlight.on_edit(buffer, &edit);
+        }
+        Some(edit)
+    }
+
+    /// Borrow the completion popup state.
+    pub fn completion(&self) -> &CompletionPopup {
+        &self.completion
+    }
+
+    /// Mutably borrow the completion popup state.
+    pub fn completion_mut(&mut self) -> &mut CompletionPopup {
+        &mut self.completion
+    }
+
+    /// Set the redraw notify for terminal panes. Called by the driver.
+    pub fn set_terminal_redraw(&mut self, notify: Arc<tokio::sync::Notify>) {
+        self.terminal_redraw = Some(notify);
+    }
+
+    /// Whether `window_id` is a terminal pane rather than a buffer.
+    pub fn is_terminal(&self, window_id: crate::WindowId) -> bool {
+        self.terminals.contains_key(&window_id)
+    }
+
+    /// Borrow a terminal pane by its window id.
+    pub fn terminal(&self, window_id: crate::WindowId) -> Option<&arx_terminal::TerminalPane> {
+        self.terminals.get(&window_id)
+    }
+
+    /// Borrow the terminals map (for iteration in the render path).
+    pub fn terminals(&self) -> &HashMap<crate::WindowId, arx_terminal::TerminalPane> {
+        &self.terminals
+    }
+
+    /// Mutably borrow the terminals map.
+    pub fn terminals_mut(&mut self) -> &mut HashMap<crate::WindowId, arx_terminal::TerminalPane> {
+        &mut self.terminals
+    }
+
+    /// Open a terminal pane in a split of the active window. Returns
+    /// the new window id, or `None` if there's no active window or
+    /// no redraw notify is set.
+    pub fn open_terminal(
+        &mut self,
+        axis: crate::window::SplitAxis,
+    ) -> Option<crate::WindowId> {
+        let redraw = self.terminal_redraw.clone()?;
+        // We need a buffer for the window manager (it requires a
+        // BufferId). Create a scratch buffer as a placeholder — the
+        // render path will detect it's a terminal and skip the buffer.
+        let placeholder_buf = self.buffers.create_scratch();
+        let new_id = self.windows.split_active(axis, placeholder_buf)?;
+        // Get the viewport size from the new window.
+        let data = self.windows.get(new_id)?;
+        let cols = if data.visible_cols > 0 { data.visible_cols } else { 80 };
+        let rows = if data.visible_rows > 0 { data.visible_rows } else { 24 };
+        match arx_terminal::TerminalPane::spawn(cols, rows, None, redraw) {
+            Ok(pane) => {
+                self.terminals.insert(new_id, pane);
+                self.mark_dirty();
+                Some(new_id)
+            }
+            Err(err) => {
+                tracing::warn!(%err, "failed to spawn terminal");
+                // Clean up the window we just created.
+                self.windows.close(new_id);
+                None
+            }
+        }
+    }
+
+    /// Close a terminal pane, removing it from both the window
+    /// manager and the terminals map.
+    pub fn close_terminal(&mut self, window_id: crate::WindowId) -> bool {
+        if self.terminals.remove(&window_id).is_some() {
+            self.windows.close(window_id);
+            self.mark_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set the LSP event notifier. Called by the driver at startup
+    /// once the LSP manager task is running.
+    #[cfg(feature = "lsp")]
+    pub fn set_lsp_notifier(&mut self, tx: tokio::sync::mpsc::Sender<arx_lsp::LspEvent>) {
+        self.lsp_notifier = Some(tx);
+    }
+
+    /// Drop the LSP notifier so the manager task's receiver sees
+    /// the channel close and exits cleanly. Called by the driver at
+    /// shutdown.
+    #[cfg(feature = "lsp")]
+    pub fn clear_lsp_notifier(&mut self) {
+        self.lsp_notifier = None;
+    }
+
+    /// Send an LSP event (best-effort, non-blocking). No-op if the
+    /// `lsp` feature is disabled or no notifier is set.
+    #[cfg(feature = "lsp")]
+    pub fn notify_lsp(&self, event: arx_lsp::LspEvent) {
+        if let Some(tx) = &self.lsp_notifier {
+            let _ = tx.try_send(event);
+        }
+    }
+
+    /// Stub when the `lsp` feature is off.
+    #[cfg(not(feature = "lsp"))]
+    pub fn notify_lsp(&self, _event: ()) {}
+
     /// Handle a printable character that the keymap layer reported as
     /// unbound. Single entry point called by the driver's input task
     /// (embedded *and* daemon variants) so the routing decision lives
@@ -165,6 +345,60 @@ impl Editor {
         }
     }
 
+    /// Enter describe-key mode. The next keystroke will be looked up
+    /// in the keymap and its binding shown in the status bar instead of
+    /// being executed.
+    pub fn enter_describe_key_mode(&mut self) {
+        self.describe_key_mode = true;
+        self.set_status("Describe key: press a key...");
+    }
+
+    /// Push text onto the kill ring.
+    pub fn kill_ring_push(&mut self, text: String) {
+        self.kill_ring.push(text);
+        // Cap at 64 entries.
+        if self.kill_ring.len() > 64 {
+            self.kill_ring.remove(0);
+        }
+    }
+
+    /// Peek at the top of the kill ring (most recently killed text).
+    pub fn kill_ring_top(&self) -> Option<&str> {
+        self.kill_ring.last().map(String::as_str)
+    }
+
+    /// Set the mark (selection anchor) for `window_id`.
+    pub fn set_mark(&mut self, window_id: crate::WindowId, byte: usize) {
+        self.marks.insert(window_id, byte);
+    }
+
+    /// Get the mark for `window_id`, if set.
+    pub fn mark(&self, window_id: crate::WindowId) -> Option<usize> {
+        self.marks.get(&window_id).copied()
+    }
+
+    /// Clear the mark for `window_id`.
+    pub fn clear_mark(&mut self, window_id: crate::WindowId) {
+        self.marks.remove(&window_id);
+    }
+
+    /// Set a transient status message shown in the modeline. Cleared
+    /// on the next keystroke via [`Self::clear_status`].
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some(msg.into());
+        self.mark_dirty();
+    }
+
+    /// Clear the status message.
+    pub fn clear_status(&mut self) {
+        self.status_message = None;
+    }
+
+    /// The current status message, if any.
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message.as_deref()
+    }
+
     /// Mark the editor as "display-affecting since the last frame" so the
     /// next tick of the event loop will ping the redraw notify (if any).
     pub fn mark_dirty(&mut self) {
@@ -176,6 +410,16 @@ impl Editor {
     #[must_use]
     pub fn take_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.dirty, false)
+    }
+
+    /// Whether a full repaint should be forced on the next frame
+    /// (e.g. after a status message changed). The render task checks
+    /// this and drops its cached previous frame when set.
+    pub fn needs_full_repaint(&self) -> bool {
+        // Status message changes can leave stale cells on some
+        // terminals if the differ only repaints the modeline row.
+        // Force a full repaint whenever the status changes.
+        self.status_message.is_some()
     }
 
     /// Request that the driver shut down cleanly. Called by the
@@ -201,6 +445,34 @@ impl Editor {
     /// movement or buffer edit that pushed the cursor off-screen pulls
     /// the scroll position along with it.
     pub fn handle_key(&mut self, bus: &CommandBus, chord: KeyChord) -> KeyHandled {
+        // Clear the transient status message on every keystroke.
+        self.status_message = None;
+
+        // Describe-key mode: look up the chord but show the binding
+        // instead of executing.
+        if self.describe_key_mode {
+            self.describe_key_mode = false;
+            let outcome = self.keymap.feed(chord.clone());
+            let description = match outcome {
+                FeedOutcome::Execute { command, .. } => {
+                    // Look up the description from the registry.
+                    let desc = self
+                        .commands
+                        .get(&command.name)
+                        .map_or(String::new(), |c| c.description().to_owned());
+                    if desc.is_empty() {
+                        format!("{chord} → {}", command.name)
+                    } else {
+                        format!("{chord} → {} — {desc}", command.name)
+                    }
+                }
+                FeedOutcome::Pending => format!("{chord} is a prefix key"),
+                FeedOutcome::Unbound { .. } => format!("{chord} is not bound"),
+            };
+            self.set_status(description);
+            return KeyHandled::Executed;
+        }
+
         let outcome = match self.keymap.feed(chord) {
             FeedOutcome::Execute { command, count } => {
                 // Clone the Arc out so we release the borrow of

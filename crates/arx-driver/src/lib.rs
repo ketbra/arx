@@ -48,6 +48,7 @@ pub mod driver;
 pub mod ext_host;
 pub mod ext_watcher;
 pub mod input;
+pub mod lsp;
 pub mod remote_backend;
 pub mod render;
 pub mod state;

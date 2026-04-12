@@ -145,6 +145,23 @@ impl KeymapEngine {
     /// Configure how leading digits are interpreted. Call with
     /// [`CountMode::Accept`] when entering a mode that counts (Vim
     /// normal) and [`CountMode::Reject`] when leaving it.
+    /// Find the shortest keybinding for `command_name` across all
+    /// layers in the stack (searched top-down). Returns a
+    /// human-readable string like `"C-x C-s"`, or `None` if unbound.
+    pub fn binding_for(&self, command_name: &str) -> Option<String> {
+        for layer in self.stack.iter().rev() {
+            if let Some(seq) = layer.map.binding_for(command_name) {
+                return Some(
+                    seq.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+        }
+        None
+    }
+
     pub fn set_count_mode(&mut self, mode: CountMode) {
         self.count_mode = mode;
     }

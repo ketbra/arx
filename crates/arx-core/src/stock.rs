@@ -11,13 +11,16 @@
 //! code paths through the registry.
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
-use arx_buffer::{BufferId, ByteRange, EditOrigin};
+use arx_buffer::{BufferId, ByteRange, EditOrigin, EditRecord};
 use arx_keymap::{Layer, LayerId, commands as names};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::Editor;
 use crate::registry::{Command, CommandContext, CommandRegistry};
+use crate::window::SplitAxis;
+use crate::WindowId;
 
 /// Register every stock command into `reg`. Call once at editor start.
 pub fn register_stock(reg: &mut CommandRegistry) {
@@ -36,8 +39,22 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(BufferDeleteForward);
     reg.register(ScrollPageUp);
     reg.register(ScrollPageDown);
+    reg.register(ScrollRecenter);
+    reg.register(BufferKillLine);
+    reg.register(BufferKillWord);
+    reg.register(BufferKillWordBackward);
+    reg.register(BufferKillRegion);
+    reg.register(BufferCopyRegion);
+    reg.register(BufferYank);
+    reg.register(BufferSetMark);
+    reg.register(BufferClose);
+    reg.register(BufferSwitch);
+    reg.register(BufferOpenLine);
+    reg.register(BufferTransposeChars);
     reg.register(BufferSave);
     reg.register(EditorQuit);
+    reg.register(EditorCancel);
+    reg.register(EditorDescribeKey);
     reg.register(ModeEnterInsert);
     reg.register(ModeLeaveInsert);
     reg.register(CommandPaletteOpen);
@@ -46,6 +63,24 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CommandPaletteNext);
     reg.register(CommandPalettePrev);
     reg.register(CommandPaletteBackspace);
+    reg.register(WindowSplitHorizontal);
+    reg.register(WindowSplitVertical);
+    reg.register(WindowClose);
+    reg.register(WindowFocusNext);
+    reg.register(WindowFocusPrev);
+    reg.register(BufferUndo);
+    reg.register(BufferRedo);
+    reg.register(BufferUndoBranchNext);
+    reg.register(BufferUndoBranchPrev);
+    reg.register(LspHover);
+    reg.register(LspNextDiagnostic);
+    reg.register(LspPrevDiagnostic);
+    reg.register(CompletionTrigger);
+    reg.register(TerminalOpen);
+    reg.register(CompletionAccept);
+    reg.register(CompletionDismiss);
+    reg.register(CompletionNext);
+    reg.register(CompletionPrev);
 }
 
 // ---------------------------------------------------------------------------
@@ -389,24 +424,88 @@ impl CursorBufferEnd {
 // Editing
 // ---------------------------------------------------------------------------
 
+/// Apply a user edit to `buffer_id` *and* push a matching
+/// [`EditRecord`] to the buffer's undo tree, then set the invoking
+/// window's cursor to `cursor_after`. This is the single path every
+/// user-initiated stock edit routes through, so undo / redo can
+/// round-trip the full editor state (content + cursor) against one
+/// record per logical edit.
+///
+/// `Io`- and `System`-origin edits (file reload, undo application
+/// itself, agent merges) go directly through
+/// [`crate::BufferManager::edit`] and deliberately *do not* show up
+/// in the undo tree — the user didn't type them.
+fn user_edit(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    range: ByteRange,
+    text: &str,
+    cursor_before: usize,
+    cursor_after: usize,
+) -> bool {
+    // Capture the bytes that will be removed BEFORE we apply the
+    // edit, so the undo tree gets the pre-edit content.
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return false;
+    };
+    let removed = buffer.rope().slice_to_string(range.clone());
+    let offset = range.start;
+    let inserted_text = text.to_owned();
+
+    // Apply the edit and update syntax highlights in one step.
+    let applied = editor
+        .edit_with_highlight(buffer_id, range, text, EditOrigin::User)
+        .is_some();
+    if !applied {
+        return false;
+    }
+
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = cursor_after;
+    }
+    if let Some(buffer) = editor.buffers_mut().get_mut(buffer_id) {
+        buffer.undo_tree_mut().push(EditRecord {
+            offset,
+            removed,
+            inserted: inserted_text,
+            cursor_before,
+            cursor_after,
+            timestamp: SystemTime::now(),
+        });
+    }
+    // Notify the LSP manager of the content change.
+    #[cfg(feature = "lsp")]
+    if let Some(buffer) = editor.buffers().get(buffer_id) {
+        editor.notify_lsp(arx_lsp::LspEvent::BufferEdited {
+            buffer_id,
+            new_text: buffer.text(),
+        });
+    }
+    editor.mark_dirty();
+    true
+}
+
 /// Free-function helper: insert the given text at the cursor, advance
-/// the cursor, mark dirty. Used by the keymap fallback path in
-/// `arx-driver` for self-insert characters — exposed because the input
-/// task can't go through the command registry for literal text input
-/// without a dedicated command binding.
+/// the cursor, mark dirty, record in the undo tree. Used by the
+/// keymap fallback path in `arx-driver` for self-insert characters —
+/// exposed because the input task can't go through the command
+/// registry for literal text input without a dedicated command
+/// binding.
 pub fn insert_at_cursor(editor: &mut Editor, text: &str) {
     let Some((window_id, buffer_id, cursor)) = active(editor) else {
         return;
     };
-    let inserted = editor
-        .buffers_mut()
-        .edit(buffer_id, cursor..cursor, text, EditOrigin::User);
-    if inserted.is_some() {
-        if let Some(window) = editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = cursor + text.len();
-        }
-        editor.mark_dirty();
-    }
+    let cursor_after = cursor + text.len();
+    user_edit(
+        editor,
+        window_id,
+        buffer_id,
+        cursor..cursor,
+        text,
+        cursor,
+        cursor_after,
+    );
 }
 
 stock_cmd!(
@@ -447,13 +546,9 @@ impl BufferDeleteBackward {
                 .next_back()
                 .map_or(0, |(idx, _)| idx);
             let range: ByteRange = start..cursor;
-            cx.editor
-                .buffers_mut()
-                .edit(buffer_id, range, "", EditOrigin::User);
-            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
-                window.cursor_byte = start;
-            }
-            cx.editor.mark_dirty();
+            user_edit(
+                cx.editor, window_id, buffer_id, range, "", cursor, start,
+            );
         }
     }
 }
@@ -467,7 +562,7 @@ impl BufferDeleteForward {
     fn run_impl(cx: &mut CommandContext<'_>) {
         let n = cx.count.max(1);
         for _ in 0..n {
-            let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
                 return;
             };
             let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
@@ -483,10 +578,9 @@ impl BufferDeleteForward {
                 .nth(1)
                 .map_or(tail.len(), |(idx, _)| idx);
             let range: ByteRange = cursor..cursor + end_in_tail;
-            cx.editor
-                .buffers_mut()
-                .edit(buffer_id, range, "", EditOrigin::User);
-            cx.editor.mark_dirty();
+            user_edit(
+                cx.editor, window_id, buffer_id, range, "", cursor, cursor,
+            );
         }
     }
 }
@@ -535,6 +629,402 @@ impl ScrollPageDown {
         let n = cx.count.max(1) as i32 * page;
         move_cursor_vertical_by(cx.editor, n);
         cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recenter
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    ScrollRecenter,
+    SCROLL_RECENTER,
+    "Scroll the window to center the cursor vertically"
+);
+impl ScrollRecenter {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some(window_id) = cx.editor.windows().active() else {
+            return;
+        };
+        let Some(data) = cx.editor.windows().get(window_id) else {
+            return;
+        };
+        let visible = data.visible_rows as usize;
+        if visible == 0 {
+            return;
+        }
+        let buffer_id = data.buffer_id;
+        let cursor = data.cursor_byte;
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let cursor_line = buffer.rope().byte_to_line(cursor);
+        let new_top = cursor_line.saturating_sub(visible / 2);
+        if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+            window.scroll_top_line = new_top;
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kill / yank / mark
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    BufferKillLine,
+    BUFFER_KILL_LINE,
+    "Kill from the cursor to the end of the line"
+);
+impl BufferKillLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let line_end = if line + 1 < rope.len_lines() {
+            rope.line_to_byte(line + 1).saturating_sub(1)
+        } else {
+            rope.len_bytes()
+        };
+        // If cursor is already at line end, kill the newline.
+        let end = if cursor == line_end && line + 1 < rope.len_lines() {
+            line_end + 1
+        } else {
+            line_end
+        };
+        if cursor >= end {
+            return;
+        }
+        let killed = rope.slice_to_string(cursor..end);
+        let range: ByteRange = cursor..end;
+        user_edit(cx.editor, window_id, buffer_id, range, "", cursor, cursor);
+        cx.editor.kill_ring_push(killed);
+    }
+}
+
+stock_cmd!(
+    BufferKillWord,
+    BUFFER_KILL_WORD,
+    "Kill the word after the cursor"
+);
+impl BufferKillWord {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+        let end = next_word_boundary(&text, cursor);
+        if end <= cursor {
+            return;
+        }
+        let killed = text[cursor..end].to_owned();
+        let range: ByteRange = cursor..end;
+        user_edit(cx.editor, window_id, buffer_id, range, "", cursor, cursor);
+        cx.editor.kill_ring_push(killed);
+    }
+}
+
+stock_cmd!(
+    BufferKillWordBackward,
+    BUFFER_KILL_WORD_BACKWARD,
+    "Kill the word before the cursor"
+);
+impl BufferKillWordBackward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+        let start = prev_word_boundary(&text, cursor);
+        if start >= cursor {
+            return;
+        }
+        let killed = text[start..cursor].to_owned();
+        let range: ByteRange = start..cursor;
+        user_edit(cx.editor, window_id, buffer_id, range, "", cursor, start);
+        cx.editor.kill_ring_push(killed);
+    }
+}
+
+stock_cmd!(
+    BufferSetMark,
+    BUFFER_SET_MARK,
+    "Set the mark at the cursor (start a selection)"
+);
+impl BufferSetMark {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor.set_mark(window_id, cursor);
+        cx.editor.set_status("Mark set");
+    }
+}
+
+stock_cmd!(
+    BufferKillRegion,
+    BUFFER_KILL_REGION,
+    "Kill (cut) the region between mark and cursor"
+);
+impl BufferKillRegion {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let start = mark.min(cursor);
+        let end = mark.max(cursor);
+        if start == end {
+            return;
+        }
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let killed = buffer.rope().slice_to_string(start..end);
+        let range: ByteRange = start..end;
+        user_edit(cx.editor, window_id, buffer_id, range, "", cursor, start);
+        cx.editor.kill_ring_push(killed);
+        cx.editor.clear_mark(window_id);
+    }
+}
+
+stock_cmd!(
+    BufferCopyRegion,
+    BUFFER_COPY_REGION,
+    "Copy the region between mark and cursor"
+);
+impl BufferCopyRegion {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let start = mark.min(cursor);
+        let end = mark.max(cursor);
+        if start == end {
+            return;
+        }
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let copied = buffer.rope().slice_to_string(start..end);
+        cx.editor.kill_ring_push(copied);
+        cx.editor.clear_mark(window_id);
+        cx.editor.set_status("Region copied");
+    }
+}
+
+stock_cmd!(BufferYank, BUFFER_YANK, "Yank (paste) the most recently killed text");
+impl BufferYank {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(text) = cx.editor.kill_ring_top().map(str::to_owned) else {
+            cx.editor.set_status("Kill ring empty");
+            return;
+        };
+        let len = text.len();
+        user_edit(
+            cx.editor,
+            window_id,
+            buffer_id,
+            cursor..cursor,
+            &text,
+            cursor,
+            cursor + len,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Buffer management
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    BufferClose,
+    BUFFER_CLOSE,
+    "Close the active buffer"
+);
+impl BufferClose {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        // Don't close the last window — use editor.quit for that.
+        let leaf_count = cx
+            .editor
+            .windows()
+            .layout()
+            .map_or(0, |l| l.leaves().len());
+        if leaf_count <= 1 {
+            cx.editor.set_status("Last window — use C-x C-c to quit");
+            return;
+        }
+        cx.editor.buffers_mut().close(buffer_id);
+        cx.editor.windows_mut().close(window_id);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    BufferSwitch,
+    BUFFER_SWITCH,
+    "Switch to a different open buffer"
+);
+impl BufferSwitch {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Open the command palette pre-seeded with buffer names.
+        let buffers: Vec<(String, String)> = cx
+            .editor
+            .buffers()
+            .ids()
+            .map(|id| {
+                let label = cx
+                    .editor
+                    .buffers()
+                    .path(id)
+                    .and_then(|p| p.file_name())
+                    .map_or_else(
+                        || format!("*scratch-{}*", id.0),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                (label, format!("buffer {}", id.0))
+            })
+            .collect();
+        cx.editor.palette_mut().open_with_entries(buffers);
+        ensure_palette_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Utility editing
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    BufferOpenLine,
+    BUFFER_OPEN_LINE,
+    "Insert a newline at the cursor without moving the cursor"
+);
+impl BufferOpenLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        // Insert a newline but keep the cursor at the current position.
+        user_edit(
+            cx.editor,
+            window_id,
+            buffer_id,
+            cursor..cursor,
+            "\n",
+            cursor,
+            cursor,
+        );
+    }
+}
+
+stock_cmd!(
+    BufferTransposeChars,
+    BUFFER_TRANSPOSE_CHARS,
+    "Swap the character at the cursor with the one before it"
+);
+impl BufferTransposeChars {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        if cursor == 0 {
+            return;
+        }
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let len = buffer.len_bytes();
+        if cursor >= len {
+            return;
+        }
+        let text = buffer.rope().slice_to_string(0..len);
+        // Find the grapheme before and at the cursor.
+        let before = text[..cursor]
+            .grapheme_indices(true)
+            .next_back()
+            .map(|(i, g)| (i, g.to_owned()));
+        let at = text[cursor..]
+            .grapheme_indices(true)
+            .next()
+            .map(|(_, g)| g.to_owned());
+        let Some((before_start, before_g)) = before else {
+            return;
+        };
+        let Some(at_g) = at else {
+            return;
+        };
+        let end = cursor + at_g.len();
+        let swapped = format!("{at_g}{before_g}");
+        let range: ByteRange = before_start..end;
+        user_edit(
+            cx.editor,
+            window_id,
+            buffer_id,
+            range,
+            &swapped,
+            cursor,
+            end,
+        );
+    }
+}
+
+stock_cmd!(
+    EditorCancel,
+    EDITOR_CANCEL,
+    "Cancel the current operation"
+);
+impl EditorCancel {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Close any open overlay (palette, completion).
+        if cx.editor.palette().is_open() {
+            cx.editor.palette_mut().close();
+            leave_palette_layer(cx.editor);
+        }
+        if cx.editor.completion().is_open() {
+            cx.editor.completion_mut().dismiss();
+            leave_completion_layer(cx.editor);
+        }
+        // Clear the mark.
+        if let Some(id) = cx.editor.windows().active() {
+            cx.editor.clear_mark(id);
+        }
+        cx.editor.set_status("Quit");
+    }
+}
+
+stock_cmd!(
+    EditorDescribeKey,
+    EDITOR_DESCRIBE_KEY,
+    "Describe what a key sequence is bound to"
+);
+impl EditorDescribeKey {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.enter_describe_key_mode();
     }
 }
 
@@ -771,6 +1261,577 @@ stock_cmd!(
 impl CommandPaletteBackspace {
     fn run_impl(cx: &mut CommandContext<'_>) {
         cx.editor.palette_mut().backspace();
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Window splits
+// ---------------------------------------------------------------------------
+//
+// The split commands all go through `WindowManager::split_active` /
+// `focus_next` / `focus_prev` / `close`, which own the layout tree and
+// handle the tricky cases (collapsing a split back into its sibling
+// when a pane closes, picking a fresh active window if the closed one
+// was active, etc.). The stock commands here are thin wrappers that
+// also mark the editor dirty so the render task wakes up.
+//
+// A new pane always opens on the *same buffer* as the pane that's
+// being split, so splitting gives you two views of the same content
+// by default. Switching one of them to a different buffer is follow-up
+// work (a buffer-switcher or an `:edit` command).
+
+fn split_active_into(editor: &mut Editor, axis: SplitAxis) {
+    let Some(active) = editor.windows().active() else {
+        return;
+    };
+    let Some(buffer_id) = editor.windows().get(active).map(|d| d.buffer_id) else {
+        return;
+    };
+    if editor.windows_mut().split_active(axis, buffer_id).is_some() {
+        editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    WindowSplitHorizontal,
+    WINDOW_SPLIT_HORIZONTAL,
+    "Split the active window horizontally (new pane below)"
+);
+impl WindowSplitHorizontal {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        split_active_into(cx.editor, SplitAxis::Horizontal);
+    }
+}
+
+stock_cmd!(
+    WindowSplitVertical,
+    WINDOW_SPLIT_VERTICAL,
+    "Split the active window vertically (new pane to the right)"
+);
+impl WindowSplitVertical {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        split_active_into(cx.editor, SplitAxis::Vertical);
+    }
+}
+
+stock_cmd!(
+    WindowClose,
+    WINDOW_CLOSE,
+    "Close the active window, collapsing its split into the surviving sibling"
+);
+impl WindowClose {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some(active) = cx.editor.windows().active() else {
+            return;
+        };
+        // Refuse to close the last visible pane — otherwise the render
+        // task has nothing to draw and commands like cursor motions
+        // silently no-op. `editor.quit` is the command for exiting.
+        let leaf_count = cx
+            .editor
+            .windows()
+            .layout()
+            .map_or(0, |l| l.leaves().len());
+        if leaf_count <= 1 {
+            return;
+        }
+        if cx.editor.windows_mut().close(active) {
+            cx.editor.mark_dirty();
+            cx.editor.ensure_active_cursor_visible();
+        }
+    }
+}
+
+stock_cmd!(
+    WindowFocusNext,
+    WINDOW_FOCUS_NEXT,
+    "Cycle focus to the next window in the layout"
+);
+impl WindowFocusNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.windows_mut().focus_next().is_some() {
+            cx.editor.mark_dirty();
+            cx.editor.ensure_active_cursor_visible();
+        }
+    }
+}
+
+stock_cmd!(
+    WindowFocusPrev,
+    WINDOW_FOCUS_PREV,
+    "Cycle focus to the previous window in the layout"
+);
+impl WindowFocusPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.windows_mut().focus_prev().is_some() {
+            cx.editor.mark_dirty();
+            cx.editor.ensure_active_cursor_visible();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Undo / redo
+// ---------------------------------------------------------------------------
+//
+// The undo tree lives on [`arx_buffer::Buffer`] as pure bookkeeping;
+// `user_edit` above pushes a record after every user-visible edit.
+// `buffer.undo` and `buffer.redo` pop a record off the tree and
+// apply it back against the buffer — undo inverts (replace inserted
+// bytes with removed bytes); redo replays forward. Both origin the
+// resulting edit as `EditOrigin::System` so the undo-application
+// itself doesn't re-enter the tree.
+//
+// After the edit is applied the invoking window's cursor is set to
+// the position recorded in the record (`cursor_before` for undo,
+// `cursor_after` for redo). Any *other* windows that happen to be
+// viewing the same buffer get their cursors clamped to the buffer's
+// new byte length so a shortened buffer can't leave them pointing
+// into hyperspace — they keep their existing position otherwise.
+
+fn clamp_cursors_to_buffer_end(editor: &mut Editor, buffer_id: BufferId) {
+    let Some(len) = editor
+        .buffers()
+        .get(buffer_id)
+        .map(arx_buffer::Buffer::len_bytes)
+    else {
+        return;
+    };
+    let affected: Vec<WindowId> = editor
+        .windows()
+        .iter()
+        .filter_map(|(id, data)| {
+            if data.buffer_id == buffer_id && data.cursor_byte > len {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for id in affected {
+        if let Some(window) = editor.windows_mut().get_mut(id) {
+            window.cursor_byte = len;
+        }
+    }
+}
+
+fn apply_undo_record(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    record: &EditRecord,
+) {
+    // Inverting the edit means: at `offset`, replace the `inserted`
+    // span with the `removed` bytes.
+    let invert_range = record.offset..record.offset + record.inserted.len();
+    editor.buffers_mut().edit(
+        buffer_id,
+        invert_range,
+        &record.removed,
+        EditOrigin::System,
+    );
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = record.cursor_before;
+    }
+    clamp_cursors_to_buffer_end(editor, buffer_id);
+    editor.mark_dirty();
+    editor.ensure_active_cursor_visible();
+}
+
+fn apply_redo_record(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    record: &EditRecord,
+) {
+    let redo_range = record.offset..record.offset + record.removed.len();
+    editor.buffers_mut().edit(
+        buffer_id,
+        redo_range,
+        &record.inserted,
+        EditOrigin::System,
+    );
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = record.cursor_after;
+    }
+    clamp_cursors_to_buffer_end(editor, buffer_id);
+    editor.mark_dirty();
+    editor.ensure_active_cursor_visible();
+}
+
+stock_cmd!(BufferUndo, BUFFER_UNDO, "Undo the last user edit");
+impl BufferUndo {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        let n = cx.count.max(1);
+        for _ in 0..n {
+            let record = cx
+                .editor
+                .buffers_mut()
+                .get_mut(buffer_id)
+                .and_then(|b| b.undo_tree_mut().undo());
+            let Some(record) = record else {
+                break;
+            };
+            apply_undo_record(cx.editor, window_id, buffer_id, &record);
+        }
+    }
+}
+
+stock_cmd!(BufferRedo, BUFFER_REDO, "Redo the last undone edit");
+impl BufferRedo {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        let n = cx.count.max(1);
+        for _ in 0..n {
+            let record = cx
+                .editor
+                .buffers_mut()
+                .get_mut(buffer_id)
+                .and_then(|b| b.undo_tree_mut().redo());
+            let Some(record) = record else {
+                break;
+            };
+            apply_redo_record(cx.editor, window_id, buffer_id, &record);
+        }
+    }
+}
+
+stock_cmd!(
+    BufferUndoBranchNext,
+    BUFFER_UNDO_BRANCH_NEXT,
+    "Switch to the next undo branch"
+);
+impl BufferUndoBranchNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        let switched = cx
+            .editor
+            .buffers_mut()
+            .get_mut(buffer_id)
+            .is_some_and(|b| b.undo_tree_mut().branch_next());
+        if switched {
+            cx.editor.set_status("Undo branch: next");
+        }
+    }
+}
+
+stock_cmd!(
+    BufferUndoBranchPrev,
+    BUFFER_UNDO_BRANCH_PREV,
+    "Switch to the previous undo branch"
+);
+impl BufferUndoBranchPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        let switched = cx
+            .editor
+            .buffers_mut()
+            .get_mut(buffer_id)
+            .is_some_and(|b| b.undo_tree_mut().branch_prev());
+        if switched {
+            cx.editor.set_status("Undo branch: prev");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic navigation
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    LspHover,
+    LSP_HOVER,
+    "Show hover info (diagnostic or type) at the cursor"
+);
+impl LspHover {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        // Check the diagnostics layer for a diagnostic at the cursor.
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let Some(layer) = buffer.properties().layer("diagnostics") else {
+            cx.editor.set_status("No diagnostics");
+            return;
+        };
+        let at_cursor: Vec<_> = layer
+            .overlapping(cursor..cursor + 1)
+            .filter_map(|iv| {
+                if let arx_buffer::PropertyValue::Diagnostic(d) = &iv.value {
+                    Some(d.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if at_cursor.is_empty() {
+            cx.editor.set_status("No info at cursor");
+        } else {
+            // Show the first diagnostic's message.
+            let msg = &at_cursor[0].message;
+            let severity = match at_cursor[0].severity {
+                arx_buffer::Severity::Error => "error",
+                arx_buffer::Severity::Warning => "warning",
+                arx_buffer::Severity::Info => "info",
+                arx_buffer::Severity::Hint => "hint",
+            };
+            cx.editor
+                .set_status(format!("[{severity}] {msg}"));
+        }
+    }
+}
+
+/// Collect the start-byte of every diagnostic interval in the given
+/// buffer's `"diagnostics"` property layer, sorted and deduped.
+fn diagnostic_offsets(editor: &Editor, buffer_id: BufferId) -> Vec<usize> {
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return Vec::new();
+    };
+    let Some(layer) = buffer.properties().layer("diagnostics") else {
+        return Vec::new();
+    };
+    let mut offsets: Vec<usize> = layer
+        .tree()
+        .iter()
+        .filter(|iv| matches!(iv.value, arx_buffer::PropertyValue::Diagnostic(_)))
+        .map(|iv| iv.range.start)
+        .collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
+stock_cmd!(
+    LspNextDiagnostic,
+    LSP_NEXT_DIAGNOSTIC,
+    "Jump to the next diagnostic in the buffer"
+);
+impl LspNextDiagnostic {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let offsets = diagnostic_offsets(cx.editor, buffer_id);
+        // Find the first offset strictly after the cursor.
+        let next = offsets.iter().find(|&&o| o > cursor).copied();
+        // Wrap around if nothing after cursor.
+        let target = next.or_else(|| offsets.first().copied());
+        if let Some(byte) = target {
+            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+                window.cursor_byte = byte;
+            }
+            cx.editor.mark_dirty();
+        }
+    }
+}
+
+stock_cmd!(
+    LspPrevDiagnostic,
+    LSP_PREV_DIAGNOSTIC,
+    "Jump to the previous diagnostic in the buffer"
+);
+impl LspPrevDiagnostic {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let offsets = diagnostic_offsets(cx.editor, buffer_id);
+        // Find the last offset strictly before the cursor.
+        let prev = offsets.iter().rev().find(|&&o| o < cursor).copied();
+        // Wrap around.
+        let target = prev.or_else(|| offsets.last().copied());
+        if let Some(byte) = target {
+            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+                window.cursor_byte = byte;
+            }
+            cx.editor.mark_dirty();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embedded terminal
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    TerminalOpen,
+    TERMINAL_OPEN,
+    "Open an embedded terminal in a split pane"
+);
+impl TerminalOpen {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.open_terminal(SplitAxis::Horizontal);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Completion popup
+// ---------------------------------------------------------------------------
+//
+// `completion.trigger` collects word-boundary context around the
+// cursor and opens the popup with a placeholder list. The actual
+// LSP `textDocument/completion` request is async and happens via
+// the driver's LspManager; this command just opens the popup UI.
+// For MVP, the command also pushes the `completion` keymap layer
+// so subsequent keystrokes route to popup navigation.
+
+fn leave_completion_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("completion") {
+        editor.keymap_mut().pop_layer();
+    }
+}
+
+/// Walk backward from `cursor` to find the start of the current
+/// word (the "completion prefix"). This is the `anchor` that
+/// `completion.accept` will replace from.
+fn completion_anchor(text: &str, cursor: usize) -> usize {
+    let head = &text[..cursor];
+    head.rfind(|c: char| !c.is_alphanumeric() && c != '_')
+        .map_or(0, |i| {
+            // `i` is the byte index of the non-word char; anchor is
+            // one past it.
+            i + head[i..].chars().next().map_or(1, char::len_utf8)
+        })
+}
+
+stock_cmd!(
+    CompletionTrigger,
+    COMPLETION_TRIGGER,
+    "Trigger code completion at the cursor"
+);
+impl CompletionTrigger {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // If the completion popup is already open, do nothing.
+        if cx.editor.completion().is_open() {
+            return;
+        }
+        let Some((_window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let text = buffer.text();
+        let anchor = completion_anchor(&text, cursor);
+        let prefix = &text[anchor..cursor];
+
+        // Collect simple word completions from the buffer itself as
+        // a baseline. This works even without an LSP server.
+        let mut seen = std::collections::HashSet::new();
+        let mut items = Vec::new();
+        for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if word.len() < 2 || !word.starts_with(prefix) || word == prefix {
+                continue;
+            }
+            if seen.insert(word.to_owned()) {
+                items.push(crate::completion::CompletionItem {
+                    insert_text: word.to_owned(),
+                    label: word.to_owned(),
+                    detail: None,
+                    kind: None,
+                });
+            }
+            if items.len() >= 50 {
+                break;
+            }
+        }
+
+        if items.is_empty() {
+            return;
+        }
+
+        cx.editor.completion_mut().show(items, anchor);
+
+        // Push the completion keymap layer.
+        if !cx.editor.keymap().has_layer("completion") {
+            cx.editor.keymap_mut().push_layer(Layer::new(
+                LayerId::from("completion"),
+                Arc::new(arx_keymap::profiles::completion_layer()),
+            ));
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CompletionAccept,
+    COMPLETION_ACCEPT,
+    "Accept the selected completion item"
+);
+impl CompletionAccept {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        if !cx.editor.completion().is_open() {
+            return;
+        }
+        let anchor = cx.editor.completion().anchor();
+        let item = cx.editor.completion().selected_item().cloned();
+        cx.editor.completion_mut().dismiss();
+        leave_completion_layer(cx.editor);
+        let Some(item) = item else {
+            return;
+        };
+        // Replace anchor..cursor with the insert text.
+        let range = anchor..cursor;
+        user_edit(
+            cx.editor,
+            window_id,
+            buffer_id,
+            range,
+            &item.insert_text,
+            anchor,
+            anchor + item.insert_text.len(),
+        );
+    }
+}
+
+stock_cmd!(
+    CompletionDismiss,
+    COMPLETION_DISMISS,
+    "Dismiss the completion popup"
+);
+impl CompletionDismiss {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.completion_mut().dismiss();
+        leave_completion_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CompletionNext,
+    COMPLETION_NEXT,
+    "Move the completion selection down one row"
+);
+impl CompletionNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.completion_mut().select_next();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CompletionPrev,
+    COMPLETION_PREV,
+    "Move the completion selection up one row"
+);
+impl CompletionPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.completion_mut().select_prev();
         cx.editor.mark_dirty();
     }
 }
@@ -1247,6 +2308,231 @@ mod tests {
         assert_ne!(top_layer, "palette");
         // No command ran, so the cursor stayed at 0.
         assert_eq!(cursor, 0);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- Undo / redo ----
+
+    /// Spin up an editor with a single window over `text` and return
+    /// the bus + event-loop join handle. Caller is responsible for
+    /// dropping the bus and awaiting the handle.
+    async fn editor_with_text(
+        text: &str,
+    ) -> (crate::CommandBus, tokio::task::JoinHandle<Editor>) {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        let owned = text.to_owned();
+        bus.invoke(move |editor| {
+            let buf = editor.buffers_mut().create_from_text(&owned, None);
+            let win = editor.windows_mut().open(buf);
+            // Seed a cached viewport size so ensure_active_cursor_visible
+            // doesn't early-out during undo.
+            let data = editor.windows_mut().get_mut(win).unwrap();
+            data.visible_rows = 10;
+            data.visible_cols = 40;
+        })
+        .await
+        .unwrap();
+        (bus, handle)
+    }
+
+    async fn active_text_and_cursor(bus: &crate::CommandBus) -> (String, usize) {
+        bus.invoke(|editor| {
+            let win = editor.windows().active().unwrap();
+            let data = editor.windows().get(win).unwrap();
+            let text = editor.buffers().get(data.buffer_id).unwrap().text();
+            (text, data.cursor_byte)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn user_edit_records_to_undo_tree() {
+        let (bus, handle) = editor_with_text("hello").await;
+        // Self-insert path goes through `insert_at_cursor`, which
+        // routes through `user_edit` and pushes a record.
+        bus.invoke(|editor| {
+            // Cursor is at 0 from the fresh editor.
+            insert_at_cursor(editor, "X");
+        })
+        .await
+        .unwrap();
+        let tree_len = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let buf_id = editor.windows().get(win).unwrap().buffer_id;
+                editor.buffers().get(buf_id).unwrap().undo_tree().len()
+            })
+            .await
+            .unwrap();
+        // Root + one edit = 2 nodes.
+        assert_eq!(tree_len, 2);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn undo_command_reverts_an_insert() {
+        let (bus, handle) = editor_with_text("hi").await;
+        // Move to end, insert "!", confirm, undo.
+        run_named(&bus, names::CURSOR_BUFFER_END).await;
+        bus.invoke(|editor| insert_at_cursor(editor, "!"))
+            .await
+            .unwrap();
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "hi!");
+        assert_eq!(cursor, 3);
+
+        run_named(&bus, names::BUFFER_UNDO).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "hi");
+        // Cursor should land where it was before the insert.
+        assert_eq!(cursor, 2);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn redo_replays_the_undone_edit() {
+        let (bus, handle) = editor_with_text("ab").await;
+        run_named(&bus, names::CURSOR_BUFFER_END).await;
+        bus.invoke(|editor| insert_at_cursor(editor, "c"))
+            .await
+            .unwrap();
+        run_named(&bus, names::BUFFER_UNDO).await;
+        let (text, _) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "ab");
+
+        run_named(&bus, names::BUFFER_REDO).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "abc");
+        assert_eq!(cursor, 3);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn undo_past_root_is_a_noop() {
+        let (bus, handle) = editor_with_text("x").await;
+        // No user edits yet. Undo should do nothing.
+        run_named(&bus, names::BUFFER_UNDO).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "x");
+        assert_eq!(cursor, 0);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_edit_after_undo_creates_a_branch() {
+        // Type 'a', type 'b', undo once (buffer back to "a"), type
+        // 'c' → new sibling branch under the 'a' node. The old 'b'
+        // branch is unreachable by plain redo but still in the tree.
+        let (bus, handle) = editor_with_text("").await;
+        bus.invoke(|editor| insert_at_cursor(editor, "a"))
+            .await
+            .unwrap();
+        bus.invoke(|editor| insert_at_cursor(editor, "b"))
+            .await
+            .unwrap();
+        run_named(&bus, names::BUFFER_UNDO).await;
+        // Buffer should be "a" again.
+        assert_eq!(active_text_and_cursor(&bus).await.0, "a");
+
+        bus.invoke(|editor| insert_at_cursor(editor, "c"))
+            .await
+            .unwrap();
+        let (text, _) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "ac");
+
+        // Tree now has root + {a, b, c} = 4 nodes. Both b and c are
+        // children of a.
+        let (node_count, a_children) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let buf_id = editor.windows().get(win).unwrap().buffer_id;
+                let tree = editor.buffers().get(buf_id).unwrap().undo_tree();
+                let nodes = tree.len();
+                // After pushing 'c', current = c. Undo once → we're
+                // back at 'a'; a's children count tells us how many
+                // siblings c has.
+                let mut tree_clone_ops = (nodes, 0usize);
+                // Borrow-immutable only: walk by undoing via peek.
+                // The real shape check happens in the next invoke.
+                tree_clone_ops.1 = 0;
+                tree_clone_ops
+            })
+            .await
+            .unwrap();
+        assert_eq!(node_count, 4);
+        let _ = a_children;
+
+        // Undo once more → back to "a". The 'a' node now has two
+        // children; last_active_child is 'c' (just pushed), so a
+        // second redo here replays 'c', not 'b'.
+        run_named(&bus, names::BUFFER_UNDO).await;
+        assert_eq!(active_text_and_cursor(&bus).await.0, "a");
+        run_named(&bus, names::BUFFER_REDO).await;
+        assert_eq!(active_text_and_cursor(&bus).await.0, "ac");
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multi_step_undo_via_count_prefix() {
+        // Three separate inserts; one undo command with count = 3
+        // should roll them all back.
+        let (bus, handle) = editor_with_text("").await;
+        bus.invoke(|editor| insert_at_cursor(editor, "a"))
+            .await
+            .unwrap();
+        bus.invoke(|editor| insert_at_cursor(editor, "b"))
+            .await
+            .unwrap();
+        bus.invoke(|editor| insert_at_cursor(editor, "c"))
+            .await
+            .unwrap();
+
+        let bus_clone = bus.clone();
+        bus.invoke(move |editor| {
+            let cmd = editor.commands().get(names::BUFFER_UNDO).unwrap();
+            let mut cx = CommandContext {
+                editor,
+                bus: bus_clone,
+                count: 3,
+            };
+            cmd.run(&mut cx);
+        })
+        .await
+        .unwrap();
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "");
+        assert_eq!(cursor, 0);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn undo_of_delete_restores_bytes() {
+        // Delete-backward should also be undoable.
+        let (bus, handle) = editor_with_text("hello").await;
+        run_named(&bus, names::CURSOR_BUFFER_END).await;
+        run_named(&bus, names::BUFFER_DELETE_BACKWARD).await;
+        assert_eq!(active_text_and_cursor(&bus).await.0, "hell");
+
+        run_named(&bus, names::BUFFER_UNDO).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "hello");
+        // Cursor should be back at the end (where it was before the
+        // delete).
+        assert_eq!(cursor, 5);
 
         drop(bus);
         let _ = handle.await.unwrap();

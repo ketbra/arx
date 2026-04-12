@@ -173,6 +173,19 @@ impl Driver {
         );
         let render_handle = tokio::spawn(render_task.run());
 
+        // Spawn the LSP manager task and install the notifier on the
+        // editor so buffer events reach it.
+        let (lsp_tx, lsp_rx) = tokio::sync::mpsc::channel(64);
+        let lsp_manager = crate::lsp::LspManager::new(bus.clone());
+        let _lsp_handle = tokio::spawn(lsp_manager.run(lsp_rx));
+        let terminal_redraw = redraw.clone();
+        bus.invoke(move |editor| {
+            editor.set_lsp_notifier(lsp_tx);
+            editor.set_terminal_redraw(terminal_redraw);
+        })
+        .await
+        .ok();
+
         // Run the builder-provided async hook (e.g. "open files") to
         // completion **before** spawning the input task. Otherwise the
         // input task would start consuming events against an editor
@@ -193,11 +206,21 @@ impl Driver {
         // Per-call hook (e.g. "wait for frames to land" in tests).
         hook(bus.clone()).await;
 
-        // Wait for input to end. When it does, signal render shutdown
-        // and drop the bus so the event loop drains.
+        // Wait for input to end. When it does, signal render shutdown,
+        // tear down the LSP notifier so the manager task can exit,
+        // then drop the bus so the event loop drains.
         let _ = input_handle.await;
         shutdown.fire();
         let _ = render_handle.await;
+        // Clear the LSP notifier sender inside the editor so the
+        // LspManager's receiver sees the channel close and its run()
+        // loop can exit cleanly. Without this, the sender lives inside
+        // the Editor returned by the event loop and the manager hangs.
+        bus.dispatch(|editor| {
+            editor.clear_lsp_notifier();
+        })
+        .await
+        .ok();
         drop(bus);
         let editor = loop_handle.await?;
         debug!("driver shut down cleanly");

@@ -64,6 +64,7 @@ pub use face::{Color, ResolvedFace};
 pub use render_tree::{CursorRender, CursorStyle, RenderTree};
 pub use view::render;
 pub use view_state::{
-    Cursor, GlobalState, GutterConfig, LayoutTree, PaletteEntry, PaletteView, ScrollPosition,
-    SplitDirection, TerminalSize, ViewState, WindowId, WindowState,
+    CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree, PaletteEntry,
+    PaletteView, Rect, ScrollPosition, SplitDirection, TerminalSize, TerminalViewCell,
+    TerminalViewState, ViewState, WindowId, WindowState,
 };

@@ -30,13 +30,15 @@ use crate::cell::{Cell, CellFlags, CellGrid};
 use crate::face::{Color, ResolvedFace};
 use crate::render_tree::{CursorRender, CursorStyle, RenderTree};
 use crate::view_state::{
-    GutterConfig, LayoutTree, PaletteView, TerminalSize, ViewState, WindowState,
+    GutterConfig, PaletteView, Rect, SplitDirection, TerminalSize, ViewState, WindowState,
 };
 
 /// Render a complete [`ViewState`] into a [`RenderTree`].
 ///
-/// Phase 1 only draws the single-window case. Splits will be added when
-/// we thread a per-window bounding box through [`render_window`].
+/// Phase 2 handles both single-window layouts and arbitrary nested
+/// [`LayoutTree::Split`] trees. Each leaf is painted inside its
+/// computed rectangle; a 1-cell separator is painted for every
+/// internal split node.
 ///
 /// When [`GlobalState::palette`] is `Some(_)`, the bottom of the
 /// viewport is partitioned like this:
@@ -50,10 +52,12 @@ use crate::view_state::{
 ///     └─── modeline    (1 row) ────────────────────────┘
 /// ```
 ///
-/// The shrinking happens before `render_window` is called so the
-/// primary window's cursor-visibility math (which depends on
-/// [`WindowState::scroll`] and the rect height passed here) doesn't
-/// collide with the overlay.
+/// The shrinking happens before the layout walker runs so per-pane
+/// cursor-visibility math doesn't collide with the overlay.
+///
+/// The terminal cursor is only emitted for the window whose id matches
+/// [`ViewState::active_window`]. Inactive panes still paint their
+/// text, but the cursor visually lives with the focused pane.
 pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
     let TerminalSize { cols, rows } = state.size;
     let mut grid = CellGrid::new(cols, rows);
@@ -92,19 +96,34 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
         }
     }
 
-    match &state.layout {
-        LayoutTree::Single(window_id) => {
-            if let Some(window) = state.windows.iter().find(|w| w.id == *window_id) {
-                render_window(window, Rect::new(0, 0, cols, text_rows), &mut grid, &mut cursors);
-            }
+    let root_rect = Rect::new(0, 0, cols, text_rows);
+    let active = state.active_window;
+
+    // Walk the layout once to paint every visible pane inside its
+    // computed rect. Each leaf is either a buffer window or a
+    // terminal pane.
+    state.layout.walk_pane_rects(root_rect, &mut |id, rect| {
+        let is_active = active == Some(id);
+        if let Some(term) = state.terminal_panes.iter().find(|t| t.id == id) {
+            render_terminal_pane(term, rect, is_active, &mut grid, &mut cursors);
+        } else if let Some(window) = state.windows.iter().find(|w| w.id == id) {
+            render_window(window, rect, is_active, &mut grid, &mut cursors);
         }
-        LayoutTree::Split { .. } => {
-            // TODO(phase-2): recurse into splits with per-pane bounding boxes.
-        }
-    }
+    });
+
+    // Second walk for separators between panes.
+    state
+        .layout
+        .walk_divider_rects(root_rect, &mut |rect, direction| {
+            paint_divider(&mut grid, rect, direction);
+        });
 
     if let Some(layout) = palette_layout {
         paint_palette(&layout, cols, &mut grid, &mut cursors);
+    }
+
+    if let Some(ref completion) = state.global.completion {
+        paint_completion(completion, cols, text_rows, &mut grid);
     }
 
     if let Some(row) = modeline_row {
@@ -112,6 +131,113 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
     }
 
     RenderTree::new(grid, cursors, frame_id)
+}
+
+/// Paint a single-cell-wide or single-row-tall separator between two
+/// panes. Uses box-drawing characters on top of the default face.
+fn paint_divider(grid: &mut CellGrid, rect: Rect, direction: SplitDirection) {
+    if rect.is_empty() {
+        return;
+    }
+    let face = ResolvedFace {
+        fg: Color::rgb(0x60, 0x60, 0x60),
+        bg: ResolvedFace::DEFAULT.bg,
+        ..ResolvedFace::DEFAULT
+    };
+    let glyph = match direction {
+        SplitDirection::Vertical => "\u{2502}",  // │
+        SplitDirection::Horizontal => "\u{2500}", // ─
+    };
+    for dy in 0..rect.height {
+        for dx in 0..rect.width {
+            grid.set(
+                rect.x + dx,
+                rect.y + dy,
+                Cell {
+                    grapheme: CompactString::new(glyph),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+        }
+    }
+}
+
+/// Render an embedded terminal pane into its bounding rectangle.
+/// Reads from the terminal's grid snapshot and paints each cell with
+/// its own foreground/background colours.
+fn render_terminal_pane(
+    term: &crate::view_state::TerminalViewState,
+    rect: Rect,
+    is_active: bool,
+    grid: &mut CellGrid,
+    cursors: &mut SmallVec<[CursorRender; 1]>,
+) {
+    if rect.is_empty() {
+        return;
+    }
+    // Clear the pane rect first.
+    for dy in 0..rect.height {
+        for dx in 0..rect.width {
+            grid.set(rect.x + dx, rect.y + dy, Cell::blank());
+        }
+    }
+    // Paint each terminal cell.
+    for (row_idx, row) in term.cells.iter().enumerate() {
+        if row_idx as u16 >= rect.height {
+            break;
+        }
+        let y = rect.y + row_idx as u16;
+        for (col_idx, cell) in row.iter().enumerate() {
+            if col_idx as u16 >= rect.width {
+                break;
+            }
+            let x = rect.x + col_idx as u16;
+            let face = ResolvedFace {
+                fg: Color(cell.fg),
+                bg: Color(cell.bg),
+                bold: cell.bold,
+                italic: cell.italic,
+                underline: if cell.underline {
+                    Some(arx_buffer::UnderlineStyle::Straight)
+                } else {
+                    None
+                },
+                ..ResolvedFace::DEFAULT
+            };
+            let grapheme = if cell.c.is_empty() || cell.c == "\0" {
+                CompactString::const_new(" ")
+            } else {
+                CompactString::new(&cell.c)
+            };
+            grid.set(
+                x,
+                y,
+                Cell {
+                    grapheme,
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+        }
+    }
+    // Cursor for the active terminal pane.
+    if is_active {
+        if let Some((col, row)) = term.cursor {
+            let cx = rect.x + col;
+            let cy = rect.y + row;
+            if cx < rect.x + rect.width && cy < rect.y + rect.height {
+                if let Some(cell) = grid.get_mut(cx, cy) {
+                    cell.flags |= CellFlags::CURSOR_PRIMARY;
+                }
+                cursors.push(CursorRender {
+                    col: cx,
+                    row: cy,
+                    style: CursorStyle::Block,
+                });
+            }
+        }
+    }
 }
 
 /// Pre-computed palette overlay geometry for the current frame.
@@ -128,14 +254,29 @@ struct PaletteLayout<'a> {
 }
 
 /// Render a single window into its bounding rectangle.
+///
+/// `is_active` controls whether the terminal cursor is emitted for this
+/// pane. In multi-pane layouts only the focused pane gets a cursor so
+/// users can tell at a glance which pane their keystrokes will go to.
 fn render_window(
     window: &WindowState,
     rect: Rect,
+    is_active: bool,
     grid: &mut CellGrid,
     cursors: &mut SmallVec<[CursorRender; 1]>,
 ) {
-    if rect.width == 0 || rect.height == 0 {
+    if rect.is_empty() {
         return;
+    }
+
+    // First clear the pane to the default face so leftover cells from
+    // a previous larger pane can't bleed through after a layout
+    // change. The diff layer will compress this into O(changed) ops on
+    // the next frame regardless.
+    for dy in 0..rect.height {
+        for dx in 0..rect.width {
+            grid.set(rect.x + dx, rect.y + dy, Cell::blank());
+        }
     }
 
     let buffer = &window.buffer;
@@ -175,7 +316,16 @@ fn render_window(
         }
     }
 
-    // Primary cursor position.
+    // Selection highlight: paint the region between mark and cursor
+    // with an inverted face so the user sees what's selected.
+    if let Some(ref sel) = window.selection {
+        paint_selection(window, sel, rect, gutter_width, text_width, grid);
+    }
+
+    // Primary cursor position — only for the active pane.
+    if !is_active {
+        return;
+    }
     if let Some(cursor_render) = resolve_cursor(
         window.primary_cursor().byte_offset,
         window,
@@ -195,6 +345,81 @@ fn render_window(
 /// Paint a line number at `(x, y)` right-justified to `width - 1` cells,
 /// leaving the final column blank as padding between the gutter and the
 /// text area.
+/// Paint a selection highlight over the cells that fall within the
+/// byte range `sel`. Walks each visible row, converts byte positions
+/// to screen columns, and applies a highlight face (blue background,
+/// white foreground) to the affected cells.
+fn paint_selection(
+    window: &WindowState,
+    sel: &std::ops::Range<usize>,
+    rect: Rect,
+    gutter_width: u16,
+    text_width: u16,
+    grid: &mut CellGrid,
+) {
+    if sel.start == sel.end || rect.is_empty() || text_width == 0 {
+        return;
+    }
+    let rope = window.buffer.rope();
+    let sel_face = ResolvedFace {
+        fg: Color::WHITE,
+        bg: Color::rgb(0x26, 0x4F, 0x78),
+        ..ResolvedFace::DEFAULT
+    };
+    let text_x = rect.x + gutter_width;
+
+    for row_idx in 0..rect.height {
+        let line_idx = window.scroll.top_line + row_idx as usize;
+        if line_idx >= rope.len_lines() {
+            break;
+        }
+        let line_start = rope.line_to_byte(line_idx);
+        let line_end = if line_idx + 1 < rope.len_lines() {
+            rope.line_to_byte(line_idx + 1)
+        } else {
+            rope.len_bytes()
+        };
+        // Does this line overlap the selection?
+        if line_end <= sel.start || line_start >= sel.end {
+            continue;
+        }
+        // Compute the column range within this line that's selected.
+        let sel_start_in_line = sel.start.max(line_start) - line_start;
+        let sel_end_in_line = sel.end.min(line_end) - line_start;
+
+        // Walk characters to convert byte offsets to display columns.
+        let line_text = rope.slice_to_string(line_start..line_end);
+        let mut byte_in_line: usize = 0;
+        let mut display_col: u16 = 0;
+        for grapheme in line_text.grapheme_indices(true) {
+            let (gi, g) = grapheme;
+            let g_end = gi + g.len();
+            let w = UnicodeWidthStr::width(g).clamp(1, 2) as u16;
+            if gi >= sel_end_in_line {
+                break;
+            }
+            if g_end > sel_start_in_line && gi < sel_end_in_line {
+                // This grapheme overlaps the selection. Compute its
+                // screen column (accounting for horizontal scroll).
+                if display_col >= window.scroll.left_col
+                    && display_col - window.scroll.left_col < text_width
+                {
+                    let screen_col = text_x + (display_col - window.scroll.left_col);
+                    let y = rect.y + row_idx;
+                    for dx in 0..w {
+                        if let Some(cell) = grid.get_mut(screen_col + dx, y) {
+                            cell.face = sel_face;
+                        }
+                    }
+                }
+            }
+            display_col += w;
+            byte_in_line = g_end;
+        }
+        let _ = byte_in_line;
+    }
+}
+
 fn paint_gutter(grid: &mut CellGrid, x: u16, y: u16, width: u16, line_number: usize) {
     if width == 0 {
         return;
@@ -751,6 +976,131 @@ fn render_modeline(global: &crate::view_state::GlobalState, row: u16, cols: u16,
 
 /// Compute the width of the gutter for a window. Ensures the largest
 /// visible line number fits in the gutter (plus one cell of padding).
+#[allow(clippy::too_many_lines)]
+/// Paint a completion popup near the cursor. The popup is a small
+/// floating box showing completion items with the selected one
+/// highlighted. Positioned just below the anchor row, clamped to
+/// fit within the terminal.
+fn paint_completion(
+    view: &crate::view_state::CompletionView,
+    cols: u16,
+    max_height: u16,
+    grid: &mut CellGrid,
+) {
+    if view.items.is_empty() {
+        return;
+    }
+    let visible_rows = view.max_rows.min(view.items.len() as u16).min(max_height);
+    if visible_rows == 0 {
+        return;
+    }
+    // Position: just below the anchor row, at the anchor column.
+    let start_row = (view.anchor_row + 1).min(max_height.saturating_sub(visible_rows));
+    let start_col = view.anchor_col.min(cols.saturating_sub(1));
+
+    // Compute popup width: max label length + kind + padding, capped.
+    let max_label: u16 = view
+        .items
+        .iter()
+        .map(|e| e.label.len() as u16 + if e.kind.is_empty() { 0 } else { e.kind.len() as u16 + 1 })
+        .max()
+        .unwrap_or(10)
+        .clamp(10, 40);
+    let popup_width = (max_label + 4).min(cols - start_col);
+
+    let normal_face = ResolvedFace {
+        fg: Color::rgb(0xD0, 0xD0, 0xD0),
+        bg: Color::rgb(0x2C, 0x2C, 0x3C),
+        ..ResolvedFace::DEFAULT
+    };
+    let selected_face = ResolvedFace {
+        fg: Color::BLACK,
+        bg: Color::rgb(0x61, 0xAF, 0xEF),
+        bold: true,
+        ..ResolvedFace::DEFAULT
+    };
+    let kind_face = ResolvedFace {
+        fg: Color::rgb(0xE5, 0xC0, 0x7B),
+        bg: normal_face.bg,
+        ..ResolvedFace::DEFAULT
+    };
+    let kind_selected_face = ResolvedFace {
+        fg: Color::rgb(0x30, 0x30, 0x30),
+        bg: selected_face.bg,
+        ..ResolvedFace::DEFAULT
+    };
+
+    // Scroll to keep selection visible.
+    let scroll_top = if view.selected < visible_rows as usize {
+        0
+    } else {
+        view.selected - visible_rows as usize + 1
+    };
+
+    for row_idx in 0..visible_rows {
+        let y = start_row + row_idx;
+        if y >= max_height {
+            break;
+        }
+        let item_idx = scroll_top + row_idx as usize;
+        let Some(entry) = view.items.get(item_idx) else {
+            continue;
+        };
+        let is_sel = item_idx == view.selected;
+        let face = if is_sel { selected_face } else { normal_face };
+        let kf = if is_sel { kind_selected_face } else { kind_face };
+
+        // Clear the row.
+        for dx in 0..popup_width {
+            grid.set(
+                start_col + dx,
+                y,
+                Cell {
+                    grapheme: CompactString::const_new(" "),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+        }
+        // Paint kind indicator.
+        let mut x = start_col + 1;
+        if !entry.kind.is_empty() {
+            for ch in entry.kind.chars() {
+                if x >= start_col + popup_width {
+                    break;
+                }
+                grid.set(
+                    x,
+                    y,
+                    Cell {
+                        grapheme: CompactString::new(ch.encode_utf8(&mut [0; 4])),
+                        face: kf,
+                        flags: CellFlags::empty(),
+                    },
+                );
+                x += 1;
+            }
+            x += 1; // space after kind
+        }
+        // Paint label.
+        for ch in entry.label.chars() {
+            if x >= start_col + popup_width - 1 {
+                break;
+            }
+            grid.set(
+                x,
+                y,
+                Cell {
+                    grapheme: CompactString::new(ch.encode_utf8(&mut [0; 4])),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+            x += 1;
+        }
+    }
+}
+
 fn compute_gutter_width(config: GutterConfig, last_line: usize) -> u16 {
     if !config.line_numbers {
         return 0;
@@ -771,31 +1121,13 @@ fn digit_count(mut n: usize) -> usize {
     c
 }
 
-// ---------------------------------------------------------------------------
-// Little helper rect
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-struct Rect {
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-}
-
-impl Rect {
-    const fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
-        Self { x, y, width, height }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use arx_buffer::{Buffer, BufferId};
     use smallvec::smallvec as sv;
 
-    use crate::view_state::{Cursor, GlobalState, ScrollPosition};
+    use crate::view_state::{Cursor, GlobalState, LayoutTree, ScrollPosition};
 
     fn window_for(text: &str) -> WindowState {
         let buf = Buffer::from_str(BufferId(1), text);
@@ -805,18 +1137,23 @@ mod tests {
             cursors: sv![Cursor::at(0)],
             scroll: ScrollPosition::default(),
             gutter: GutterConfig::default(),
+            selection: None,
         }
     }
 
     fn state_for(window: WindowState, cols: u16, rows: u16) -> ViewState {
+        let id = window.id;
         ViewState {
             size: TerminalSize::new(cols, rows),
-            layout: LayoutTree::Single(window.id),
+            layout: LayoutTree::Single(id),
             windows: vec![window],
+            terminal_panes: vec![],
+            active_window: Some(id),
             global: GlobalState {
                 modeline_left: String::new(),
                 modeline_right: String::new(),
                 palette: None,
+                completion: None,
             },
         }
     }
@@ -1008,14 +1345,18 @@ mod tests {
     // ---- Command palette overlay ----
 
     fn state_with_palette(window: WindowState, cols: u16, rows: u16, palette: PaletteView) -> ViewState {
+        let id = window.id;
         ViewState {
             size: TerminalSize::new(cols, rows),
-            layout: LayoutTree::Single(window.id),
+            layout: LayoutTree::Single(id),
             windows: vec![window],
+            terminal_panes: vec![],
+            active_window: Some(id),
             global: GlobalState {
                 modeline_left: String::new(),
                 modeline_right: String::new(),
                 palette: Some(palette),
+                completion: None,
             },
         }
     }
@@ -1112,5 +1453,126 @@ mod tests {
         let tree = render(&state, 0);
         assert_eq!(tree.cursors.len(), 1);
         assert_eq!(tree.cursors[0].style, CursorStyle::Bar);
+    }
+
+    // ---- Split layouts ----
+
+    fn window_with_id(id: u64, text: &str) -> WindowState {
+        let buf = Buffer::from_str(BufferId(id), text);
+        WindowState {
+            id: crate::view_state::WindowId(id),
+            buffer: buf.snapshot(),
+            cursors: sv![Cursor::at(0)],
+            scroll: ScrollPosition::default(),
+            gutter: GutterConfig::default(),
+            selection: None,
+        }
+    }
+
+    #[test]
+    fn vertical_split_paints_both_panes_and_a_divider() {
+        let left = window_with_id(1, "L1\nL2");
+        let right = window_with_id(2, "R1\nR2");
+        let state = ViewState {
+            size: TerminalSize::new(21, 4),
+            layout: LayoutTree::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutTree::Single(left.id)),
+                second: Box::new(LayoutTree::Single(right.id)),
+            },
+            windows: vec![left, right],
+            terminal_panes: vec![],
+            active_window: Some(crate::view_state::WindowId(1)),
+            global: GlobalState::default(),
+        };
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        // Row 0 must contain text from both panes.
+        assert!(lines[0].contains("L1"), "left pane missing: {:?}", lines[0]);
+        assert!(lines[0].contains("R1"), "right pane missing: {:?}", lines[0]);
+        // Divider column runs vertically through rows 0..text_rows.
+        // The divider char is U+2502 (│).
+        let divider_col = lines[0]
+            .chars()
+            .position(|c| c == '\u{2502}')
+            .expect("divider glyph not painted");
+        // The divider should also appear on row 1.
+        let row1 = lines[1];
+        let row1_divider = row1.chars().position(|c| c == '\u{2502}').unwrap();
+        assert_eq!(divider_col, row1_divider);
+    }
+
+    #[test]
+    fn horizontal_split_paints_both_panes_stacked() {
+        let top = window_with_id(1, "topline");
+        let bot = window_with_id(2, "botline");
+        let state = ViewState {
+            size: TerminalSize::new(20, 7),
+            layout: LayoutTree::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutTree::Single(top.id)),
+                second: Box::new(LayoutTree::Single(bot.id)),
+            },
+            windows: vec![top, bot],
+            terminal_panes: vec![],
+            active_window: Some(crate::view_state::WindowId(2)),
+            global: GlobalState::default(),
+        };
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        // Top pane lives on row 0 (inside its rect).
+        assert!(lines[0].contains("topline"), "top row: {:?}", lines[0]);
+        // Bottom pane lives somewhere on rows >= top-half + 1.
+        let bot_row = lines
+            .iter()
+            .position(|l| l.contains("botline"))
+            .expect("botline not painted");
+        assert!(bot_row > 0);
+    }
+
+    #[test]
+    fn inactive_pane_does_not_emit_a_cursor() {
+        let mut a = window_with_id(1, "aaa");
+        a.cursors = sv![Cursor::at(1)];
+        let mut b = window_with_id(2, "bbb");
+        b.cursors = sv![Cursor::at(2)];
+        let state = ViewState {
+            size: TerminalSize::new(21, 4),
+            layout: LayoutTree::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutTree::Single(a.id)),
+                second: Box::new(LayoutTree::Single(b.id)),
+            },
+            windows: vec![a, b],
+            terminal_panes: vec![],
+            active_window: Some(crate::view_state::WindowId(2)),
+            global: GlobalState::default(),
+        };
+        let tree = render(&state, 0);
+        // Exactly one cursor, and it belongs to the active (right) pane.
+        // Active window `b` has text "bbb" with cursor at byte 2 so the
+        // cursor must land somewhere in the right half of the layout
+        // (col > divider).
+        assert_eq!(tree.cursors.len(), 1);
+        let divider_col = {
+            let t = tree.cells.to_debug_text();
+            t.split('\n')
+                .next()
+                .unwrap()
+                .chars()
+                .position(|c| c == '\u{2502}')
+                .unwrap() as u16
+        };
+        assert!(
+            tree.cursors[0].col > divider_col,
+            "cursor at col {} should be right of divider at {}",
+            tree.cursors[0].col,
+            divider_col
+        );
     }
 }

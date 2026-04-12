@@ -235,6 +235,17 @@ impl From<&crossterm::event::KeyEvent> for KeyChord {
         use crossterm::event::{KeyCode, KeyModifiers as XtermMods};
 
         let key = match ev.code {
+            // Space with modifiers (C-SPC, M-SPC) → Named key so it
+            // matches `<Space>` in binding strings. Bare space stays
+            // as Char(' ') for self-insert.
+            // Space with modifiers (C-SPC, M-SPC) → Named key so it
+            // matches `<Space>` in binding strings. Bare space stays
+            // as Char(' ') for self-insert.
+            KeyCode::Char(' ' | '\0')
+                if ev.modifiers.intersects(XtermMods::CONTROL | XtermMods::ALT) =>
+            {
+                Key::Named(NamedKey::Space)
+            }
             KeyCode::Char(c) => Key::Char(c),
             KeyCode::Enter => Key::Named(NamedKey::Enter),
             KeyCode::Esc => Key::Named(NamedKey::Escape),

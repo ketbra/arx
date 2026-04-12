@@ -5,6 +5,9 @@ members = [
     "crates/arx-buffer",
     "crates/arx-core",
     "crates/arx-driver",
+    "crates/arx-highlight",
+    "crates/arx-lsp",
+    "crates/arx-terminal",
     "crates/arx-keymap",
     "crates/arx-protocol",
     "crates/arx-render",
@@ -28,6 +31,10 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 arx-buffer = { path = "crates/arx-buffer" }
+arx-highlight = { path = "crates/arx-highlight" }
+arx-lsp = { path = "crates/arx-lsp" }
+arx-terminal = { path = "crates/arx-terminal" }
+serde_json = "1"
 arx-core = { path = "crates/arx-core" }
 arx-render = { path = "crates/arx-render" }
 arx-driver = { path = "crates/arx-driver" }

@@ -97,12 +97,39 @@ async fn handle_key(
     key: crossterm::event::KeyEvent,
     bus: &CommandBus,
 ) -> ControlFlow<()> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
     let chord = KeyChord::from(&key);
 
-    // One round-trip to the event loop: feed the chord through the
-    // keymap engine, let the matching command run, and ask whether a
-    // quit was requested. This keeps the single-writer invariant: only
-    // the event-loop task ever touches `Editor`.
+    // Check if the active pane is a terminal. If so, forward the
+    // raw keystroke to the PTY — unless it's the terminal-escape
+    // key (`C-\`), which breaks out to the normal keymap so the
+    // user can switch panes, close the terminal, etc.
+    let is_terminal_escape = key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('\\');
+    if !is_terminal_escape {
+        let forwarded = bus
+            .invoke(move |editor| {
+                let Some(active) = editor.windows().active() else {
+                    return false;
+                };
+                if let Some(term) = editor.terminal(active) {
+                    // Convert the key event to bytes the PTY understands.
+                    if let Some(bytes) = key_to_pty_bytes(&key) {
+                        term.write(bytes);
+                    }
+                    editor.mark_dirty();
+                    return true;
+                }
+                false
+            })
+            .await;
+        if let Ok(true) = forwarded {
+            return ControlFlow::Continue(());
+        }
+    }
+
+    // Normal keymap path (buffer panes, or terminal-escape key).
     let bus_clone = bus.clone();
     let result = bus
         .invoke(move |editor| {
@@ -122,10 +149,6 @@ async fn handle_key(
         printable_fallback: Some(ch),
     } = outcome
     {
-        // Printable fallback: let the editor decide what to do.
-        // `handle_printable_fallback` self-inserts into the active
-        // buffer under normal conditions, or routes into the command
-        // palette query when the palette layer is on the stack.
         if bus
             .dispatch(move |editor| editor.handle_printable_fallback(ch))
             .await
@@ -135,6 +158,38 @@ async fn handle_key(
         }
     }
     ControlFlow::Continue(())
+}
+
+/// Convert a crossterm `KeyEvent` to the byte sequence a PTY
+/// expects. Returns `None` for keys that don't produce output
+/// (modifiers alone, etc.).
+fn key_to_pty_bytes(key: &crossterm::event::KeyEvent) -> Option<Vec<u8>> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char(c) => {
+            if ctrl && c.is_ascii_alphabetic() {
+                // Ctrl+A = 0x01, Ctrl+B = 0x02, etc.
+                Some(vec![(c.to_ascii_lowercase() as u8) - b'a' + 1])
+            } else {
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                Some(s.as_bytes().to_vec())
+            }
+        }
+        KeyCode::Enter => Some(b"\r".to_vec()),
+        KeyCode::Backspace => Some(vec![0x7f]),
+        KeyCode::Tab => Some(b"\t".to_vec()),
+        KeyCode::Esc => Some(vec![0x1b]),
+        KeyCode::Up => Some(b"\x1b[A".to_vec()),
+        KeyCode::Down => Some(b"\x1b[B".to_vec()),
+        KeyCode::Right => Some(b"\x1b[C".to_vec()),
+        KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        KeyCode::Home => Some(b"\x1b[H".to_vec()),
+        KeyCode::End => Some(b"\x1b[F".to_vec()),
+        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
