@@ -117,6 +117,7 @@ pedantic lint set.
 | `arx-core` | `Editor`, event loop, command bus, buffer/window managers, session, palette, stock commands. Single-writer state lives here. Depends on `arx-highlight` (feature-gated behind `syntax`). |
 | `arx-highlight` | Tree-sitter syntax highlighting. `HighlightManager`, per-buffer `Highlighter`, `LanguageRegistry`, `Theme`. Depends on `tree-sitter` + grammar crates (C build via `cc`). |
 | `arx-lsp` | LSP client. JSON-RPC transport over stdio, `LspClient`, position helpers, diagnostic conversion, server config registry. Depends on `lsp-types`. |
+| `arx-terminal` | Embedded terminal emulator. `TerminalPane` wraps `alacritty_terminal::Term` + `portable-pty` PTY, with a grid bridge to convert terminal cells to renderer-agnostic `TerminalCell`s. Renderer-agnostic so the same engine works for TUI and future GUI. |
 | `arx-keymap` | Keymap engine, chord parser, Emacs + Vim profiles, command name constants. |
 | `arx-render` | `ViewState → RenderTree → Diff → Backend`. Includes `CrosstermBackend` and `TestBackend`. |
 | `arx-protocol` | Wire types, postcard framing, cross-platform IPC transport. |
@@ -269,7 +270,9 @@ Recommended implementation order based on dependencies:
    trigger as MVP, `completion` keymap layer for navigation/accept/
    dismiss. LSP-completion-request plumbing is ready for a follow-up
    async dispatch.
-6. **Embedded terminal** — mostly standalone (termwiz-based).
+6. **Embedded terminal** — in progress. `arx-terminal` crate done
+   (`alacritty_terminal` + `portable-pty`); remaining work is
+   integrating terminal panes into the layout/render/input paths.
 7. **Session management (attach/detach/list)** — builds on the
    existing Level-1 persistence + daemon architecture. Level-1 now
    persists the layout tree too (SessionFile v2), so restarts come
