@@ -217,9 +217,18 @@ impl LspClient {
         Ok(())
     }
 
+    /// Extract the notification receiver so it can be handed to a
+    /// dedicated notification-processing task. After this,
+    /// [`LspClient::recv_notification`] returns `None`.
+    pub fn take_notification_rx(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::Receiver<(String, serde_json::Value)>> {
+        self.transport.take_notification_rx()
+    }
+
     /// Receive the next server-initiated notification (e.g.
     /// `textDocument/publishDiagnostics`). Returns `None` when the
-    /// server closes.
+    /// server closes or when `take_notification_rx` was called.
     pub async fn recv_notification(&mut self) -> Option<(String, Value)> {
         self.transport.recv_notification().await
     }

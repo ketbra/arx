@@ -245,9 +245,12 @@ Recommended implementation order based on dependencies:
    /gopls). Editor wired with `LspNotifier` channel for buffer
    events. Diagnostic navigation commands `lsp.next-diagnostic` /
    `lsp.prev-diagnostic`. Feature-gated behind `lsp` on `arx-core`.
-   Remaining: driver-side `LspManager` task that actually spawns
-   servers and processes incoming notifications (the plumbing is in
-   place, the driver wiring is the next step).
+   The driver-side `LspManager` task spawns servers, sends
+   `didOpen`/`didChange`/`didClose` as buffers are opened and
+   edited, and processes incoming `publishDiagnostics` into the
+   `"diagnostics"` property layer via the `CommandBus`. A dedicated
+   per-server notification task handles server → editor dispatching
+   so the main event loop is never blocked on LSP I/O.
 5. **Completion framework** — needs LSP.
 6. **Embedded terminal** — mostly standalone (termwiz-based).
 7. **Session management (attach/detach/list)** — builds on the

@@ -14,13 +14,16 @@ workspace = true
 arx-buffer = { workspace = true }
 arx-core = { workspace = true }
 arx-keymap = { workspace = true }
+arx-lsp = { workspace = true }
 arx-protocol = { workspace = true }
+lsp-types = { version = "0.97", features = ["proposed"] }
 arx-render = { workspace = true }
 arx-sdk = { workspace = true }
 crossterm = { workspace = true }
 futures-util = { workspace = true }
 libloading = { workspace = true }
 notify = { workspace = true }
+serde_json = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

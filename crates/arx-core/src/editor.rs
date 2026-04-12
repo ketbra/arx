@@ -203,6 +203,14 @@ impl Editor {
         self.lsp_notifier = Some(tx);
     }
 
+    /// Drop the LSP notifier so the manager task's receiver sees
+    /// the channel close and exits cleanly. Called by the driver at
+    /// shutdown.
+    #[cfg(feature = "lsp")]
+    pub fn clear_lsp_notifier(&mut self) {
+        self.lsp_notifier = None;
+    }
+
     /// Send an LSP event (best-effort, non-blocking). No-op if the
     /// `lsp` feature is disabled or no notifier is set.
     #[cfg(feature = "lsp")]

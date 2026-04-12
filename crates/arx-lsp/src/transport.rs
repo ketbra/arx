@@ -28,7 +28,7 @@ pub struct LspTransport {
     outbound_tx: mpsc::Sender<Vec<u8>>,
     next_id: Arc<AtomicI64>,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
-    notification_rx: mpsc::Receiver<(String, Value)>,
+    notification_rx: Option<mpsc::Receiver<(String, Value)>>,
     // Tasks are detached; they stop when channels close.
 }
 
@@ -74,7 +74,7 @@ impl LspTransport {
             outbound_tx,
             next_id: Arc::new(AtomicI64::new(1)),
             pending,
-            notification_rx,
+            notification_rx: Some(notification_rx),
         })
     }
 
@@ -119,10 +119,21 @@ impl LspTransport {
         Ok(())
     }
 
+    /// Take the notification receiver out of the transport. After
+    /// this call, [`LspTransport::recv_notification`] always returns
+    /// `None`. The extracted receiver is typically handed to a
+    /// dedicated notification-processing task.
+    pub fn take_notification_rx(
+        &mut self,
+    ) -> Option<mpsc::Receiver<(String, Value)>> {
+        self.notification_rx.take()
+    }
+
     /// Receive the next server-initiated notification. Returns `None`
-    /// when the reader task exits (server closed stdout).
+    /// when the reader task exits (server closed stdout) or when
+    /// [`LspTransport::take_notification_rx`] was called.
     pub async fn recv_notification(&mut self) -> Option<(String, Value)> {
-        self.notification_rx.recv().await
+        self.notification_rx.as_mut()?.recv().await
     }
 
     /// Kill the child process. Call after sending `shutdown` + `exit`.
