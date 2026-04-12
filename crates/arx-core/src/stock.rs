@@ -1218,14 +1218,32 @@ impl CommandPaletteExecute {
         let mode = cx.editor.palette().mode();
         match mode {
             crate::palette::PaletteMode::FindFile => {
-                // Take the query as a file path and open it.
-                let path = cx.editor.palette().query().to_owned();
+                // Use the selected match (full path from the listing)
+                // if one exists, otherwise fall back to the raw query.
+                let path = cx
+                    .editor
+                    .palette()
+                    .selected_match()
+                    .map_or_else(
+                        || cx.editor.palette().query().to_owned(),
+                        |m| m.name.clone(),
+                    );
+                if path.is_empty() {
+                    cx.editor.palette_mut().close();
+                    leave_palette_layer(cx.editor);
+                    return;
+                }
+                // If it's a directory, navigate into it instead of
+                // opening. Replace the query and re-list.
+                if path.ends_with('/') {
+                    cx.editor.palette_mut().set_query(path);
+                    cx.editor.palette_mut().refresh_find_file_pub();
+                    cx.editor.mark_dirty();
+                    return;
+                }
                 cx.editor.palette_mut().close();
                 leave_palette_layer(cx.editor);
                 cx.editor.mark_dirty();
-                if path.is_empty() {
-                    return;
-                }
                 let bus = cx.bus.clone();
                 let path = std::path::PathBuf::from(path);
                 tokio::spawn(async move {
