@@ -289,6 +289,26 @@ impl WindowManager {
         self.layout.as_ref()
     }
 
+    /// Replace the current layout tree with `layout`, pruning any
+    /// leaves that reference unknown window ids (collapsing their
+    /// parent splits into the surviving sibling). Returns `true` if
+    /// the resulting layout has at least one leaf and was installed;
+    /// `false` if every leaf was pruned (no-op, current layout
+    /// preserved).
+    ///
+    /// Used by session restore to rebuild a saved layout tree against
+    /// the freshly-reopened windows.
+    pub fn set_layout(&mut self, layout: Layout) -> bool {
+        let pruned = prune_layout(layout, &self.windows);
+        match pruned {
+            Some(l) => {
+                self.layout = Some(l);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Open a new window on `buffer_id`.
     ///
     /// * If no window is currently active, the new window becomes active.
@@ -428,6 +448,43 @@ impl WindowManager {
         };
         self.active = Some(prev);
         Some(prev)
+    }
+}
+
+/// Walk `layout` and drop any leaf that isn't a key in `known`,
+/// collapsing parent splits into their surviving sibling. Returns
+/// `None` if every leaf was pruned.
+fn prune_layout(
+    layout: Layout,
+    known: &BTreeMap<WindowId, WindowData>,
+) -> Option<Layout> {
+    match layout {
+        Layout::Leaf(id) => {
+            if known.contains_key(&id) {
+                Some(Layout::Leaf(id))
+            } else {
+                None
+            }
+        }
+        Layout::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => {
+            let new_first = prune_layout(*first, known);
+            let new_second = prune_layout(*second, known);
+            match (new_first, new_second) {
+                (Some(a), Some(b)) => Some(Layout::Split {
+                    axis,
+                    ratio,
+                    first: Box::new(a),
+                    second: Box::new(b),
+                }),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            }
+        }
     }
 }
 
@@ -628,5 +685,52 @@ mod tests {
         let layout = Layout::Leaf(WindowId(1));
         let after = layout.clone().without_leaf(WindowId(99)).unwrap();
         assert_eq!(after, layout);
+    }
+
+    // ---- set_layout (session restore plumbing) ----
+
+    #[test]
+    fn set_layout_installs_matching_tree() {
+        let mut wm = WindowManager::new();
+        let a = wm.open(BufferId(1));
+        let b = wm.open(BufferId(2));
+        // Default layout from `open` is Leaf(a). Install a split.
+        let replacement = Layout::Split {
+            axis: SplitAxis::Vertical,
+            ratio: 0.5,
+            first: Box::new(Layout::Leaf(a)),
+            second: Box::new(Layout::Leaf(b)),
+        };
+        assert!(wm.set_layout(replacement));
+        assert_eq!(wm.layout().unwrap().leaves(), vec![a, b]);
+    }
+
+    #[test]
+    fn set_layout_prunes_unknown_leaves() {
+        let mut wm = WindowManager::new();
+        let a = wm.open(BufferId(1));
+        // Candidate references a phantom WindowId(99) that doesn't
+        // exist in the manager; it should collapse away and leave us
+        // with Leaf(a).
+        let replacement = Layout::Split {
+            axis: SplitAxis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(Layout::Leaf(a)),
+            second: Box::new(Layout::Leaf(WindowId(99))),
+        };
+        assert!(wm.set_layout(replacement));
+        assert_eq!(wm.layout(), Some(&Layout::Leaf(a)));
+    }
+
+    #[test]
+    fn set_layout_with_no_valid_leaves_is_noop() {
+        let mut wm = WindowManager::new();
+        let a = wm.open(BufferId(1));
+        let before = wm.layout().cloned();
+        let bogus = Layout::Leaf(WindowId(999));
+        assert!(!wm.set_layout(bogus));
+        // Original layout preserved.
+        assert_eq!(wm.layout().cloned(), before);
+        assert_eq!(wm.active(), Some(a));
     }
 }

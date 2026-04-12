@@ -35,8 +35,16 @@ editor has:
   `window.split-vertical`, `window.close`, `window.focus-next`,
   `window.focus-prev` — bound to `C-x 2/3/0/o` in Emacs and
   `C-w s/v/c/q/w/W` in Vim.
+- **(Phase 2)** Split layouts now survive a daemon restart. The
+  session format is `SessionFile` v2, which adds an optional
+  `SerializedLayout` tree; v1 files still load through a backward-
+  compat path and come back as the single-leaf layout they always
+  were. On restore the saved layout is rehydrated against the
+  freshly-reopened windows via an old-id → new-id remap, and splits
+  whose leaves couldn't be restored (buffer missing, etc.) collapse
+  into the surviving sibling.
 
-**295 tests green** (up from Phase 1's 274).
+**306 tests green** (up from Phase 1's 274).
 `cargo clippy --workspace --all-targets` clean under the workspace
 pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.
@@ -127,6 +135,14 @@ without a very good reason and a commit message that says why.
   `ViewState::active_window`. Inactive panes still paint their text
   but have no blinking caret, which matches every other terminal
   editor's convention for "which pane will take my keystrokes".
+- **Session schema is versioned and not self-describing.** Postcard
+  has no field delimiters, so adding / removing a field on `Session`
+  is a wire break. Bump `SessionFile::CURRENT_VERSION` and add a
+  compat branch in `Session::load_from_path` — the current load path
+  peels the version varint off with `postcard::take_from_bytes::<u32>`
+  and then decodes the rest against the right schema. v1 files are
+  read through `LegacySessionV1` and lifted into v2 with
+  `layout = None`.
 
 ## Phase 2 roadmap (spec §18)
 
@@ -149,11 +165,11 @@ Recommended implementation order based on dependencies:
 5. **Completion framework** — needs LSP.
 6. **Embedded terminal** — mostly standalone (termwiz-based).
 7. **Session management (attach/detach/list)** — builds on the
-   existing Level-1 persistence + daemon architecture. Note: Level-1
-   sessions **do not yet persist the layout tree** — a restored
-   session collapses to a single-leaf layout on the active window
-   (matching Phase 1's behaviour). Persisting splits across
-   restarts is follow-up work for the session-management task.
+   existing Level-1 persistence + daemon architecture. Level-1 now
+   persists the layout tree too (SessionFile v2), so restarts come
+   back with splits intact. Remaining work here is mostly CLI +
+   daemon protocol (attach / detach / list commands) rather than
+   state capture.
 
 **Next task recommendation: undo tree.** Self-contained, unblocks
 nothing else, and the `BufferManager`'s edit path already exposes
