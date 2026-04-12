@@ -280,19 +280,23 @@ Recommended implementation order based on dependencies:
    terminal pane is focused; `C-\` breaks back to the editor's
    keymap for pane switching. `terminal.open` (`C-x t` in Emacs)
    splits the active pane and spawns a shell.
-7. **Session management (attach/detach/list)** — builds on the
+7. ~~**Session management (attach/detach/list)**~~ — **DONE.** Builds on the
    existing Level-1 persistence + daemon architecture. Level-1 now
    persists the layout tree too (SessionFile v2), so restarts come
    back with splits intact. Remaining work here is mostly CLI +
    daemon protocol (attach / detach / list commands) rather than
-   state capture. Undo trees are **not** persisted to disk yet;
-   that's a follow-up.
+   state capture. Protocol bumped to v2 with new messages:
+   `ListSessions`, `CreateSession`, `AttachSession`, `DetachSession`
+   on the client side; `SessionList`, `SessionAttached`, `Error` on
+   the daemon side. CLI: `arx session list` queries the daemon and
+   prints a table of active sessions. The daemon reader loop handles
+   all new messages; multi-session routing (multiple Editors per
+   daemon) is stubbed with an error response for now — the single
+   default session is fully functional. Undo trees are **not**
+   persisted to disk yet; that's a follow-up.
 
-**Next task recommendation: embedded terminal.** The remaining items
-(embedded terminal and session management) are mostly standalone.
-The embedded terminal would use a PTY crate to run a shell inside a
-split pane; session management is CLI + daemon protocol work
-(`arx attach` / `arx detach` / `arx list`).
+**Phase 2 is complete.** All seven items are done. See
+`docs/spec.md` for the Phase 3 roadmap.
 
 ## How to work here
 

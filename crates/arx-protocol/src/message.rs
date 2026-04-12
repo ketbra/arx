@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Clients and the daemon must agree; bump on
 /// any non-additive change to these types.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The opening handshake payload. Sent as the body of a
 /// [`ClientMessage::Hello`].
@@ -37,6 +37,14 @@ pub enum ClientMessage {
     Resize { cols: u16, rows: u16 },
     /// Client is disconnecting cleanly. Daemon should flush and close.
     Goodbye,
+    /// Request a list of all active sessions.
+    ListSessions,
+    /// Create a new named session and attach to it.
+    CreateSession { name: Option<String> },
+    /// Attach to an existing session by id.
+    AttachSession { session_id: u64 },
+    /// Detach from the current session (keep it alive on the daemon).
+    DetachSession,
 }
 
 /// Why the daemon is sending a [`DaemonMessage::Shutdown`].
@@ -52,6 +60,20 @@ pub enum ShutdownReason {
     Other(String),
 }
 
+/// Metadata about one active session, as returned by
+/// [`DaemonMessage::SessionList`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// Session id (assigned by the daemon).
+    pub id: u64,
+    /// Optional human-readable name (may be empty).
+    pub name: String,
+    /// Number of open buffers in this session.
+    pub buffer_count: u32,
+    /// Number of open windows in this session.
+    pub window_count: u32,
+}
+
 /// Messages sent from the daemon to the client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DaemonMessage {
@@ -59,21 +81,22 @@ pub enum DaemonMessage {
     Welcome {
         /// Protocol version the daemon speaks.
         protocol_version: u32,
-        /// Session id the client was attached to. For Phase 1 this is
-        /// always 1 (the implicit default session).
+        /// Session id the client was attached to.
         session_id: u64,
     },
     /// Apply these diff ops to the terminal.
-    ///
-    /// Batching means one socket send can carry a whole frame. The
-    /// daemon groups ops by frame before flushing so clients see
-    /// atomic updates.
     RenderOps(Vec<DiffOp>),
     /// Ring the terminal bell.
     Bell,
     /// The daemon is shutting down this connection. The client should
     /// restore its terminal and exit.
     Shutdown(ShutdownReason),
+    /// Response to [`ClientMessage::ListSessions`].
+    SessionList(Vec<SessionInfo>),
+    /// Acknowledge that a session was created / attached.
+    SessionAttached { session_id: u64 },
+    /// A protocol-level error (unknown session id, etc.).
+    Error { message: String },
 }
 
 #[cfg(test)]

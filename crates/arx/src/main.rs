@@ -42,6 +42,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Mode {
+    /// Session management commands.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+        /// Endpoint to connect to.
+        #[arg(long, global = true)]
+        socket: Option<String>,
+    },
     /// Run as a background daemon bound to an IPC endpoint.
     Daemon {
         /// Endpoint to bind. On Unix, a filesystem path (default:
@@ -80,6 +88,12 @@ enum Mode {
         #[arg(long)]
         socket: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionAction {
+    /// List all active sessions on the daemon.
+    List,
 }
 
 fn resolve_address(raw: Option<String>) -> IpcAddress {
@@ -128,6 +142,9 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.mode {
         None => run_embedded(cli.files).await,
+        Some(Mode::Session { action, socket }) => {
+            run_session_command(action, resolve_address(socket)).await
+        }
         Some(Mode::Daemon {
             socket,
             session_file,
@@ -217,6 +234,75 @@ async fn run_daemon(
         }
     });
     let _editor = server.run().await?;
+    Ok(())
+}
+
+async fn run_session_command(
+    action: SessionAction,
+    address: IpcAddress,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use arx_protocol::{
+        ClientMessage, DaemonMessage, HelloInfo, IpcStream, PROTOCOL_VERSION, read_frame,
+        write_frame,
+    };
+
+    let stream = IpcStream::connect(&address).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Handshake.
+    let hello = ClientMessage::Hello(HelloInfo {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "arx-session-cli".into(),
+        cols: 80,
+        rows: 24,
+    });
+    write_frame(&mut writer, &hello).await?;
+    let welcome: DaemonMessage = read_frame(&mut reader).await?;
+    match welcome {
+        DaemonMessage::Welcome { .. } => {}
+        DaemonMessage::Shutdown(reason) => {
+            return Err(format!("daemon refused connection: {reason:?}").into());
+        }
+        other => {
+            return Err(format!("unexpected response: {other:?}").into());
+        }
+    }
+
+    match action {
+        SessionAction::List => {
+            write_frame(&mut writer, &ClientMessage::ListSessions).await?;
+            let response: DaemonMessage = read_frame(&mut reader).await?;
+            match response {
+                DaemonMessage::SessionList(sessions) => {
+                    if sessions.is_empty() {
+                        println!("No active sessions.");
+                    } else {
+                        println!("{:<6} {:<20} {:<10} WINDOWS", "ID", "NAME", "BUFFERS");
+                        for s in &sessions {
+                            let name = if s.name.is_empty() {
+                                "(default)"
+                            } else {
+                                &s.name
+                            };
+                            println!(
+                                "{:<6} {:<20} {:<10} {}",
+                                s.id, name, s.buffer_count, s.window_count,
+                            );
+                        }
+                    }
+                }
+                DaemonMessage::Error { message } => {
+                    return Err(format!("daemon error: {message}").into());
+                }
+                other => {
+                    return Err(format!("unexpected response: {other:?}").into());
+                }
+            }
+        }
+    }
+
+    // Goodbye.
+    let _ = write_frame(&mut writer, &ClientMessage::Goodbye).await;
     Ok(())
 }
 

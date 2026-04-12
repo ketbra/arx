@@ -53,7 +53,8 @@ use tracing::{debug, info, warn};
 use arx_core::{CommandBus, Editor, EventLoop, Session};
 use arx_protocol::{
     ClientMessage, DaemonMessage, FrameError, HelloInfo, IpcAddress, IpcListener, IpcReadHalf,
-    IpcStream, PROTOCOL_VERSION, ShutdownReason, TransportError, read_frame, write_frame,
+    IpcStream, PROTOCOL_VERSION, SessionInfo, ShutdownReason, TransportError, read_frame,
+    write_frame,
 };
 
 use crate::ext_host::ExtensionHost;
@@ -299,9 +300,10 @@ async fn handle_client(
     host: Arc<Mutex<ExtensionHost>>,
     extensions_dir: Option<PathBuf>,
 ) -> Result<Editor, DaemonError> {
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, writer) = stream.into_split();
 
     // --- Handshake ---
+    let writer = Arc::new(Mutex::new(writer));
     let hello: ClientMessage = match read_frame(&mut reader).await {
         Ok(m) => m,
         Err(e) => {
@@ -318,7 +320,7 @@ async fn handle_client(
     };
     if hello_info.protocol_version != PROTOCOL_VERSION {
         let _ = write_frame(
-            &mut writer,
+            &mut *writer.lock().await,
             &DaemonMessage::Shutdown(ShutdownReason::VersionMismatch {
                 daemon_version: PROTOCOL_VERSION,
             }),
@@ -332,7 +334,7 @@ async fn handle_client(
         return Ok(editor);
     }
     write_frame(
-        &mut writer,
+        &mut *writer.lock().await,
         &DaemonMessage::Welcome {
             protocol_version: PROTOCOL_VERSION,
             session_id: 1,
@@ -366,16 +368,19 @@ async fn handle_client(
 
     // Writer task: ships DiffOp batches from the channel to the socket.
     let writer_shutdown = shutdown.clone();
+    let writer_for_task = Arc::clone(&writer);
     let writer_handle = tokio::spawn(async move {
         while let Some(ops) = render_rx.recv().await {
             let msg = DaemonMessage::RenderOps(ops);
-            if let Err(err) = write_frame(&mut writer, &msg).await {
+            let mut w = writer_for_task.lock().await;
+            if let Err(err) = write_frame(&mut *w, &msg).await {
                 debug!(%err, "writer task: socket closed");
                 break;
             }
         }
         // Best-effort goodbye on the way out.
-        let _ = write_frame(&mut writer, &DaemonMessage::Shutdown(ShutdownReason::DaemonExit))
+        let mut w = writer_for_task.lock().await;
+        let _ = write_frame(&mut *w, &DaemonMessage::Shutdown(ShutdownReason::DaemonExit))
             .await;
         writer_shutdown.fire();
     });
@@ -394,7 +399,7 @@ async fn handle_client(
 
     // Reader loop: drains ClientMessages off the socket into the bus.
     let reader_result =
-        run_reader(&mut reader, &bus, &size, &shutdown).await;
+        run_reader(&mut reader, &writer, &bus, &size, &shutdown).await;
     if let Err(err) = reader_result {
         debug!(%err, "reader task ended");
     }
@@ -412,6 +417,7 @@ async fn handle_client(
 /// connection and dispatch each against the [`CommandBus`].
 async fn run_reader(
     reader: &mut IpcReadHalf,
+    writer: &Arc<Mutex<arx_protocol::IpcWriteHalf>>,
     bus: &CommandBus,
     size: &SharedTerminalSize,
     shutdown: &Shutdown,
@@ -432,22 +438,47 @@ async fn run_reader(
             ClientMessage::Hello(_) => {
                 warn!("client sent Hello mid-session; ignoring");
             }
-            ClientMessage::Goodbye => return Ok(()),
+            ClientMessage::Goodbye | ClientMessage::DetachSession => {
+                return Ok(());
+            }
             ClientMessage::Resize { cols, rows } => {
                 size.set(cols, rows);
-                // Dispatch a dirty ping so the render task re-renders
-                // at the new size.
                 let _ = bus.dispatch(Editor::mark_dirty).await;
+            }
+            ClientMessage::ListSessions => {
+                // For now, report the single running session.
+                let info = bus
+                    .invoke(|editor| SessionInfo {
+                        id: 1,
+                        name: String::new(),
+                        buffer_count: editor.buffers().len() as u32,
+                        window_count: editor.windows().len() as u32,
+                    })
+                    .await
+                    .ok();
+                if let Some(info) = info {
+                    let mut w = writer.lock().await;
+                    let _ = write_frame(
+                        &mut *w,
+                        &DaemonMessage::SessionList(vec![info]),
+                    )
+                    .await;
+                }
+            }
+            ClientMessage::CreateSession { .. } | ClientMessage::AttachSession { .. } => {
+                // MVP: only one session. Respond with an error for
+                // unsupported operations.
+                let mut w = writer.lock().await;
+                let _ = write_frame(
+                    &mut *w,
+                    &DaemonMessage::Error {
+                        message: "multi-session not yet supported; use the default session".into(),
+                    },
+                )
+                .await;
             }
             ClientMessage::Key(chord) => {
                 let bus_clone = bus.clone();
-                // Run through Editor::handle_key inline. If the keymap
-                // reports Unbound + printable_fallback, route the
-                // character through `handle_printable_fallback` so the
-                // editor decides whether it goes into the buffer
-                // (normal typing) or the command palette query
-                // (palette open) — same routing the embedded input
-                // task uses.
                 let quit = bus
                     .invoke(move |editor| {
                         let outcome = editor.handle_key(&bus_clone, chord);
@@ -605,7 +636,11 @@ impl DaemonClient {
                     }
                 }
                 DaemonMessage::Shutdown(_) => break Ok(()),
-                DaemonMessage::Welcome { .. } | DaemonMessage::Bell => {}
+                DaemonMessage::Welcome { .. }
+                | DaemonMessage::Bell
+                | DaemonMessage::SessionList(_)
+                | DaemonMessage::SessionAttached { .. }
+                | DaemonMessage::Error { .. } => {}
             }
         };
 
