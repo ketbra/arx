@@ -47,6 +47,7 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(BufferCopyRegion);
     reg.register(BufferYank);
     reg.register(BufferSetMark);
+    reg.register(BufferFindFile);
     reg.register(BufferClose);
     reg.register(BufferSwitch);
     reg.register(BufferOpenLine);
@@ -859,6 +860,19 @@ impl BufferYank {
 // ---------------------------------------------------------------------------
 
 stock_cmd!(
+    BufferFindFile,
+    BUFFER_FIND_FILE,
+    "Open a file by path"
+);
+impl BufferFindFile {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().open_find_file();
+        ensure_palette_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
     BufferClose,
     BUFFER_CLOSE,
     "Close the active buffer"
@@ -1200,32 +1214,61 @@ stock_cmd!(
 );
 impl CommandPaletteExecute {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        // Snapshot the selected command name (so we can drop the
-        // palette borrow before invoking anything).
-        let selected_name = cx
-            .editor
-            .palette()
-            .selected_match()
-            .map(|m| m.name.clone());
-        // Close the palette BEFORE running the target command so the
-        // executed command sees normal state.
-        cx.editor.palette_mut().close();
-        leave_palette_layer(cx.editor);
-        cx.editor.mark_dirty();
+        let mode = cx.editor.palette().mode();
+        match mode {
+            crate::palette::PaletteMode::FindFile => {
+                // Take the query as a file path and open it.
+                let path = cx.editor.palette().query().to_owned();
+                cx.editor.palette_mut().close();
+                leave_palette_layer(cx.editor);
+                cx.editor.mark_dirty();
+                if path.is_empty() {
+                    return;
+                }
+                let bus = cx.bus.clone();
+                let path = std::path::PathBuf::from(path);
+                tokio::spawn(async move {
+                    match crate::open_file(&bus, path.clone()).await {
+                        Ok(_) => {
+                            tracing::info!(path = %path.display(), "opened file");
+                            let _ = bus.dispatch(Editor::mark_dirty).await;
+                        }
+                        Err(err) => {
+                            tracing::warn!(%err, "find-file failed");
+                            let msg = format!("Error: {err}");
+                            let _ = bus
+                                .dispatch(move |editor| editor.set_status(msg))
+                                .await;
+                        }
+                    }
+                });
+            }
+            crate::palette::PaletteMode::Command => {
+                // Snapshot the selected command name.
+                let selected_name = cx
+                    .editor
+                    .palette()
+                    .selected_match()
+                    .map(|m| m.name.clone());
+                cx.editor.palette_mut().close();
+                leave_palette_layer(cx.editor);
+                cx.editor.mark_dirty();
 
-        let Some(name) = selected_name else {
-            return;
-        };
-        let Some(command) = cx.editor.commands().get(&name) else {
-            tracing::warn!(%name, "palette: selected command vanished before execute");
-            return;
-        };
-        let mut inner = CommandContext {
-            editor: cx.editor,
-            bus: cx.bus.clone(),
-            count: 1,
-        };
-        command.run(&mut inner);
+                let Some(name) = selected_name else {
+                    return;
+                };
+                let Some(command) = cx.editor.commands().get(&name) else {
+                    tracing::warn!(%name, "palette: command vanished");
+                    return;
+                };
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                command.run(&mut inner);
+            }
+        }
     }
 }
 

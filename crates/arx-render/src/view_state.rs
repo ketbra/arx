@@ -407,6 +407,9 @@ pub struct CompletionEntry {
 /// depend on `arx-core`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteView {
+    /// Prompt text shown before the query (e.g. `"M-x "` or
+    /// `"Find file: "`).
+    pub prompt: String,
     /// Current query text shown in the prompt line.
     pub query: String,
     /// Filtered, scored, sorted match list.

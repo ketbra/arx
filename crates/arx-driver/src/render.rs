@@ -368,6 +368,7 @@ fn build_global_state(
             })
             .collect::<Vec<_>>();
         Some(PaletteView {
+            prompt: editor.palette().prompt().to_owned(),
             query: editor.palette().query().to_owned(),
             matches: entries,
             selected: editor.palette().selected_index(),

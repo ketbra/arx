@@ -64,12 +64,26 @@ pub struct PaletteMatch {
 /// Always present on [`crate::Editor`] but normally closed (zero
 /// allocations). [`open`](Self::open) switches it into the
 /// query-accepting state and [`close`](Self::close) resets it.
+/// What the palette does when the user presses Enter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PaletteMode {
+    /// Execute the selected match as a command name.
+    #[default]
+    Command,
+    /// Treat the query text as a file path and open it.
+    FindFile,
+}
+
 #[derive(Debug, Default)]
 pub struct CommandPalette {
     /// Whether the palette is currently accepting input.
     open: bool,
+    /// What Enter does.
+    mode: PaletteMode,
     /// The user's query so far.
     query: String,
+    /// Prompt text shown before the query (e.g. "M-x " or "Find file: ").
+    prompt: String,
     /// Index into `matches` for the highlighted row.
     selected: usize,
     /// Cached candidate list — every registered command, captured at
@@ -102,6 +116,16 @@ impl CommandPalette {
     /// Current query string.
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    /// The current mode (what Enter does).
+    pub fn mode(&self) -> PaletteMode {
+        self.mode
+    }
+
+    /// The prompt text shown before the query.
+    pub fn prompt(&self) -> &str {
+        &self.prompt
     }
 
     /// Current filtered match list, best-first.
@@ -139,6 +163,8 @@ impl CommandPalette {
     /// walk of the registry.
     pub fn open_with_entries(&mut self, entries: Vec<(String, String)>) {
         self.open = true;
+        self.mode = PaletteMode::Command;
+        "M-x ".clone_into(&mut self.prompt);
         self.query.clear();
         self.selected = 0;
         self.candidates = entries
@@ -148,9 +174,23 @@ impl CommandPalette {
         self.refresh();
     }
 
+    /// Open the palette in find-file mode. The user types a path;
+    /// Enter opens it.
+    pub fn open_find_file(&mut self) {
+        self.open = true;
+        self.mode = PaletteMode::FindFile;
+        "Find file: ".clone_into(&mut self.prompt);
+        self.query.clear();
+        self.selected = 0;
+        self.candidates.clear();
+        self.matches.clear();
+    }
+
     /// Close the palette and drop the cached candidate list.
     pub fn close(&mut self) {
         self.open = false;
+        self.mode = PaletteMode::Command;
+        self.prompt.clear();
         self.query.clear();
         self.selected = 0;
         self.candidates.clear();

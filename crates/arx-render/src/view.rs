@@ -759,7 +759,7 @@ fn paint_palette_prompt(
 ) -> u16 {
     clear_row(grid, row, cols, face);
     let mut x: u16 = 0;
-    for g in "M-x ".graphemes(true) {
+    for g in view.prompt.graphemes(true) {
         if x >= cols {
             break;
         }
@@ -1477,6 +1477,7 @@ mod tests {
     fn palette_overlay_paints_prompt_and_matches() {
         let w = window_for("hello");
         let palette = PaletteView {
+            prompt: "M-x ".to_owned(),
             query: "cur".to_owned(),
             matches: vec![
                 entry("cursor.left", "Move left"),
@@ -1517,6 +1518,7 @@ mod tests {
         // area minus the overlay.
         let w = window_for("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10");
         let palette = PaletteView {
+            prompt: "M-x ".to_owned(),
             query: String::new(),
             matches: vec![entry("a", ""), entry("b", ""), entry("c", "")],
             selected: 0,
@@ -1549,6 +1551,7 @@ mod tests {
         let mut w = window_for("hello");
         w.cursors = sv![Cursor::at(2)];
         let palette = PaletteView {
+            prompt: "M-x ".to_owned(),
             query: String::new(),
             matches: vec![entry("cursor.left", "")],
             selected: 0,
