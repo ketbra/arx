@@ -35,11 +35,13 @@
 //! ```
 
 pub mod buffer;
+pub mod history;
 pub mod interval_tree;
 pub mod properties;
 pub mod rope;
 
 pub use buffer::{Buffer, BufferId, BufferSnapshot, Edit, EditOrigin};
+pub use history::{EditRecord, UndoNodeId, UndoTree};
 pub use interval_tree::{Interval, IntervalTree};
 pub use properties::{
     AdjustmentPolicy, AgentId, Diagnostic, Face, LayerId, PropertyFlags, PropertyLayer,

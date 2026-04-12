@@ -8,10 +8,10 @@ If this is your first session on the repo: read this file, then skim
 `docs/spec.md` §1–§5 and §18 for vision and current-phase scope.
 Everything else in the spec is forward-looking.
 
-## Current status (Phase 2 in progress — splits landed)
+## Current status (Phase 2 in progress — splits + undo tree landed)
 
-Phase 1 per spec §18 is complete. Phase 2 has kicked off with
-**window splits** (the first item on the Phase 2 roadmap). The
+Phase 1 per spec §18 is complete. Phase 2 has two of seven items
+done: **window splits** (item 1) and **undo tree** (item 2). The
 editor has:
 
 - A working daemon/client split with Unix-domain-socket and
@@ -43,8 +43,19 @@ editor has:
   freshly-reopened windows via an old-id → new-id remap, and splits
   whose leaves couldn't be restored (buffer missing, etc.) collapse
   into the surviving sibling.
+- **(Phase 2)** Per-buffer **undo tree** (not stack) in
+  `arx_buffer::history::UndoTree`. User edits that go through the
+  stock commands (self-insert, newline, delete-backward/forward)
+  push an `EditRecord` (offset + removed + inserted + cursor
+  before/after + timestamp) via a single `user_edit` helper in
+  `arx-core::stock`. `buffer.undo` walks the tree toward the root
+  and inverts the edit; `buffer.redo` follows `last_active_child`
+  and replays it. Typing after an undo creates a new *branch* under
+  the current node rather than discarding the redo branch, so
+  history isn't lost. Bound to `C-/`, `C-_`, `C-x u` (undo) and
+  `M-_` (redo) in Emacs; `u` and `C-r` in Vim normal mode.
 
-**306 tests green** (up from Phase 1's 274).
+**326 tests green** (up from Phase 1's 274).
 `cargo clippy --workspace --all-targets` clean under the workspace
 pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.
@@ -143,6 +154,24 @@ without a very good reason and a commit message that says why.
   and then decodes the rest against the right schema. v1 files are
   read through `LegacySessionV1` and lifted into v2 with
   `layout = None`.
+- **Undo tree is pure data; the buffer never touches it.**
+  `Buffer::edit` is origin-agnostic and does *not* automatically push
+  into `UndoTree`. Stock user-visible edit commands
+  (`insert_at_cursor`, `buffer.delete-backward`, etc.) route through
+  `arx_core::stock::user_edit`, which captures the pre-edit bytes,
+  applies the edit, updates the window cursor, and *then* pushes
+  an `EditRecord` to the buffer's tree. `buffer.undo` and
+  `buffer.redo` apply the record back through `Buffer::edit` with
+  `EditOrigin::System` so the inversion itself doesn't re-enter
+  the tree. If you add a new user-facing edit path, route it
+  through `user_edit` or undo/redo will skip it.
+- **Undo is per-buffer, cursor is per-window.** Records carry
+  `cursor_before` / `cursor_after` as raw byte offsets. Undo applies
+  them to the *invoking* window only; other windows viewing the
+  same buffer have their cursors clamped to `len_bytes` (so a
+  shortened buffer doesn't leave them past the end) but otherwise
+  keep their position. Good enough for Phase 2; a future anchor
+  system (spec §8) would let every cursor follow edits precisely.
 
 ## Phase 2 roadmap (spec §18)
 
@@ -155,9 +184,15 @@ Recommended implementation order based on dependencies:
    a divider glyph. See `arx_core::Layout`,
    `arx_render::LayoutTree::walk_pane_rects`, and
    `arx_driver::render::build_view_layout`.
-2. **Undo tree** — self-contained in `arx-buffer` + `arx-core`.
-   Good next pick: doesn't depend on splits and slots into the
-   existing `BufferManager::edit` path.
+2. ~~**Undo tree**~~ — **DONE.** `arx_buffer::history::UndoTree`
+   stores one `EditRecord` per user-visible edit with cursor
+   before/after. `arx_core::stock::user_edit` is the single entry
+   point that applies a user edit and pushes to the tree; the
+   `buffer.undo` / `buffer.redo` commands invert / replay records.
+   Branches aren't discarded on new edits after undo —
+   `last_active_child` picks the most recently visited branch for
+   redo. Not yet exposed: branch-next/prev keybindings and an undo
+   visualiser (both straightforward follow-ups).
 3. **Tree-sitter highlighting** — plugs into
    `arx_buffer::PropertyMap` as a new property layer. Spec §4.2.
 4. **LSP client** — now that splits exist it can actually paint
@@ -169,11 +204,14 @@ Recommended implementation order based on dependencies:
    persists the layout tree too (SessionFile v2), so restarts come
    back with splits intact. Remaining work here is mostly CLI +
    daemon protocol (attach / detach / list commands) rather than
-   state capture.
+   state capture. Undo trees are **not** persisted to disk yet;
+   that's a follow-up.
 
-**Next task recommendation: undo tree.** Self-contained, unblocks
-nothing else, and the `BufferManager`'s edit path already exposes
-the `Edit` struct we'd need to snapshot.
+**Next task recommendation: tree-sitter highlighting.** The
+rendering pipeline already honours `PropertyMap` styled runs, so
+the work is mostly about wiring up a tree-sitter parser (and its
+grammars) as a new property layer and scheduling incremental
+re-parses on buffer edits.
 
 ## How to work here
 

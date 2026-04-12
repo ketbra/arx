@@ -39,6 +39,12 @@ pub const BUFFER_DELETE_BACKWARD: &str = "buffer.delete-backward";
 pub const BUFFER_DELETE_FORWARD: &str = "buffer.delete-forward";
 /// Persist the active buffer to its associated path.
 pub const BUFFER_SAVE: &str = "buffer.save";
+/// Undo the last user edit on the active buffer, walking the buffer's
+/// undo tree up toward the root.
+pub const BUFFER_UNDO: &str = "buffer.undo";
+/// Re-apply the last undone edit, walking the buffer's undo tree back
+/// down toward the most recent leaf.
+pub const BUFFER_REDO: &str = "buffer.redo";
 
 /// Scroll the active window up by one page.
 pub const SCROLL_PAGE_UP: &str = "scroll.page-up";

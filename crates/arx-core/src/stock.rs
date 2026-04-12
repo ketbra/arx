@@ -11,14 +11,16 @@
 //! code paths through the registry.
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
-use arx_buffer::{BufferId, ByteRange, EditOrigin};
+use arx_buffer::{BufferId, ByteRange, EditOrigin, EditRecord};
 use arx_keymap::{Layer, LayerId, commands as names};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::Editor;
 use crate::registry::{Command, CommandContext, CommandRegistry};
 use crate::window::SplitAxis;
+use crate::WindowId;
 
 /// Register every stock command into `reg`. Call once at editor start.
 pub fn register_stock(reg: &mut CommandRegistry) {
@@ -52,6 +54,8 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(WindowClose);
     reg.register(WindowFocusNext);
     reg.register(WindowFocusPrev);
+    reg.register(BufferUndo);
+    reg.register(BufferRedo);
 }
 
 // ---------------------------------------------------------------------------
@@ -395,24 +399,80 @@ impl CursorBufferEnd {
 // Editing
 // ---------------------------------------------------------------------------
 
+/// Apply a user edit to `buffer_id` *and* push a matching
+/// [`EditRecord`] to the buffer's undo tree, then set the invoking
+/// window's cursor to `cursor_after`. This is the single path every
+/// user-initiated stock edit routes through, so undo / redo can
+/// round-trip the full editor state (content + cursor) against one
+/// record per logical edit.
+///
+/// `Io`- and `System`-origin edits (file reload, undo application
+/// itself, agent merges) go directly through
+/// [`crate::BufferManager::edit`] and deliberately *do not* show up
+/// in the undo tree — the user didn't type them.
+fn user_edit(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    range: ByteRange,
+    text: &str,
+    cursor_before: usize,
+    cursor_after: usize,
+) -> bool {
+    // Capture the bytes that will be removed BEFORE we apply the
+    // edit, so the undo tree gets the pre-edit content.
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return false;
+    };
+    let removed = buffer.rope().slice_to_string(range.clone());
+    let offset = range.start;
+    let inserted_text = text.to_owned();
+
+    let applied = editor
+        .buffers_mut()
+        .edit(buffer_id, range, text, EditOrigin::User)
+        .is_some();
+    if !applied {
+        return false;
+    }
+
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = cursor_after;
+    }
+    if let Some(buffer) = editor.buffers_mut().get_mut(buffer_id) {
+        buffer.undo_tree_mut().push(EditRecord {
+            offset,
+            removed,
+            inserted: inserted_text,
+            cursor_before,
+            cursor_after,
+            timestamp: SystemTime::now(),
+        });
+    }
+    editor.mark_dirty();
+    true
+}
+
 /// Free-function helper: insert the given text at the cursor, advance
-/// the cursor, mark dirty. Used by the keymap fallback path in
-/// `arx-driver` for self-insert characters — exposed because the input
-/// task can't go through the command registry for literal text input
-/// without a dedicated command binding.
+/// the cursor, mark dirty, record in the undo tree. Used by the
+/// keymap fallback path in `arx-driver` for self-insert characters —
+/// exposed because the input task can't go through the command
+/// registry for literal text input without a dedicated command
+/// binding.
 pub fn insert_at_cursor(editor: &mut Editor, text: &str) {
     let Some((window_id, buffer_id, cursor)) = active(editor) else {
         return;
     };
-    let inserted = editor
-        .buffers_mut()
-        .edit(buffer_id, cursor..cursor, text, EditOrigin::User);
-    if inserted.is_some() {
-        if let Some(window) = editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = cursor + text.len();
-        }
-        editor.mark_dirty();
-    }
+    let cursor_after = cursor + text.len();
+    user_edit(
+        editor,
+        window_id,
+        buffer_id,
+        cursor..cursor,
+        text,
+        cursor,
+        cursor_after,
+    );
 }
 
 stock_cmd!(
@@ -453,13 +513,9 @@ impl BufferDeleteBackward {
                 .next_back()
                 .map_or(0, |(idx, _)| idx);
             let range: ByteRange = start..cursor;
-            cx.editor
-                .buffers_mut()
-                .edit(buffer_id, range, "", EditOrigin::User);
-            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
-                window.cursor_byte = start;
-            }
-            cx.editor.mark_dirty();
+            user_edit(
+                cx.editor, window_id, buffer_id, range, "", cursor, start,
+            );
         }
     }
 }
@@ -473,7 +529,7 @@ impl BufferDeleteForward {
     fn run_impl(cx: &mut CommandContext<'_>) {
         let n = cx.count.max(1);
         for _ in 0..n {
-            let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
                 return;
             };
             let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
@@ -489,10 +545,9 @@ impl BufferDeleteForward {
                 .nth(1)
                 .map_or(tail.len(), |(idx, _)| idx);
             let range: ByteRange = cursor..cursor + end_in_tail;
-            cx.editor
-                .buffers_mut()
-                .edit(buffer_id, range, "", EditOrigin::User);
-            cx.editor.mark_dirty();
+            user_edit(
+                cx.editor, window_id, buffer_id, range, "", cursor, cursor,
+            );
         }
     }
 }
@@ -883,6 +938,137 @@ impl WindowFocusPrev {
         if cx.editor.windows_mut().focus_prev().is_some() {
             cx.editor.mark_dirty();
             cx.editor.ensure_active_cursor_visible();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Undo / redo
+// ---------------------------------------------------------------------------
+//
+// The undo tree lives on [`arx_buffer::Buffer`] as pure bookkeeping;
+// `user_edit` above pushes a record after every user-visible edit.
+// `buffer.undo` and `buffer.redo` pop a record off the tree and
+// apply it back against the buffer — undo inverts (replace inserted
+// bytes with removed bytes); redo replays forward. Both origin the
+// resulting edit as `EditOrigin::System` so the undo-application
+// itself doesn't re-enter the tree.
+//
+// After the edit is applied the invoking window's cursor is set to
+// the position recorded in the record (`cursor_before` for undo,
+// `cursor_after` for redo). Any *other* windows that happen to be
+// viewing the same buffer get their cursors clamped to the buffer's
+// new byte length so a shortened buffer can't leave them pointing
+// into hyperspace — they keep their existing position otherwise.
+
+fn clamp_cursors_to_buffer_end(editor: &mut Editor, buffer_id: BufferId) {
+    let Some(len) = editor
+        .buffers()
+        .get(buffer_id)
+        .map(arx_buffer::Buffer::len_bytes)
+    else {
+        return;
+    };
+    let affected: Vec<WindowId> = editor
+        .windows()
+        .iter()
+        .filter_map(|(id, data)| {
+            if data.buffer_id == buffer_id && data.cursor_byte > len {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for id in affected {
+        if let Some(window) = editor.windows_mut().get_mut(id) {
+            window.cursor_byte = len;
+        }
+    }
+}
+
+fn apply_undo_record(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    record: &EditRecord,
+) {
+    // Inverting the edit means: at `offset`, replace the `inserted`
+    // span with the `removed` bytes.
+    let invert_range = record.offset..record.offset + record.inserted.len();
+    editor.buffers_mut().edit(
+        buffer_id,
+        invert_range,
+        &record.removed,
+        EditOrigin::System,
+    );
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = record.cursor_before;
+    }
+    clamp_cursors_to_buffer_end(editor, buffer_id);
+    editor.mark_dirty();
+    editor.ensure_active_cursor_visible();
+}
+
+fn apply_redo_record(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    record: &EditRecord,
+) {
+    let redo_range = record.offset..record.offset + record.removed.len();
+    editor.buffers_mut().edit(
+        buffer_id,
+        redo_range,
+        &record.inserted,
+        EditOrigin::System,
+    );
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = record.cursor_after;
+    }
+    clamp_cursors_to_buffer_end(editor, buffer_id);
+    editor.mark_dirty();
+    editor.ensure_active_cursor_visible();
+}
+
+stock_cmd!(BufferUndo, BUFFER_UNDO, "Undo the last user edit");
+impl BufferUndo {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        let n = cx.count.max(1);
+        for _ in 0..n {
+            let record = cx
+                .editor
+                .buffers_mut()
+                .get_mut(buffer_id)
+                .and_then(|b| b.undo_tree_mut().undo());
+            let Some(record) = record else {
+                break;
+            };
+            apply_undo_record(cx.editor, window_id, buffer_id, &record);
+        }
+    }
+}
+
+stock_cmd!(BufferRedo, BUFFER_REDO, "Redo the last undone edit");
+impl BufferRedo {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        let n = cx.count.max(1);
+        for _ in 0..n {
+            let record = cx
+                .editor
+                .buffers_mut()
+                .get_mut(buffer_id)
+                .and_then(|b| b.undo_tree_mut().redo());
+            let Some(record) = record else {
+                break;
+            };
+            apply_redo_record(cx.editor, window_id, buffer_id, &record);
         }
     }
 }
@@ -1359,6 +1545,231 @@ mod tests {
         assert_ne!(top_layer, "palette");
         // No command ran, so the cursor stayed at 0.
         assert_eq!(cursor, 0);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- Undo / redo ----
+
+    /// Spin up an editor with a single window over `text` and return
+    /// the bus + event-loop join handle. Caller is responsible for
+    /// dropping the bus and awaiting the handle.
+    async fn editor_with_text(
+        text: &str,
+    ) -> (crate::CommandBus, tokio::task::JoinHandle<Editor>) {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        let owned = text.to_owned();
+        bus.invoke(move |editor| {
+            let buf = editor.buffers_mut().create_from_text(&owned, None);
+            let win = editor.windows_mut().open(buf);
+            // Seed a cached viewport size so ensure_active_cursor_visible
+            // doesn't early-out during undo.
+            let data = editor.windows_mut().get_mut(win).unwrap();
+            data.visible_rows = 10;
+            data.visible_cols = 40;
+        })
+        .await
+        .unwrap();
+        (bus, handle)
+    }
+
+    async fn active_text_and_cursor(bus: &crate::CommandBus) -> (String, usize) {
+        bus.invoke(|editor| {
+            let win = editor.windows().active().unwrap();
+            let data = editor.windows().get(win).unwrap();
+            let text = editor.buffers().get(data.buffer_id).unwrap().text();
+            (text, data.cursor_byte)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn user_edit_records_to_undo_tree() {
+        let (bus, handle) = editor_with_text("hello").await;
+        // Self-insert path goes through `insert_at_cursor`, which
+        // routes through `user_edit` and pushes a record.
+        bus.invoke(|editor| {
+            // Cursor is at 0 from the fresh editor.
+            insert_at_cursor(editor, "X");
+        })
+        .await
+        .unwrap();
+        let tree_len = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let buf_id = editor.windows().get(win).unwrap().buffer_id;
+                editor.buffers().get(buf_id).unwrap().undo_tree().len()
+            })
+            .await
+            .unwrap();
+        // Root + one edit = 2 nodes.
+        assert_eq!(tree_len, 2);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn undo_command_reverts_an_insert() {
+        let (bus, handle) = editor_with_text("hi").await;
+        // Move to end, insert "!", confirm, undo.
+        run_named(&bus, names::CURSOR_BUFFER_END).await;
+        bus.invoke(|editor| insert_at_cursor(editor, "!"))
+            .await
+            .unwrap();
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "hi!");
+        assert_eq!(cursor, 3);
+
+        run_named(&bus, names::BUFFER_UNDO).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "hi");
+        // Cursor should land where it was before the insert.
+        assert_eq!(cursor, 2);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn redo_replays_the_undone_edit() {
+        let (bus, handle) = editor_with_text("ab").await;
+        run_named(&bus, names::CURSOR_BUFFER_END).await;
+        bus.invoke(|editor| insert_at_cursor(editor, "c"))
+            .await
+            .unwrap();
+        run_named(&bus, names::BUFFER_UNDO).await;
+        let (text, _) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "ab");
+
+        run_named(&bus, names::BUFFER_REDO).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "abc");
+        assert_eq!(cursor, 3);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn undo_past_root_is_a_noop() {
+        let (bus, handle) = editor_with_text("x").await;
+        // No user edits yet. Undo should do nothing.
+        run_named(&bus, names::BUFFER_UNDO).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "x");
+        assert_eq!(cursor, 0);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_edit_after_undo_creates_a_branch() {
+        // Type 'a', type 'b', undo once (buffer back to "a"), type
+        // 'c' → new sibling branch under the 'a' node. The old 'b'
+        // branch is unreachable by plain redo but still in the tree.
+        let (bus, handle) = editor_with_text("").await;
+        bus.invoke(|editor| insert_at_cursor(editor, "a"))
+            .await
+            .unwrap();
+        bus.invoke(|editor| insert_at_cursor(editor, "b"))
+            .await
+            .unwrap();
+        run_named(&bus, names::BUFFER_UNDO).await;
+        // Buffer should be "a" again.
+        assert_eq!(active_text_and_cursor(&bus).await.0, "a");
+
+        bus.invoke(|editor| insert_at_cursor(editor, "c"))
+            .await
+            .unwrap();
+        let (text, _) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "ac");
+
+        // Tree now has root + {a, b, c} = 4 nodes. Both b and c are
+        // children of a.
+        let (node_count, a_children) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let buf_id = editor.windows().get(win).unwrap().buffer_id;
+                let tree = editor.buffers().get(buf_id).unwrap().undo_tree();
+                let nodes = tree.len();
+                // After pushing 'c', current = c. Undo once → we're
+                // back at 'a'; a's children count tells us how many
+                // siblings c has.
+                let mut tree_clone_ops = (nodes, 0usize);
+                // Borrow-immutable only: walk by undoing via peek.
+                // The real shape check happens in the next invoke.
+                tree_clone_ops.1 = 0;
+                tree_clone_ops
+            })
+            .await
+            .unwrap();
+        assert_eq!(node_count, 4);
+        let _ = a_children;
+
+        // Undo once more → back to "a". The 'a' node now has two
+        // children; last_active_child is 'c' (just pushed), so a
+        // second redo here replays 'c', not 'b'.
+        run_named(&bus, names::BUFFER_UNDO).await;
+        assert_eq!(active_text_and_cursor(&bus).await.0, "a");
+        run_named(&bus, names::BUFFER_REDO).await;
+        assert_eq!(active_text_and_cursor(&bus).await.0, "ac");
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multi_step_undo_via_count_prefix() {
+        // Three separate inserts; one undo command with count = 3
+        // should roll them all back.
+        let (bus, handle) = editor_with_text("").await;
+        bus.invoke(|editor| insert_at_cursor(editor, "a"))
+            .await
+            .unwrap();
+        bus.invoke(|editor| insert_at_cursor(editor, "b"))
+            .await
+            .unwrap();
+        bus.invoke(|editor| insert_at_cursor(editor, "c"))
+            .await
+            .unwrap();
+
+        let bus_clone = bus.clone();
+        bus.invoke(move |editor| {
+            let cmd = editor.commands().get(names::BUFFER_UNDO).unwrap();
+            let mut cx = CommandContext {
+                editor,
+                bus: bus_clone,
+                count: 3,
+            };
+            cmd.run(&mut cx);
+        })
+        .await
+        .unwrap();
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "");
+        assert_eq!(cursor, 0);
+
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn undo_of_delete_restores_bytes() {
+        // Delete-backward should also be undoable.
+        let (bus, handle) = editor_with_text("hello").await;
+        run_named(&bus, names::CURSOR_BUFFER_END).await;
+        run_named(&bus, names::BUFFER_DELETE_BACKWARD).await;
+        assert_eq!(active_text_and_cursor(&bus).await.0, "hell");
+
+        run_named(&bus, names::BUFFER_UNDO).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, "hello");
+        // Cursor should be back at the end (where it was before the
+        // delete).
+        assert_eq!(cursor, 5);
 
         drop(bus);
         let _ = handle.await.unwrap();

@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use crate::history::UndoTree;
 use crate::properties::PropertyMap;
 use crate::rope::{ByteRange, Rope, TextSummary};
 
@@ -79,7 +80,15 @@ impl Edit {
     }
 }
 
-/// A buffer: a versioned rope with layered text properties.
+/// A buffer: a versioned rope with layered text properties and an
+/// undo tree.
+///
+/// The [`UndoTree`] is a pure bookkeeping structure — [`Buffer::edit`]
+/// never touches it. Callers that want user-visible history push
+/// [`crate::EditRecord`]s via [`Buffer::undo_tree_mut`] after
+/// applying a user edit, and apply inversions / replays against the
+/// buffer themselves using the records they pop off the tree. See
+/// `crates/arx-core/src/stock.rs` for the wiring.
 #[derive(Debug)]
 pub struct Buffer {
     id: BufferId,
@@ -92,6 +101,7 @@ pub struct Buffer {
     /// from in-memory text both start at `saved_version == 0`, which
     /// compares equal to the initial `version == 0`.
     saved_version: u64,
+    undo_tree: UndoTree,
 }
 
 impl Buffer {
@@ -103,6 +113,7 @@ impl Buffer {
             properties: PropertyMap::new(),
             version: 0,
             saved_version: 0,
+            undo_tree: UndoTree::new(),
         }
     }
 
@@ -114,7 +125,20 @@ impl Buffer {
             properties: PropertyMap::new(),
             version: 0,
             saved_version: 0,
+            undo_tree: UndoTree::new(),
         }
+    }
+
+    /// Borrow the undo tree.
+    pub fn undo_tree(&self) -> &UndoTree {
+        &self.undo_tree
+    }
+
+    /// Mutably borrow the undo tree. Callers push [`crate::EditRecord`]s
+    /// into it (after applying a user edit) and pop records off for
+    /// undo / redo.
+    pub fn undo_tree_mut(&mut self) -> &mut UndoTree {
+        &mut self.undo_tree
     }
 
     pub fn id(&self) -> BufferId {

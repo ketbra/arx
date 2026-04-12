@@ -16,8 +16,8 @@
 use std::sync::Arc;
 
 use crate::commands::{
-    BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_NEWLINE, BUFFER_SAVE,
-    COMMAND_PALETTE_BACKSPACE, COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE,
+    BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_NEWLINE, BUFFER_REDO, BUFFER_SAVE,
+    BUFFER_UNDO, COMMAND_PALETTE_BACKSPACE, COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE,
     COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN, COMMAND_PALETTE_PREV, CURSOR_BUFFER_END,
     CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
     CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_QUIT,
@@ -89,6 +89,14 @@ pub fn emacs() -> Profile {
     m.bind_str("C-x C-s", BUFFER_SAVE).unwrap();
     m.bind_str("C-x C-c", EDITOR_QUIT).unwrap();
     m.bind_str("C-x C-q", EDITOR_QUIT).unwrap();
+
+    // Undo / redo. `C-/` and `C-_` are the classic Emacs undo keys
+    // (most terminals conflate them); `C-x u` is the long form. `M-_`
+    // matches the `undo-tree.el` convention for redo.
+    m.bind_str("C-/", BUFFER_UNDO).unwrap();
+    m.bind_str("C-_", BUFFER_UNDO).unwrap();
+    m.bind_str("C-x u", BUFFER_UNDO).unwrap();
+    m.bind_str("M-_", BUFFER_REDO).unwrap();
 
     // Window splits (Emacs conventions).
     m.bind_str("C-x 2", WINDOW_SPLIT_HORIZONTAL).unwrap();
@@ -209,6 +217,9 @@ pub fn vim() -> Profile {
     normal.bind_str("a", MODE_ENTER_INSERT).unwrap(); // simplified: no trailing cursor move yet
     normal.bind_str("o", MODE_ENTER_INSERT).unwrap(); // simplified: no newline-below yet
     normal.bind_str("x", BUFFER_DELETE_FORWARD).unwrap();
+    // Undo / redo: Vim's canonical `u` in normal mode, `C-r` for redo.
+    normal.bind_str("u", BUFFER_UNDO).unwrap();
+    normal.bind_str("C-r", BUFFER_REDO).unwrap();
     // Shift-Z Shift-Z → save and quit. Minimalist vim exit.
     // Ex-command line (`:w`, `:q`) is a follow-up milestone.
 
