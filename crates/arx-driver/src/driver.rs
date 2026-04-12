@@ -65,6 +65,7 @@ pub enum DriverError {
 pub struct Driver {
     seed: Box<dyn FnOnce(&mut Editor) + Send>,
     async_hook: Option<AsyncHook>,
+    profile: Option<arx_keymap::profiles::Profile>,
 }
 
 impl std::fmt::Debug for Driver {
@@ -86,7 +87,15 @@ impl Driver {
         Self {
             seed: Box::new(seed),
             async_hook: None,
+            profile: None,
         }
+    }
+
+    /// Use a specific keymap profile instead of the default (Emacs).
+    #[must_use]
+    pub fn with_profile(mut self, profile: arx_keymap::profiles::Profile) -> Self {
+        self.profile = Some(profile);
+        self
     }
 
     /// Attach a post-spawn async hook. The hook runs once after the
@@ -153,7 +162,10 @@ impl Driver {
         // event loop starts. Going through the bus here would deadlock,
         // because `invoke` awaits a reply from a loop that hasn't been
         // spawned yet. Using `with_editor` sidesteps that entirely.
-        let mut editor = Editor::new();
+        let mut editor = match self.profile {
+            Some(p) => Editor::with_profile(p),
+            None => Editor::new(),
+        };
         let seed = self.seed;
         seed(&mut editor);
         let (event_loop, bus) = EventLoop::with_editor(editor, DEFAULT_BUS_CAPACITY);

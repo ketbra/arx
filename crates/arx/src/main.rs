@@ -36,6 +36,10 @@ struct Cli {
     /// `daemon` and `client` subcommands.
     files: Vec<PathBuf>,
 
+    /// Keymap profile: "emacs" (default) or "vim".
+    #[arg(long, default_value = "emacs")]
+    keymap: String,
+
     #[command(subcommand)]
     mode: Option<Mode>,
 }
@@ -140,8 +144,12 @@ fn default_extensions_dir() -> PathBuf {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    let profile = match cli.keymap.as_str() {
+        "vim" => arx_keymap::profiles::vim(),
+        _ => arx_keymap::profiles::emacs(),
+    };
     let result = match cli.mode {
-        None => run_embedded(cli.files).await,
+        None => run_embedded(cli.files, profile).await,
         Some(Mode::Session { action, socket }) => {
             run_session_command(action, resolve_address(socket)).await
         }
@@ -175,8 +183,13 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run_embedded(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-    let driver = Driver::new(|_editor| {}).with_async_hook(move |bus| async move {
+async fn run_embedded(
+    files: Vec<PathBuf>,
+    profile: arx_keymap::profiles::Profile,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let driver = Driver::new(|_editor| {})
+        .with_profile(profile)
+        .with_async_hook(move |bus| async move {
         for path in files {
             match arx_core::open_file(&bus, path.clone()).await {
                 Ok((buffer_id, window_id)) => {

@@ -234,7 +234,7 @@ impl From<&crossterm::event::KeyEvent> for KeyChord {
     fn from(ev: &crossterm::event::KeyEvent) -> Self {
         use crossterm::event::{KeyCode, KeyModifiers as XtermMods};
 
-        let key = match ev.code {
+        let mut key = match ev.code {
             // Space with modifiers (C-SPC, M-SPC) → Named key so it
             // matches `<Space>` in binding strings. Bare space stays
             // as Char(' ') for self-insert.
@@ -283,6 +283,30 @@ impl From<&crossterm::event::KeyEvent> for KeyChord {
         // keep shift — `S-Tab` and `S-F1` are legitimate bindings.
         if let Key::Char(_) = &key {
             modifiers.shift = false;
+        }
+
+        // Normalize terminal-specific Ctrl+key quirks so bindings
+        // work across terminals.
+        //
+        // Problem 1: Ctrl+_ arrives as Ctrl+Shift+'-' on some
+        //   terminals (SHIFT on the base key, not the result).
+        //   Re-apply the shift so the chord matches "C-_".
+        //
+        // Problem 2: Legacy terminals send Ctrl+/ and Ctrl+_ both
+        //   as the raw ASCII control character 0x1F (Unit Separator)
+        //   with no CONTROL modifier. Reconstruct the chord so "C-/"
+        //   and "C-_" bindings match.
+        match key {
+            Key::Char('-') if modifiers.ctrl && ev.modifiers.contains(XtermMods::SHIFT) => {
+                key = Key::Char('_');
+            }
+            Key::Char('\x1f') => {
+                // 0x1F is the ASCII code for Ctrl+/ and Ctrl+_.
+                // Map it to C-/ which is the canonical binding.
+                key = Key::Char('/');
+                modifiers.ctrl = true;
+            }
+            _ => {}
         }
         Self { key, modifiers }
     }
