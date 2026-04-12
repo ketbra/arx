@@ -23,6 +23,7 @@ fn window(text: &str) -> WindowState {
         cursors: smallvec![Cursor::at(0)],
         scroll: ScrollPosition::default(),
         gutter: GutterConfig::default(),
+        selection: None,
     }
 }
 
@@ -71,6 +72,7 @@ fn typed_character_diffs_to_two_setcell_ops() {
         cursors: smallvec![Cursor::at(1)],
         scroll: ScrollPosition::default(),
         gutter: GutterConfig::default(),
+        selection: None,
     };
     let state0 = state_with(w0, 20, 3);
     let tree0 = render(&state0, 0);
@@ -82,6 +84,7 @@ fn typed_character_diffs_to_two_setcell_ops() {
         cursors: smallvec![Cursor::at(2)],
         scroll: ScrollPosition::default(),
         gutter: GutterConfig::default(),
+        selection: None,
     };
     let state1 = state_with(w1, 20, 3);
     let tree1 = render(&state1, 1);
@@ -123,6 +126,7 @@ fn property_decoration_flows_into_cell_face() {
         cursors: smallvec![Cursor::at(0)],
         scroll: ScrollPosition::default(),
         gutter: GutterConfig::default(),
+        selection: None,
     };
     let state = state_with(w, 20, 3);
     let tree = render(&state, 0);

@@ -316,6 +316,12 @@ fn render_window(
         }
     }
 
+    // Selection highlight: paint the region between mark and cursor
+    // with an inverted face so the user sees what's selected.
+    if let Some(ref sel) = window.selection {
+        paint_selection(window, sel, rect, gutter_width, text_width, grid);
+    }
+
     // Primary cursor position — only for the active pane.
     if !is_active {
         return;
@@ -339,6 +345,81 @@ fn render_window(
 /// Paint a line number at `(x, y)` right-justified to `width - 1` cells,
 /// leaving the final column blank as padding between the gutter and the
 /// text area.
+/// Paint a selection highlight over the cells that fall within the
+/// byte range `sel`. Walks each visible row, converts byte positions
+/// to screen columns, and applies a highlight face (blue background,
+/// white foreground) to the affected cells.
+fn paint_selection(
+    window: &WindowState,
+    sel: &std::ops::Range<usize>,
+    rect: Rect,
+    gutter_width: u16,
+    text_width: u16,
+    grid: &mut CellGrid,
+) {
+    if sel.start == sel.end || rect.is_empty() || text_width == 0 {
+        return;
+    }
+    let rope = window.buffer.rope();
+    let sel_face = ResolvedFace {
+        fg: Color::WHITE,
+        bg: Color::rgb(0x26, 0x4F, 0x78),
+        ..ResolvedFace::DEFAULT
+    };
+    let text_x = rect.x + gutter_width;
+
+    for row_idx in 0..rect.height {
+        let line_idx = window.scroll.top_line + row_idx as usize;
+        if line_idx >= rope.len_lines() {
+            break;
+        }
+        let line_start = rope.line_to_byte(line_idx);
+        let line_end = if line_idx + 1 < rope.len_lines() {
+            rope.line_to_byte(line_idx + 1)
+        } else {
+            rope.len_bytes()
+        };
+        // Does this line overlap the selection?
+        if line_end <= sel.start || line_start >= sel.end {
+            continue;
+        }
+        // Compute the column range within this line that's selected.
+        let sel_start_in_line = sel.start.max(line_start) - line_start;
+        let sel_end_in_line = sel.end.min(line_end) - line_start;
+
+        // Walk characters to convert byte offsets to display columns.
+        let line_text = rope.slice_to_string(line_start..line_end);
+        let mut byte_in_line: usize = 0;
+        let mut display_col: u16 = 0;
+        for grapheme in line_text.grapheme_indices(true) {
+            let (gi, g) = grapheme;
+            let g_end = gi + g.len();
+            let w = UnicodeWidthStr::width(g).clamp(1, 2) as u16;
+            if gi >= sel_end_in_line {
+                break;
+            }
+            if g_end > sel_start_in_line && gi < sel_end_in_line {
+                // This grapheme overlaps the selection. Compute its
+                // screen column (accounting for horizontal scroll).
+                if display_col >= window.scroll.left_col
+                    && display_col - window.scroll.left_col < text_width
+                {
+                    let screen_col = text_x + (display_col - window.scroll.left_col);
+                    let y = rect.y + row_idx;
+                    for dx in 0..w {
+                        if let Some(cell) = grid.get_mut(screen_col + dx, y) {
+                            cell.face = sel_face;
+                        }
+                    }
+                }
+            }
+            display_col += w;
+            byte_in_line = g_end;
+        }
+        let _ = byte_in_line;
+    }
+}
+
 fn paint_gutter(grid: &mut CellGrid, x: u16, y: u16, width: u16, line_number: usize) {
     if width == 0 {
         return;
@@ -1056,6 +1137,7 @@ mod tests {
             cursors: sv![Cursor::at(0)],
             scroll: ScrollPosition::default(),
             gutter: GutterConfig::default(),
+            selection: None,
         }
     }
 
@@ -1383,6 +1465,7 @@ mod tests {
             cursors: sv![Cursor::at(0)],
             scroll: ScrollPosition::default(),
             gutter: GutterConfig::default(),
+            selection: None,
         }
     }
 

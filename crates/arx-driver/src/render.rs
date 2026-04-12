@@ -245,6 +245,12 @@ fn build_view_state_sync(
         } else {
             let data = editor.windows().get(id)?.clone();
             let snapshot = editor.buffers().snapshot(data.buffer_id)?;
+            let selection = editor.mark(id).map(|mark| {
+                let cursor = data.cursor_byte;
+                let start = mark.min(cursor);
+                let end = mark.max(cursor);
+                start..end
+            });
             windows.push(WindowState {
                 id: ViewWindowId(id.0),
                 buffer: snapshot,
@@ -254,6 +260,7 @@ fn build_view_state_sync(
                     left_col: data.scroll_left_col,
                 },
                 gutter,
+                selection,
             });
         }
     }

@@ -276,6 +276,9 @@ pub struct WindowState {
     pub cursors: SmallVec<[Cursor; 1]>,
     pub scroll: ScrollPosition,
     pub gutter: GutterConfig,
+    /// Selection region (mark..cursor or cursor..mark) as a byte
+    /// range in the buffer. `None` when no mark is set.
+    pub selection: Option<std::ops::Range<usize>>,
 }
 
 impl WindowState {
