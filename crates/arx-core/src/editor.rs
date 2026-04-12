@@ -60,6 +60,10 @@ pub struct Editor {
     terminal_redraw: Option<Arc<tokio::sync::Notify>>,
     #[cfg(feature = "lsp")]
     lsp_notifier: Option<tokio::sync::mpsc::Sender<arx_lsp::LspEvent>>,
+    /// Kill ring — a stack of killed (cut/copied) text for yank.
+    kill_ring: Vec<String>,
+    /// Per-window mark (selection anchor) byte offsets.
+    marks: HashMap<crate::WindowId, usize>,
     /// Transient message shown in the modeline (e.g. hover info, LSP
     /// status). Cleared on the next user keystroke.
     status_message: Option<String>,
@@ -115,6 +119,8 @@ impl Editor {
             highlight: HighlightManager::new(),
             #[cfg(feature = "lsp")]
             lsp_notifier: None,
+            kill_ring: Vec::new(),
+            marks: HashMap::new(),
             status_message: None,
             dirty: false,
             quit_requested: false,
@@ -333,6 +339,35 @@ impl Editor {
         } else {
             crate::stock::insert_at_cursor(self, &ch.to_string());
         }
+    }
+
+    /// Push text onto the kill ring.
+    pub fn kill_ring_push(&mut self, text: String) {
+        self.kill_ring.push(text);
+        // Cap at 64 entries.
+        if self.kill_ring.len() > 64 {
+            self.kill_ring.remove(0);
+        }
+    }
+
+    /// Peek at the top of the kill ring (most recently killed text).
+    pub fn kill_ring_top(&self) -> Option<&str> {
+        self.kill_ring.last().map(String::as_str)
+    }
+
+    /// Set the mark (selection anchor) for `window_id`.
+    pub fn set_mark(&mut self, window_id: crate::WindowId, byte: usize) {
+        self.marks.insert(window_id, byte);
+    }
+
+    /// Get the mark for `window_id`, if set.
+    pub fn mark(&self, window_id: crate::WindowId) -> Option<usize> {
+        self.marks.get(&window_id).copied()
+    }
+
+    /// Clear the mark for `window_id`.
+    pub fn clear_mark(&mut self, window_id: crate::WindowId) {
+        self.marks.remove(&window_id);
     }
 
     /// Set a transient status message shown in the modeline. Cleared

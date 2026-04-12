@@ -39,8 +39,21 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(BufferDeleteForward);
     reg.register(ScrollPageUp);
     reg.register(ScrollPageDown);
+    reg.register(ScrollRecenter);
+    reg.register(BufferKillLine);
+    reg.register(BufferKillWord);
+    reg.register(BufferKillWordBackward);
+    reg.register(BufferKillRegion);
+    reg.register(BufferCopyRegion);
+    reg.register(BufferYank);
+    reg.register(BufferSetMark);
+    reg.register(BufferClose);
+    reg.register(BufferSwitch);
+    reg.register(BufferOpenLine);
+    reg.register(BufferTransposeChars);
     reg.register(BufferSave);
     reg.register(EditorQuit);
+    reg.register(EditorCancel);
     reg.register(ModeEnterInsert);
     reg.register(ModeLeaveInsert);
     reg.register(CommandPaletteOpen);
@@ -615,6 +628,391 @@ impl ScrollPageDown {
         let n = cx.count.max(1) as i32 * page;
         move_cursor_vertical_by(cx.editor, n);
         cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recenter
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    ScrollRecenter,
+    SCROLL_RECENTER,
+    "Scroll the window to center the cursor vertically"
+);
+impl ScrollRecenter {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some(window_id) = cx.editor.windows().active() else {
+            return;
+        };
+        let Some(data) = cx.editor.windows().get(window_id) else {
+            return;
+        };
+        let visible = data.visible_rows as usize;
+        if visible == 0 {
+            return;
+        }
+        let buffer_id = data.buffer_id;
+        let cursor = data.cursor_byte;
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let cursor_line = buffer.rope().byte_to_line(cursor);
+        let new_top = cursor_line.saturating_sub(visible / 2);
+        if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+            window.scroll_top_line = new_top;
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kill / yank / mark
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    BufferKillLine,
+    BUFFER_KILL_LINE,
+    "Kill from the cursor to the end of the line"
+);
+impl BufferKillLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let line_end = if line + 1 < rope.len_lines() {
+            rope.line_to_byte(line + 1).saturating_sub(1)
+        } else {
+            rope.len_bytes()
+        };
+        // If cursor is already at line end, kill the newline.
+        let end = if cursor == line_end && line + 1 < rope.len_lines() {
+            line_end + 1
+        } else {
+            line_end
+        };
+        if cursor >= end {
+            return;
+        }
+        let killed = rope.slice_to_string(cursor..end);
+        let range: ByteRange = cursor..end;
+        user_edit(cx.editor, window_id, buffer_id, range, "", cursor, cursor);
+        cx.editor.kill_ring_push(killed);
+    }
+}
+
+stock_cmd!(
+    BufferKillWord,
+    BUFFER_KILL_WORD,
+    "Kill the word after the cursor"
+);
+impl BufferKillWord {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+        let end = next_word_boundary(&text, cursor);
+        if end <= cursor {
+            return;
+        }
+        let killed = text[cursor..end].to_owned();
+        let range: ByteRange = cursor..end;
+        user_edit(cx.editor, window_id, buffer_id, range, "", cursor, cursor);
+        cx.editor.kill_ring_push(killed);
+    }
+}
+
+stock_cmd!(
+    BufferKillWordBackward,
+    BUFFER_KILL_WORD_BACKWARD,
+    "Kill the word before the cursor"
+);
+impl BufferKillWordBackward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+        let start = prev_word_boundary(&text, cursor);
+        if start >= cursor {
+            return;
+        }
+        let killed = text[start..cursor].to_owned();
+        let range: ByteRange = start..cursor;
+        user_edit(cx.editor, window_id, buffer_id, range, "", cursor, start);
+        cx.editor.kill_ring_push(killed);
+    }
+}
+
+stock_cmd!(
+    BufferSetMark,
+    BUFFER_SET_MARK,
+    "Set the mark at the cursor (start a selection)"
+);
+impl BufferSetMark {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor.set_mark(window_id, cursor);
+        cx.editor.set_status("Mark set");
+    }
+}
+
+stock_cmd!(
+    BufferKillRegion,
+    BUFFER_KILL_REGION,
+    "Kill (cut) the region between mark and cursor"
+);
+impl BufferKillRegion {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let start = mark.min(cursor);
+        let end = mark.max(cursor);
+        if start == end {
+            return;
+        }
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let killed = buffer.rope().slice_to_string(start..end);
+        let range: ByteRange = start..end;
+        user_edit(cx.editor, window_id, buffer_id, range, "", cursor, start);
+        cx.editor.kill_ring_push(killed);
+        cx.editor.clear_mark(window_id);
+    }
+}
+
+stock_cmd!(
+    BufferCopyRegion,
+    BUFFER_COPY_REGION,
+    "Copy the region between mark and cursor"
+);
+impl BufferCopyRegion {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let start = mark.min(cursor);
+        let end = mark.max(cursor);
+        if start == end {
+            return;
+        }
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let copied = buffer.rope().slice_to_string(start..end);
+        cx.editor.kill_ring_push(copied);
+        cx.editor.clear_mark(window_id);
+        cx.editor.set_status("Region copied");
+    }
+}
+
+stock_cmd!(BufferYank, BUFFER_YANK, "Yank (paste) the most recently killed text");
+impl BufferYank {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(text) = cx.editor.kill_ring_top().map(str::to_owned) else {
+            cx.editor.set_status("Kill ring empty");
+            return;
+        };
+        let len = text.len();
+        user_edit(
+            cx.editor,
+            window_id,
+            buffer_id,
+            cursor..cursor,
+            &text,
+            cursor,
+            cursor + len,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Buffer management
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    BufferClose,
+    BUFFER_CLOSE,
+    "Close the active buffer"
+);
+impl BufferClose {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        // Don't close the last window — use editor.quit for that.
+        let leaf_count = cx
+            .editor
+            .windows()
+            .layout()
+            .map_or(0, |l| l.leaves().len());
+        if leaf_count <= 1 {
+            cx.editor.set_status("Last window — use C-x C-c to quit");
+            return;
+        }
+        cx.editor.buffers_mut().close(buffer_id);
+        cx.editor.windows_mut().close(window_id);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    BufferSwitch,
+    BUFFER_SWITCH,
+    "Switch to a different open buffer"
+);
+impl BufferSwitch {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Open the command palette pre-seeded with buffer names.
+        let buffers: Vec<(String, String)> = cx
+            .editor
+            .buffers()
+            .ids()
+            .map(|id| {
+                let label = cx
+                    .editor
+                    .buffers()
+                    .path(id)
+                    .and_then(|p| p.file_name())
+                    .map_or_else(
+                        || format!("*scratch-{}*", id.0),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                (label, format!("buffer {}", id.0))
+            })
+            .collect();
+        cx.editor.palette_mut().open_with_entries(buffers);
+        ensure_palette_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Utility editing
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    BufferOpenLine,
+    BUFFER_OPEN_LINE,
+    "Insert a newline at the cursor without moving the cursor"
+);
+impl BufferOpenLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        // Insert a newline but keep the cursor at the current position.
+        user_edit(
+            cx.editor,
+            window_id,
+            buffer_id,
+            cursor..cursor,
+            "\n",
+            cursor,
+            cursor,
+        );
+    }
+}
+
+stock_cmd!(
+    BufferTransposeChars,
+    BUFFER_TRANSPOSE_CHARS,
+    "Swap the character at the cursor with the one before it"
+);
+impl BufferTransposeChars {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        if cursor == 0 {
+            return;
+        }
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let len = buffer.len_bytes();
+        if cursor >= len {
+            return;
+        }
+        let text = buffer.rope().slice_to_string(0..len);
+        // Find the grapheme before and at the cursor.
+        let before = text[..cursor]
+            .grapheme_indices(true)
+            .next_back()
+            .map(|(i, g)| (i, g.to_owned()));
+        let at = text[cursor..]
+            .grapheme_indices(true)
+            .next()
+            .map(|(_, g)| g.to_owned());
+        let Some((before_start, before_g)) = before else {
+            return;
+        };
+        let Some(at_g) = at else {
+            return;
+        };
+        let end = cursor + at_g.len();
+        let swapped = format!("{at_g}{before_g}");
+        let range: ByteRange = before_start..end;
+        user_edit(
+            cx.editor,
+            window_id,
+            buffer_id,
+            range,
+            &swapped,
+            cursor,
+            end,
+        );
+    }
+}
+
+stock_cmd!(
+    EditorCancel,
+    EDITOR_CANCEL,
+    "Cancel the current operation"
+);
+impl EditorCancel {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Close any open overlay (palette, completion).
+        if cx.editor.palette().is_open() {
+            cx.editor.palette_mut().close();
+            leave_palette_layer(cx.editor);
+        }
+        if cx.editor.completion().is_open() {
+            cx.editor.completion_mut().dismiss();
+            leave_completion_layer(cx.editor);
+        }
+        // Clear the mark.
+        if let Some(id) = cx.editor.windows().active() {
+            cx.editor.clear_mark(id);
+        }
+        cx.editor.set_status("Quit");
     }
 }
 

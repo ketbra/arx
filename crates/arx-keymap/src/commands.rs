@@ -37,6 +37,24 @@ pub const BUFFER_NEWLINE: &str = "buffer.newline";
 pub const BUFFER_DELETE_BACKWARD: &str = "buffer.delete-backward";
 /// Delete the grapheme at the cursor.
 pub const BUFFER_DELETE_FORWARD: &str = "buffer.delete-forward";
+/// Kill (cut) from the cursor to the end of the line.
+pub const BUFFER_KILL_LINE: &str = "buffer.kill-line";
+/// Kill (cut) the word after the cursor.
+pub const BUFFER_KILL_WORD: &str = "buffer.kill-word";
+/// Kill (cut) the word before the cursor.
+pub const BUFFER_KILL_WORD_BACKWARD: &str = "buffer.kill-word-backward";
+/// Kill (cut) the region between the mark and cursor.
+pub const BUFFER_KILL_REGION: &str = "buffer.kill-region";
+/// Copy the region between the mark and cursor (without deleting).
+pub const BUFFER_COPY_REGION: &str = "buffer.copy-region";
+/// Yank (paste) the most recently killed text.
+pub const BUFFER_YANK: &str = "buffer.yank";
+/// Set the mark at the cursor position (start a selection).
+pub const BUFFER_SET_MARK: &str = "buffer.set-mark";
+/// Close the current buffer.
+pub const BUFFER_CLOSE: &str = "buffer.close";
+/// Switch to a different open buffer (via palette).
+pub const BUFFER_SWITCH: &str = "buffer.switch";
 /// Persist the active buffer to its associated path.
 pub const BUFFER_SAVE: &str = "buffer.save";
 /// Undo the last user edit on the active buffer, walking the buffer's
@@ -55,8 +73,17 @@ pub const SCROLL_PAGE_UP: &str = "scroll.page-up";
 /// Scroll the active window down by one page.
 pub const SCROLL_PAGE_DOWN: &str = "scroll.page-down";
 
+/// Insert a newline without moving the cursor (open-line).
+pub const BUFFER_OPEN_LINE: &str = "buffer.open-line";
+/// Transpose (swap) the two characters around the cursor.
+pub const BUFFER_TRANSPOSE_CHARS: &str = "buffer.transpose-chars";
+
 /// Request editor shutdown.
 pub const EDITOR_QUIT: &str = "editor.quit";
+/// Cancel the current operation (keyboard-quit).
+pub const EDITOR_CANCEL: &str = "editor.cancel";
+/// Recenter the view so the cursor is in the middle of the window.
+pub const SCROLL_RECENTER: &str = "scroll.recenter";
 
 /// Enter Vim-style insert mode (push an `insert` layer over `vim.normal`).
 pub const MODE_ENTER_INSERT: &str = "mode.enter-insert";

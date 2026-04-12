@@ -16,15 +16,19 @@
 use std::sync::Arc;
 
 use crate::commands::{
-    BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_NEWLINE, BUFFER_REDO, BUFFER_SAVE,
-    BUFFER_UNDO, COMMAND_PALETTE_BACKSPACE, COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE,
-    COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN, COMMAND_PALETTE_PREV, COMPLETION_ACCEPT,
-    COMPLETION_DISMISS, COMPLETION_NEXT, COMPLETION_PREV, COMPLETION_TRIGGER, CURSOR_BUFFER_END,
+    BUFFER_CLOSE, BUFFER_COPY_REGION, BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD,
+    BUFFER_KILL_LINE, BUFFER_KILL_REGION, BUFFER_KILL_WORD, BUFFER_KILL_WORD_BACKWARD,
+    BUFFER_NEWLINE, BUFFER_OPEN_LINE, BUFFER_REDO, BUFFER_SAVE, BUFFER_SET_MARK, BUFFER_SWITCH,
+    BUFFER_TRANSPOSE_CHARS, BUFFER_UNDO, BUFFER_YANK, COMMAND_PALETTE_BACKSPACE,
+    COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE, COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN,
+    COMMAND_PALETTE_PREV, COMPLETION_ACCEPT, COMPLETION_DISMISS, COMPLETION_NEXT, COMPLETION_PREV,
+    COMPLETION_TRIGGER, CURSOR_BUFFER_END,
     LSP_HOVER, TERMINAL_OPEN,
     CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
-    CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_QUIT,
-    LSP_NEXT_DIAGNOSTIC, LSP_PREV_DIAGNOSTIC, MODE_ENTER_INSERT, MODE_LEAVE_INSERT,
-    SCROLL_PAGE_DOWN, SCROLL_PAGE_UP, WINDOW_CLOSE, WINDOW_FOCUS_NEXT, WINDOW_FOCUS_PREV,
+    CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_CANCEL,
+    EDITOR_QUIT, LSP_NEXT_DIAGNOSTIC, LSP_PREV_DIAGNOSTIC, MODE_ENTER_INSERT, MODE_LEAVE_INSERT,
+    SCROLL_PAGE_DOWN, SCROLL_PAGE_UP, SCROLL_RECENTER, WINDOW_CLOSE, WINDOW_FOCUS_NEXT,
+    WINDOW_FOCUS_PREV,
     WINDOW_SPLIT_HORIZONTAL, WINDOW_SPLIT_VERTICAL,
 };
 use crate::engine::CountMode;
@@ -81,17 +85,34 @@ pub fn emacs() -> Profile {
     m.bind_str("<Backspace>", BUFFER_DELETE_BACKWARD).unwrap();
     m.bind_str("<Delete>", BUFFER_DELETE_FORWARD).unwrap();
     m.bind_str("C-d", BUFFER_DELETE_FORWARD).unwrap();
+    m.bind_str("C-t", BUFFER_TRANSPOSE_CHARS).unwrap();
+    m.bind_str("C-o", BUFFER_OPEN_LINE).unwrap();
+
+    // Kill / yank / mark.
+    m.bind_str("C-k", BUFFER_KILL_LINE).unwrap();
+    m.bind_str("M-d", BUFFER_KILL_WORD).unwrap();
+    m.bind_str("M-<Backspace>", BUFFER_KILL_WORD_BACKWARD).unwrap();
+    m.bind_str("C-w", BUFFER_KILL_REGION).unwrap();
+    m.bind_str("M-w", BUFFER_COPY_REGION).unwrap();
+    m.bind_str("C-y", BUFFER_YANK).unwrap();
+    m.bind_str("C-<Space>", BUFFER_SET_MARK).unwrap();
 
     // Scrolling.
     m.bind_str("<PageUp>", SCROLL_PAGE_UP).unwrap();
     m.bind_str("<PageDown>", SCROLL_PAGE_DOWN).unwrap();
     m.bind_str("M-v", SCROLL_PAGE_UP).unwrap();
     m.bind_str("C-v", SCROLL_PAGE_DOWN).unwrap();
+    m.bind_str("C-l", SCROLL_RECENTER).unwrap();
 
-    // File / editor.
+    // Cancel.
+    m.bind_str("C-g", EDITOR_CANCEL).unwrap();
+
+    // File / editor / buffer management.
     m.bind_str("C-x C-s", BUFFER_SAVE).unwrap();
     m.bind_str("C-x C-c", EDITOR_QUIT).unwrap();
     m.bind_str("C-x C-q", EDITOR_QUIT).unwrap();
+    m.bind_str("C-x k", BUFFER_CLOSE).unwrap();
+    m.bind_str("C-x b", BUFFER_SWITCH).unwrap();
 
     // Undo / redo. `C-/` and `C-_` are the classic Emacs undo keys
     // (most terminals conflate them); `C-x u` is the long form. `M-_`
