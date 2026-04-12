@@ -365,6 +365,16 @@ impl Editor {
         std::mem::replace(&mut self.dirty, false)
     }
 
+    /// Whether a full repaint should be forced on the next frame
+    /// (e.g. after a status message changed). The render task checks
+    /// this and drops its cached previous frame when set.
+    pub fn needs_full_repaint(&self) -> bool {
+        // Status message changes can leave stale cells on some
+        // terminals if the differ only repaints the modeline row.
+        // Force a full repaint whenever the status changes.
+        self.status_message.is_some()
+    }
+
     /// Request that the driver shut down cleanly. Called by the
     /// `editor.quit` stock command.
     pub fn request_quit(&mut self) {

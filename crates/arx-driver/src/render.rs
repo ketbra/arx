@@ -139,9 +139,16 @@ async fn draw_once<B: Backend>(
         return Ok(());
     };
     let tree = render(&state, *frame_id);
+    // Force a full repaint when the editor requests it (e.g. status
+    // message change), to avoid stale-cell artifacts on terminals
+    // that don't handle partial repaints well.
+    let force_full = bus
+        .invoke(|editor| editor.needs_full_repaint())
+        .await
+        .unwrap_or(false);
     let ops = match previous.as_ref() {
-        Some(prev) => diff(prev, &tree),
-        None => initial_paint(&tree),
+        Some(prev) if !force_full => diff(prev, &tree),
+        _ => initial_paint(&tree),
     };
     trace!(ops = ops.len(), "applying render ops");
     if !ops.is_empty() {
