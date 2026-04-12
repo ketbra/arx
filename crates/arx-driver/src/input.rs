@@ -55,48 +55,94 @@ where
     /// Drive the input loop until a quit is requested, the event stream
     /// ends, or the command bus closes.
     pub async fn run(self) {
+        use tokio::time::{Duration, sleep};
+
         let InputTask {
             mut events,
             bus,
             size,
             shutdown,
         } = self;
+        let mut pending_prefix = false;
+        let which_key_delay = Duration::from_millis(500);
 
-        while let Some(event) = events.next().await {
-            match event {
-                Ok(ev) => {
-                    trace!(?ev, "input event");
-                    if handle(ev, &bus, &size).await.is_break() {
-                        debug!("shutdown requested from input");
-                        shutdown.fire();
-                        break;
+        loop {
+            if pending_prefix {
+                // A prefix key is pending. Race the next event against
+                // a timeout. If the timeout wins, show the which-key
+                // overlay.
+                tokio::select! {
+                    biased;
+                    event = events.next() => {
+                        match event {
+                            Some(Ok(ev)) => {
+                                let (flow, is_pending) = handle_with_pending(ev, &bus, &size).await;
+                                pending_prefix = is_pending;
+                                if flow.is_break() {
+                                    debug!("shutdown requested from input");
+                                    shutdown.fire();
+                                    break;
+                                }
+                            }
+                            Some(Err(err)) => {
+                                tracing::warn!(%err, "input event error");
+                                break;
+                            }
+                            None => break,
+                        }
+                    }
+                    () = sleep(which_key_delay) => {
+                        // Timeout: show which-key overlay.
+                        let _ = bus.dispatch(|editor| {
+                            editor.show_which_key();
+                        }).await;
                     }
                 }
-                Err(err) => {
-                    tracing::warn!(%err, "input event error");
-                    break;
+            } else {
+                // Normal path: wait for the next event with no timeout.
+                match events.next().await {
+                    Some(Ok(ev)) => {
+                        trace!(?ev, "input event");
+                        let (flow, is_pending) = handle_with_pending(ev, &bus, &size).await;
+                        pending_prefix = is_pending;
+                        if flow.is_break() {
+                            debug!("shutdown requested from input");
+                            shutdown.fire();
+                            break;
+                        }
+                    }
+                    Some(Err(err)) => {
+                        tracing::warn!(%err, "input event error");
+                        break;
+                    }
+                    None => break,
                 }
             }
         }
     }
 }
 
-async fn handle(event: Event, bus: &CommandBus, size: &SharedTerminalSize) -> ControlFlow<()> {
+/// Returns `(control_flow, is_pending)` — the second element is true
+/// when the keymap is waiting for more chords in a prefix sequence.
+async fn handle_with_pending(
+    event: Event,
+    bus: &CommandBus,
+    size: &SharedTerminalSize,
+) -> (ControlFlow<()>, bool) {
     match event {
         Event::Key(key) => handle_key(key, bus).await,
         Event::Resize(cols, rows) => {
             size.set(cols, rows);
-            ControlFlow::Continue(())
+            (ControlFlow::Continue(()), false)
         }
-        // Mouse / paste / focus events are ignored for Phase 1.
-        _ => ControlFlow::Continue(()),
+        _ => (ControlFlow::Continue(()), false),
     }
 }
 
 async fn handle_key(
     key: crossterm::event::KeyEvent,
     bus: &CommandBus,
-) -> ControlFlow<()> {
+) -> (ControlFlow<()>, bool) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     let chord = KeyChord::from(&key);
@@ -125,7 +171,7 @@ async fn handle_key(
             })
             .await;
         if let Ok(true) = forwarded {
-            return ControlFlow::Continue(());
+            return (ControlFlow::Continue(()), false);
         }
     }
 
@@ -138,12 +184,14 @@ async fn handle_key(
         })
         .await;
     let Ok((outcome, quit)) = result else {
-        return ControlFlow::Break(());
+        return (ControlFlow::Break(()), false);
     };
 
     if quit {
-        return ControlFlow::Break(());
+        return (ControlFlow::Break(()), false);
     }
+
+    let is_pending = outcome == KeyHandled::Pending;
 
     if let KeyHandled::Unbound {
         printable_fallback: Some(ch),
@@ -154,10 +202,10 @@ async fn handle_key(
             .await
             .is_err()
         {
-            return ControlFlow::Break(());
+            return (ControlFlow::Break(()), false);
         }
     }
-    ControlFlow::Continue(())
+    (ControlFlow::Continue(()), is_pending)
 }
 
 /// Convert a crossterm `KeyEvent` to the byte sequence a PTY

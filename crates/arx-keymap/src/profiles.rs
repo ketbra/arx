@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crate::commands::{
-    BUFFER_CLOSE, BUFFER_COPY_REGION, BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD,
+    BUFFER_CLOSE, BUFFER_COPY_REGION, BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_FIND_FILE,
     BUFFER_KILL_LINE, BUFFER_KILL_REGION, BUFFER_KILL_WORD, BUFFER_KILL_WORD_BACKWARD,
     BUFFER_NEWLINE, BUFFER_OPEN_LINE, BUFFER_REDO, BUFFER_SAVE, BUFFER_SET_MARK, BUFFER_SWITCH,
     BUFFER_TRANSPOSE_CHARS, BUFFER_UNDO, BUFFER_YANK, COMMAND_PALETTE_BACKSPACE,
@@ -110,6 +110,7 @@ pub fn emacs() -> Profile {
     m.bind_str("C-h k", EDITOR_DESCRIBE_KEY).unwrap();
 
     // File / editor / buffer management.
+    m.bind_str("C-x C-f", BUFFER_FIND_FILE).unwrap();
     m.bind_str("C-x C-s", BUFFER_SAVE).unwrap();
     m.bind_str("C-x C-c", EDITOR_QUIT).unwrap();
     m.bind_str("C-x C-q", EDITOR_QUIT).unwrap();

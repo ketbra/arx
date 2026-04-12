@@ -126,6 +126,10 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
         paint_completion(completion, cols, text_rows, &mut grid);
     }
 
+    if let Some(ref entries) = state.global.which_key {
+        paint_which_key(entries, cols, text_rows, &mut grid);
+    }
+
     if let Some(row) = modeline_row {
         render_modeline(&state.global, row, cols, &mut grid);
     }
@@ -755,7 +759,7 @@ fn paint_palette_prompt(
 ) -> u16 {
     clear_row(grid, row, cols, face);
     let mut x: u16 = 0;
-    for g in "M-x ".graphemes(true) {
+    for g in view.prompt.graphemes(true) {
         if x >= cols {
             break;
         }
@@ -1101,6 +1105,105 @@ fn paint_completion(
     }
 }
 
+/// Paint the which-key overlay: a horizontal bar at the bottom of
+/// the text area showing available completions for the pending
+/// prefix chord. Each entry is `key → command` in a compact layout.
+fn paint_which_key(
+    entries: &[crate::view_state::WhichKeyEntry],
+    cols: u16,
+    text_rows: u16,
+    grid: &mut CellGrid,
+) {
+    if entries.is_empty() || text_rows == 0 {
+        return;
+    }
+    let face = ResolvedFace {
+        fg: Color::rgb(0xD0, 0xD0, 0xD0),
+        bg: Color::rgb(0x1E, 0x1E, 0x2E),
+        ..ResolvedFace::DEFAULT
+    };
+    let key_face = ResolvedFace {
+        fg: Color::rgb(0x61, 0xAF, 0xEF),
+        bg: face.bg,
+        bold: true,
+        ..ResolvedFace::DEFAULT
+    };
+
+    // Paint onto the last row of the text area (just above modeline).
+    let y = text_rows - 1;
+    // Clear the row.
+    for x in 0..cols {
+        grid.set(
+            x,
+            y,
+            Cell {
+                grapheme: CompactString::const_new(" "),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+    }
+    // Layout entries as "key→cmd  key→cmd  ..." with 2-space gaps.
+    let mut x: u16 = 1;
+    for entry in entries {
+        if x >= cols.saturating_sub(4) {
+            break;
+        }
+        // Paint key in blue bold.
+        for ch in entry.key.chars() {
+            if x >= cols {
+                break;
+            }
+            grid.set(
+                x,
+                y,
+                Cell {
+                    grapheme: CompactString::new(ch.encode_utf8(&mut [0; 4])),
+                    face: key_face,
+                    flags: CellFlags::empty(),
+                },
+            );
+            x += 1;
+        }
+        // Arrow separator.
+        if x + 1 < cols {
+            grid.set(
+                x,
+                y,
+                Cell {
+                    grapheme: CompactString::const_new("\u{2192}"),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+            x += 1;
+        }
+        // Command name (truncated).
+        let cmd_display = if entry.command.len() > 16 {
+            &entry.command[..16]
+        } else {
+            &entry.command
+        };
+        for ch in cmd_display.chars() {
+            if x >= cols {
+                break;
+            }
+            grid.set(
+                x,
+                y,
+                Cell {
+                    grapheme: CompactString::new(ch.encode_utf8(&mut [0; 4])),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+            x += 1;
+        }
+        // 2-space gap between entries.
+        x += 2;
+    }
+}
+
 fn compute_gutter_width(config: GutterConfig, last_line: usize) -> u16 {
     if !config.line_numbers {
         return 0;
@@ -1154,6 +1257,7 @@ mod tests {
                 modeline_right: String::new(),
                 palette: None,
                 completion: None,
+                which_key: None,
             },
         }
     }
@@ -1357,6 +1461,7 @@ mod tests {
                 modeline_right: String::new(),
                 palette: Some(palette),
                 completion: None,
+                which_key: None,
             },
         }
     }
@@ -1372,6 +1477,7 @@ mod tests {
     fn palette_overlay_paints_prompt_and_matches() {
         let w = window_for("hello");
         let palette = PaletteView {
+            prompt: "M-x ".to_owned(),
             query: "cur".to_owned(),
             matches: vec![
                 entry("cursor.left", "Move left"),
@@ -1412,6 +1518,7 @@ mod tests {
         // area minus the overlay.
         let w = window_for("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10");
         let palette = PaletteView {
+            prompt: "M-x ".to_owned(),
             query: String::new(),
             matches: vec![entry("a", ""), entry("b", ""), entry("c", "")],
             selected: 0,
@@ -1444,6 +1551,7 @@ mod tests {
         let mut w = window_for("hello");
         w.cursors = sv![Cursor::at(2)];
         let palette = PaletteView {
+            prompt: "M-x ".to_owned(),
             query: String::new(),
             matches: vec![entry("cursor.left", "")],
             selected: 0,

@@ -123,6 +123,30 @@ impl Keymap {
         Lookup::Pending
     }
 
+    /// List the immediate completions available from `prefix`. Returns
+    /// `(chord, command_name)` pairs for each next key that would
+    /// resolve or continue a sequence. Used by the which-key overlay.
+    pub fn completions_after(&self, prefix: &[KeyChord]) -> Vec<(KeyChord, String)> {
+        let mut map = &self.root;
+        for chord in prefix {
+            match map.get(chord) {
+                Some(Node::Branch(next)) => map = next,
+                _ => return Vec::new(),
+            }
+        }
+        let mut out = Vec::new();
+        for (chord, node) in map {
+            let label = match node {
+                Node::Command(cmd) => cmd.name.to_string(),
+                Node::Branch(_) => "+prefix".to_owned(),
+                Node::Unbind => continue,
+            };
+            out.push((chord.clone(), label));
+        }
+        out.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        out
+    }
+
     /// Number of top-level bindings (for tests / debug).
     pub fn top_level_len(&self) -> usize {
         self.root.len()

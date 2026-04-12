@@ -47,6 +47,7 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(BufferCopyRegion);
     reg.register(BufferYank);
     reg.register(BufferSetMark);
+    reg.register(BufferFindFile);
     reg.register(BufferClose);
     reg.register(BufferSwitch);
     reg.register(BufferOpenLine);
@@ -859,6 +860,19 @@ impl BufferYank {
 // ---------------------------------------------------------------------------
 
 stock_cmd!(
+    BufferFindFile,
+    BUFFER_FIND_FILE,
+    "Open a file by path"
+);
+impl BufferFindFile {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().open_find_file();
+        ensure_palette_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
     BufferClose,
     BUFFER_CLOSE,
     "Close the active buffer"
@@ -891,7 +905,8 @@ stock_cmd!(
 );
 impl BufferSwitch {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        // Open the command palette pre-seeded with buffer names.
+        // Open the palette in switch-buffer mode. The description
+        // carries the buffer id as a parseable string.
         let buffers: Vec<(String, String)> = cx
             .editor
             .buffers()
@@ -906,10 +921,10 @@ impl BufferSwitch {
                         || format!("*scratch-{}*", id.0),
                         |n| n.to_string_lossy().into_owned(),
                     );
-                (label, format!("buffer {}", id.0))
+                (label, id.0.to_string())
             })
             .collect();
-        cx.editor.palette_mut().open_with_entries(buffers);
+        cx.editor.palette_mut().open_switch_buffer(buffers);
         ensure_palette_layer(cx.editor);
         cx.editor.mark_dirty();
     }
@@ -1200,32 +1215,114 @@ stock_cmd!(
 );
 impl CommandPaletteExecute {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        // Snapshot the selected command name (so we can drop the
-        // palette borrow before invoking anything).
-        let selected_name = cx
-            .editor
-            .palette()
-            .selected_match()
-            .map(|m| m.name.clone());
-        // Close the palette BEFORE running the target command so the
-        // executed command sees normal state.
-        cx.editor.palette_mut().close();
-        leave_palette_layer(cx.editor);
-        cx.editor.mark_dirty();
+        let mode = cx.editor.palette().mode();
+        match mode {
+            crate::palette::PaletteMode::FindFile => {
+                // Use the selected match (full path from the listing)
+                // if one exists, otherwise fall back to the raw query.
+                let path = cx
+                    .editor
+                    .palette()
+                    .selected_match()
+                    .map_or_else(
+                        || cx.editor.palette().query().to_owned(),
+                        |m| m.name.clone(),
+                    );
+                if path.is_empty() {
+                    cx.editor.palette_mut().close();
+                    leave_palette_layer(cx.editor);
+                    return;
+                }
+                // If it's a directory, navigate into it instead of
+                // opening. Replace the query and re-list.
+                if path.ends_with('/') {
+                    cx.editor.palette_mut().set_query(path);
+                    cx.editor.palette_mut().refresh_find_file_pub();
+                    cx.editor.mark_dirty();
+                    return;
+                }
+                cx.editor.palette_mut().close();
+                leave_palette_layer(cx.editor);
+                cx.editor.mark_dirty();
+                let bus = cx.bus.clone();
+                let path = std::path::PathBuf::from(path);
+                tokio::spawn(async move {
+                    match crate::open_file(&bus, path.clone()).await {
+                        Ok(_) => {
+                            tracing::info!(path = %path.display(), "opened file");
+                            let _ = bus.dispatch(Editor::mark_dirty).await;
+                        }
+                        Err(err) => {
+                            tracing::warn!(%err, "find-file failed");
+                            let msg = format!("Error: {err}");
+                            let _ = bus
+                                .dispatch(move |editor| editor.set_status(msg))
+                                .await;
+                        }
+                    }
+                });
+            }
+            crate::palette::PaletteMode::SwitchBuffer => {
+                // The selected match's description is the buffer id.
+                let selected = cx
+                    .editor
+                    .palette()
+                    .selected_match()
+                    .and_then(|m| m.description.parse::<u64>().ok())
+                    .map(arx_buffer::BufferId);
+                cx.editor.palette_mut().close();
+                leave_palette_layer(cx.editor);
+                cx.editor.mark_dirty();
 
-        let Some(name) = selected_name else {
-            return;
-        };
-        let Some(command) = cx.editor.commands().get(&name) else {
-            tracing::warn!(%name, "palette: selected command vanished before execute");
-            return;
-        };
-        let mut inner = CommandContext {
-            editor: cx.editor,
-            bus: cx.bus.clone(),
-            count: 1,
-        };
-        command.run(&mut inner);
+                if let Some(buffer_id) = selected {
+                    // Switch the active window to show this buffer.
+                    let Some(window_id) = cx.editor.windows().active() else {
+                        return;
+                    };
+                    if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+                        window.buffer_id = buffer_id;
+                        window.cursor_byte = 0;
+                        window.scroll_top_line = 0;
+                        window.scroll_left_col = 0;
+                    }
+                    // Re-attach syntax highlighting for the new buffer.
+                    let ext = cx
+                        .editor
+                        .buffers()
+                        .path(buffer_id)
+                        .and_then(|p| p.extension())
+                        .and_then(|e| e.to_str())
+                        .map(str::to_owned);
+                    cx.editor.attach_highlight(buffer_id, ext.as_deref());
+                    cx.editor.mark_dirty();
+                }
+            }
+            crate::palette::PaletteMode::Command => {
+                // Snapshot the selected command name.
+                let selected_name = cx
+                    .editor
+                    .palette()
+                    .selected_match()
+                    .map(|m| m.name.clone());
+                cx.editor.palette_mut().close();
+                leave_palette_layer(cx.editor);
+                cx.editor.mark_dirty();
+
+                let Some(name) = selected_name else {
+                    return;
+                };
+                let Some(command) = cx.editor.commands().get(&name) else {
+                    tracing::warn!(%name, "palette: command vanished");
+                    return;
+                };
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                command.run(&mut inner);
+            }
+        }
     }
 }
 

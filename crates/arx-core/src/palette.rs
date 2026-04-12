@@ -64,12 +64,29 @@ pub struct PaletteMatch {
 /// Always present on [`crate::Editor`] but normally closed (zero
 /// allocations). [`open`](Self::open) switches it into the
 /// query-accepting state and [`close`](Self::close) resets it.
+/// What the palette does when the user presses Enter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PaletteMode {
+    /// Execute the selected match as a command name.
+    #[default]
+    Command,
+    /// Treat the query text as a file path and open it.
+    FindFile,
+    /// Switch to the buffer whose id is stored in the selected
+    /// match's description field.
+    SwitchBuffer,
+}
+
 #[derive(Debug, Default)]
 pub struct CommandPalette {
     /// Whether the palette is currently accepting input.
     open: bool,
+    /// What Enter does.
+    mode: PaletteMode,
     /// The user's query so far.
     query: String,
+    /// Prompt text shown before the query (e.g. "M-x " or "Find file: ").
+    prompt: String,
     /// Index into `matches` for the highlighted row.
     selected: usize,
     /// Cached candidate list — every registered command, captured at
@@ -102,6 +119,16 @@ impl CommandPalette {
     /// Current query string.
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    /// The current mode (what Enter does).
+    pub fn mode(&self) -> PaletteMode {
+        self.mode
+    }
+
+    /// The prompt text shown before the query.
+    pub fn prompt(&self) -> &str {
+        &self.prompt
     }
 
     /// Current filtered match list, best-first.
@@ -139,6 +166,8 @@ impl CommandPalette {
     /// walk of the registry.
     pub fn open_with_entries(&mut self, entries: Vec<(String, String)>) {
         self.open = true;
+        self.mode = PaletteMode::Command;
+        "M-x ".clone_into(&mut self.prompt);
         self.query.clear();
         self.selected = 0;
         self.candidates = entries
@@ -148,9 +177,125 @@ impl CommandPalette {
         self.refresh();
     }
 
+    /// Open the palette in switch-buffer mode. Entries are
+    /// `(display_name, buffer_id_string)`.
+    pub fn open_switch_buffer(&mut self, entries: Vec<(String, String)>) {
+        self.open = true;
+        self.mode = PaletteMode::SwitchBuffer;
+        "Switch buffer: ".clone_into(&mut self.prompt);
+        self.query.clear();
+        self.selected = 0;
+        self.candidates = entries
+            .into_iter()
+            .map(|(name, description)| Candidate { name, description })
+            .collect();
+        self.refresh();
+    }
+
+    /// Open the palette in find-file mode. The user types a path;
+    /// Enter opens it. Seeds the candidate list with the current
+    /// directory's entries.
+    pub fn open_find_file(&mut self) {
+        self.open = true;
+        self.mode = PaletteMode::FindFile;
+        "Find file: ".clone_into(&mut self.prompt);
+        self.query.clear();
+        self.selected = 0;
+        self.refresh_find_file();
+    }
+
+    /// Set the query text directly (used by find-file directory
+    /// navigation to replace the query with a directory path).
+    pub fn set_query(&mut self, query: String) {
+        self.query = query;
+    }
+
+    /// Public wrapper for `refresh_find_file` so stock commands can
+    /// re-scan after updating the query.
+    pub fn refresh_find_file_pub(&mut self) {
+        self.refresh_find_file();
+    }
+
+    /// Scan the directory implied by the current query and populate
+    /// the match list with its entries. If the query looks like a
+    /// partial filename inside a directory (e.g. `src/ma`), list
+    /// `src/` entries filtered by the prefix `ma`.
+    fn refresh_find_file(&mut self) {
+        use std::path::Path;
+
+        self.candidates.clear();
+        self.matches.clear();
+
+        let query = &self.query;
+        let path = Path::new(if query.is_empty() { "." } else { query });
+
+        // Determine the directory to list and the filename prefix to
+        // filter by. If the query ends with `/` or is a directory,
+        // list it directly with no filter. Otherwise, list the parent
+        // and filter by the filename component.
+        let (dir, prefix) = if path.is_dir() {
+            (path.to_path_buf(), String::new())
+        } else {
+            let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let prefix = path
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (dir, prefix)
+        };
+
+        let prefix_lower = prefix.to_lowercase();
+
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut items: Vec<(String, bool)> = Vec::new();
+            for entry in entries.filter_map(Result::ok) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // Skip hidden files unless the prefix starts with '.'
+                if name.starts_with('.') && !prefix.starts_with('.') {
+                    continue;
+                }
+                let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+                if !prefix_lower.is_empty()
+                    && !name.to_lowercase().starts_with(&prefix_lower)
+                {
+                    continue;
+                }
+                items.push((name, is_dir));
+            }
+            // Sort: directories first, then alphabetical.
+            items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+            let dir_str = if dir == Path::new(".") {
+                String::new()
+            } else {
+                let mut s = dir.to_string_lossy().into_owned();
+                if !s.ends_with('/') {
+                    s.push('/');
+                }
+                s
+            };
+
+            for (name, is_dir) in items {
+                let full = format!("{dir_str}{name}{}", if is_dir { "/" } else { "" });
+                let kind = if is_dir { "dir" } else { "file" };
+                self.matches.push(PaletteMatch {
+                    name: full,
+                    description: kind.to_owned(),
+                    score: 0,
+                });
+            }
+        }
+
+        if self.selected >= self.matches.len() {
+            self.selected = self.matches.len().saturating_sub(1);
+        }
+    }
+
     /// Close the palette and drop the cached candidate list.
     pub fn close(&mut self) {
         self.open = false;
+        self.mode = PaletteMode::Command;
+        self.prompt.clear();
         self.query.clear();
         self.selected = 0;
         self.candidates.clear();
@@ -160,13 +305,21 @@ impl CommandPalette {
     /// Append one character to the query and refilter.
     pub fn append_char(&mut self, c: char) {
         self.query.push(c);
-        self.refresh();
+        if self.mode == PaletteMode::FindFile {
+            self.refresh_find_file();
+        } else {
+            self.refresh();
+        }
     }
 
     /// Remove one character from the query (if non-empty) and refilter.
     pub fn backspace(&mut self) {
         if self.query.pop().is_some() {
-            self.refresh();
+            if self.mode == PaletteMode::FindFile {
+                self.refresh_find_file();
+            } else {
+                self.refresh();
+            }
         }
     }
 

@@ -51,6 +51,8 @@ pub const BUFFER_COPY_REGION: &str = "buffer.copy-region";
 pub const BUFFER_YANK: &str = "buffer.yank";
 /// Set the mark at the cursor position (start a selection).
 pub const BUFFER_SET_MARK: &str = "buffer.set-mark";
+/// Open a file by path (find-file).
+pub const BUFFER_FIND_FILE: &str = "buffer.find-file";
 /// Close the current buffer.
 pub const BUFFER_CLOSE: &str = "buffer.close";
 /// Switch to a different open buffer (via palette).

@@ -89,7 +89,7 @@ pub use editor::{BufferManager, Editor, KeyHandled};
 pub use event_loop::{DEFAULT_BUS_CAPACITY, EventLoop};
 pub use file::{OpenFileError, SaveFileError, open_file, save_file, save_file_as};
 pub use completion::{CompletionItem, CompletionPopup};
-pub use palette::{CommandPalette, PaletteMatch};
+pub use palette::{CommandPalette, PaletteMatch, PaletteMode};
 pub use registry::{Command, CommandContext, CommandRegistry};
 pub use session::{SerializedBuffer, SerializedWindow, Session, SessionFile};
 pub use window::{Layout, SplitAxis, WindowData, WindowId, WindowManager};
