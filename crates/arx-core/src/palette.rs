@@ -72,6 +72,9 @@ pub enum PaletteMode {
     Command,
     /// Treat the query text as a file path and open it.
     FindFile,
+    /// Switch to the buffer whose id is stored in the selected
+    /// match's description field.
+    SwitchBuffer,
 }
 
 #[derive(Debug, Default)]
@@ -165,6 +168,21 @@ impl CommandPalette {
         self.open = true;
         self.mode = PaletteMode::Command;
         "M-x ".clone_into(&mut self.prompt);
+        self.query.clear();
+        self.selected = 0;
+        self.candidates = entries
+            .into_iter()
+            .map(|(name, description)| Candidate { name, description })
+            .collect();
+        self.refresh();
+    }
+
+    /// Open the palette in switch-buffer mode. Entries are
+    /// `(display_name, buffer_id_string)`.
+    pub fn open_switch_buffer(&mut self, entries: Vec<(String, String)>) {
+        self.open = true;
+        self.mode = PaletteMode::SwitchBuffer;
+        "Switch buffer: ".clone_into(&mut self.prompt);
         self.query.clear();
         self.selected = 0;
         self.candidates = entries
