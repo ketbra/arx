@@ -1,0 +1,30 @@
+[package]
+name = "arx"
+description = "Arx editor — the arx binary entry point"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "arx"
+path = "src/main.rs"
+
+[dependencies]
+arx-buffer = { workspace = true }
+arx-core = { workspace = true }
+arx-driver = { workspace = true }
+arx-protocol = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+arx-keymap = { workspace = true }
+arx-render = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

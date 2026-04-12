@@ -1,0 +1,16 @@
+[package]
+name = "arx-sdk"
+description = "Arx editor extension SDK: write commands + hooks, compile to a hot-loadable dylib"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arx-core = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

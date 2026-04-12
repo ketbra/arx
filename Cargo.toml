@@ -1,0 +1,71 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/arx",
+    "crates/arx-buffer",
+    "crates/arx-core",
+    "crates/arx-driver",
+    "crates/arx-keymap",
+    "crates/arx-protocol",
+    "crates/arx-render",
+    "crates/arx-sdk",
+    "examples/ext-hello",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs", "io-util", "net", "signal"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+tracing = "0.1"
+thiserror = "2"
+bitflags = { version = "2", features = ["serde"] }
+compact_str = { version = "0.8", features = ["serde"] }
+smallvec = "1"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+arx-buffer = { path = "crates/arx-buffer" }
+arx-core = { path = "crates/arx-core" }
+arx-render = { path = "crates/arx-render" }
+arx-driver = { path = "crates/arx-driver" }
+arx-keymap = { path = "crates/arx-keymap" }
+arx-protocol = { path = "crates/arx-protocol" }
+arx-sdk = { path = "crates/arx-sdk" }
+libloading = "0.8"
+notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/ketbra/arx"
+
+[workspace.lints.rust]
+# `deny` (not `forbid`) so the extension host's `libloading` FFI can
+# opt in with an explicit `#![allow(unsafe_code)]` plus SAFETY comments.
+# Every crate inherits deny-by-default; only `ext_host` currently
+# exercises the exception.
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+format_collect = "allow"
+needless_lifetimes = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

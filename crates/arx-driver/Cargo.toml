@@ -1,0 +1,39 @@
+[package]
+name = "arx-driver"
+description = "Arx editor driver: wires arx-core's event loop to arx-render's pipeline and a crossterm terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arx-buffer = { workspace = true }
+arx-core = { workspace = true }
+arx-keymap = { workspace = true }
+arx-protocol = { workspace = true }
+arx-render = { workspace = true }
+arx-sdk = { workspace = true }
+crossterm = { workspace = true }
+futures-util = { workspace = true }
+libloading = { workspace = true }
+notify = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+unicode-segmentation = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+compact_str = { workspace = true }
+# `libc` is used only by the extension hot-reload integration test,
+# which registers an `atexit` handler that short-circuits glibc's
+# `_dl_fini` pass to avoid a known Rust-cdylib-plus-dlclose segfault
+# at process teardown. See `tests/ext_hot_reload.rs` for the gory
+# details.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
