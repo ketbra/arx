@@ -270,9 +270,16 @@ Recommended implementation order based on dependencies:
    trigger as MVP, `completion` keymap layer for navigation/accept/
    dismiss. LSP-completion-request plumbing is ready for a follow-up
    async dispatch.
-6. **Embedded terminal** — in progress. `arx-terminal` crate done
-   (`alacritty_terminal` + `portable-pty`); remaining work is
-   integrating terminal panes into the layout/render/input paths.
+6. ~~**Embedded terminal**~~ — **DONE.** `arx-terminal` crate wraps
+   `alacritty_terminal` (0.26) + `portable-pty` (0.9) into a
+   renderer-agnostic `TerminalPane`. Terminal panes live alongside
+   buffer windows in the layout tree (identified by a side-table
+   on `Editor`). The render path branches per pane:
+   `render_window` for buffers, `render_terminal_pane` for
+   terminals. Input routing forwards keystrokes to the PTY when a
+   terminal pane is focused; `C-\` breaks back to the editor's
+   keymap for pane switching. `terminal.open` (`C-x t` in Emacs)
+   splits the active pane and spawns a shell.
 7. **Session management (attach/detach/list)** — builds on the
    existing Level-1 persistence + daemon architecture. Level-1 now
    persists the layout tree too (SessionFile v2), so restarts come

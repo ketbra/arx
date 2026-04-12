@@ -27,8 +27,10 @@ pub struct ViewState {
     pub size: TerminalSize,
     /// Layout tree describing how `size` is partitioned.
     pub layout: LayoutTree,
-    /// The actual window states referenced by the layout tree.
+    /// Buffer window states referenced by the layout tree.
     pub windows: Vec<WindowState>,
+    /// Terminal pane states referenced by the layout tree.
+    pub terminal_panes: Vec<TerminalViewState>,
     /// Which window is the focused one. The view layer paints the
     /// terminal cursor for this window only, so inactive panes show
     /// their text without a cursor. `None` means no window is
@@ -399,6 +401,34 @@ pub struct PaletteView {
     /// supplies the cap so it can reserve the matching number of
     /// viewport rows for the overlay.
     pub max_rows: u16,
+}
+
+// ---------------------------------------------------------------------------
+// Terminal pane view state
+// ---------------------------------------------------------------------------
+
+/// View-layer snapshot of an embedded terminal pane.
+#[derive(Debug, Clone)]
+pub struct TerminalViewState {
+    /// Window id this terminal occupies.
+    pub id: WindowId,
+    /// Row-major grid of cells.
+    pub cells: Vec<Vec<TerminalViewCell>>,
+    /// Cursor position (col, row), or `None` if hidden.
+    pub cursor: Option<(u16, u16)>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// A single cell in a terminal pane's grid.
+#[derive(Debug, Clone)]
+pub struct TerminalViewCell {
+    pub c: String,
+    pub fg: u32,
+    pub bg: u32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
 }
 
 /// One row in the palette's match list.

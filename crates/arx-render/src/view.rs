@@ -100,10 +100,13 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
     let active = state.active_window;
 
     // Walk the layout once to paint every visible pane inside its
-    // computed rect.
+    // computed rect. Each leaf is either a buffer window or a
+    // terminal pane.
     state.layout.walk_pane_rects(root_rect, &mut |id, rect| {
-        if let Some(window) = state.windows.iter().find(|w| w.id == id) {
-            let is_active = active == Some(id);
+        let is_active = active == Some(id);
+        if let Some(term) = state.terminal_panes.iter().find(|t| t.id == id) {
+            render_terminal_pane(term, rect, is_active, &mut grid, &mut cursors);
+        } else if let Some(window) = state.windows.iter().find(|w| w.id == id) {
             render_window(window, rect, is_active, &mut grid, &mut cursors);
         }
     });
@@ -156,6 +159,83 @@ fn paint_divider(grid: &mut CellGrid, rect: Rect, direction: SplitDirection) {
                     flags: CellFlags::empty(),
                 },
             );
+        }
+    }
+}
+
+/// Render an embedded terminal pane into its bounding rectangle.
+/// Reads from the terminal's grid snapshot and paints each cell with
+/// its own foreground/background colours.
+fn render_terminal_pane(
+    term: &crate::view_state::TerminalViewState,
+    rect: Rect,
+    is_active: bool,
+    grid: &mut CellGrid,
+    cursors: &mut SmallVec<[CursorRender; 1]>,
+) {
+    if rect.is_empty() {
+        return;
+    }
+    // Clear the pane rect first.
+    for dy in 0..rect.height {
+        for dx in 0..rect.width {
+            grid.set(rect.x + dx, rect.y + dy, Cell::blank());
+        }
+    }
+    // Paint each terminal cell.
+    for (row_idx, row) in term.cells.iter().enumerate() {
+        if row_idx as u16 >= rect.height {
+            break;
+        }
+        let y = rect.y + row_idx as u16;
+        for (col_idx, cell) in row.iter().enumerate() {
+            if col_idx as u16 >= rect.width {
+                break;
+            }
+            let x = rect.x + col_idx as u16;
+            let face = ResolvedFace {
+                fg: Color(cell.fg),
+                bg: Color(cell.bg),
+                bold: cell.bold,
+                italic: cell.italic,
+                underline: if cell.underline {
+                    Some(arx_buffer::UnderlineStyle::Straight)
+                } else {
+                    None
+                },
+                ..ResolvedFace::DEFAULT
+            };
+            let grapheme = if cell.c.is_empty() || cell.c == "\0" {
+                CompactString::const_new(" ")
+            } else {
+                CompactString::new(&cell.c)
+            };
+            grid.set(
+                x,
+                y,
+                Cell {
+                    grapheme,
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+        }
+    }
+    // Cursor for the active terminal pane.
+    if is_active {
+        if let Some((col, row)) = term.cursor {
+            let cx = rect.x + col;
+            let cy = rect.y + row;
+            if cx < rect.x + rect.width && cy < rect.y + rect.height {
+                if let Some(cell) = grid.get_mut(cx, cy) {
+                    cell.flags |= CellFlags::CURSOR_PRIMARY;
+                }
+                cursors.push(CursorRender {
+                    col: cx,
+                    row: cy,
+                    style: CursorStyle::Block,
+                });
+            }
         }
     }
 }
@@ -985,6 +1065,7 @@ mod tests {
             size: TerminalSize::new(cols, rows),
             layout: LayoutTree::Single(id),
             windows: vec![window],
+            terminal_panes: vec![],
             active_window: Some(id),
             global: GlobalState {
                 modeline_left: String::new(),
@@ -1187,6 +1268,7 @@ mod tests {
             size: TerminalSize::new(cols, rows),
             layout: LayoutTree::Single(id),
             windows: vec![window],
+            terminal_panes: vec![],
             active_window: Some(id),
             global: GlobalState {
                 modeline_left: String::new(),
@@ -1317,6 +1399,7 @@ mod tests {
                 second: Box::new(LayoutTree::Single(right.id)),
             },
             windows: vec![left, right],
+            terminal_panes: vec![],
             active_window: Some(crate::view_state::WindowId(1)),
             global: GlobalState::default(),
         };
@@ -1351,6 +1434,7 @@ mod tests {
                 second: Box::new(LayoutTree::Single(bot.id)),
             },
             windows: vec![top, bot],
+            terminal_panes: vec![],
             active_window: Some(crate::view_state::WindowId(2)),
             global: GlobalState::default(),
         };
@@ -1382,6 +1466,7 @@ mod tests {
                 second: Box::new(LayoutTree::Single(b.id)),
             },
             windows: vec![a, b],
+            terminal_panes: vec![],
             active_window: Some(crate::view_state::WindowId(2)),
             global: GlobalState::default(),
         };

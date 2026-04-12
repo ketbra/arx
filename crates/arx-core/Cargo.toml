@@ -20,6 +20,7 @@ arx-buffer = { workspace = true }
 arx-highlight = { workspace = true, optional = true }
 arx-keymap = { workspace = true }
 arx-lsp = { workspace = true, optional = true }
+arx-terminal = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

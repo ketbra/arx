@@ -32,6 +32,7 @@ fn state_with(window: WindowState, cols: u16, rows: u16) -> ViewState {
         size: TerminalSize::new(cols, rows),
         layout: LayoutTree::Single(id),
         windows: vec![window],
+        terminal_panes: vec![],
         active_window: Some(id),
         global: GlobalState::default(),
     }

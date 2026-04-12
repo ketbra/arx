@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arx_buffer::{Buffer, BufferId, BufferSnapshot, ByteRange, Edit, EditOrigin};
 use arx_keymap::{FeedOutcome, KeyChord, KeymapEngine, Layer, Profile};
@@ -53,6 +54,10 @@ pub struct Editor {
     completion: CompletionPopup,
     #[cfg(feature = "syntax")]
     highlight: HighlightManager,
+    terminals: HashMap<crate::WindowId, arx_terminal::TerminalPane>,
+    /// Redraw notify shared with terminal panes so they can wake the
+    /// render task when PTY output arrives.
+    terminal_redraw: Option<Arc<tokio::sync::Notify>>,
     #[cfg(feature = "lsp")]
     lsp_notifier: Option<tokio::sync::mpsc::Sender<arx_lsp::LspEvent>>,
     dirty: bool,
@@ -101,6 +106,8 @@ impl Editor {
             commands,
             palette: CommandPalette::new(),
             completion: CompletionPopup::new(),
+            terminals: HashMap::new(),
+            terminal_redraw: None,
             #[cfg(feature = "syntax")]
             highlight: HighlightManager::new(),
             #[cfg(feature = "lsp")]
@@ -207,6 +214,75 @@ impl Editor {
     /// Mutably borrow the completion popup state.
     pub fn completion_mut(&mut self) -> &mut CompletionPopup {
         &mut self.completion
+    }
+
+    /// Set the redraw notify for terminal panes. Called by the driver.
+    pub fn set_terminal_redraw(&mut self, notify: Arc<tokio::sync::Notify>) {
+        self.terminal_redraw = Some(notify);
+    }
+
+    /// Whether `window_id` is a terminal pane rather than a buffer.
+    pub fn is_terminal(&self, window_id: crate::WindowId) -> bool {
+        self.terminals.contains_key(&window_id)
+    }
+
+    /// Borrow a terminal pane by its window id.
+    pub fn terminal(&self, window_id: crate::WindowId) -> Option<&arx_terminal::TerminalPane> {
+        self.terminals.get(&window_id)
+    }
+
+    /// Borrow the terminals map (for iteration in the render path).
+    pub fn terminals(&self) -> &HashMap<crate::WindowId, arx_terminal::TerminalPane> {
+        &self.terminals
+    }
+
+    /// Mutably borrow the terminals map.
+    pub fn terminals_mut(&mut self) -> &mut HashMap<crate::WindowId, arx_terminal::TerminalPane> {
+        &mut self.terminals
+    }
+
+    /// Open a terminal pane in a split of the active window. Returns
+    /// the new window id, or `None` if there's no active window or
+    /// no redraw notify is set.
+    pub fn open_terminal(
+        &mut self,
+        axis: crate::window::SplitAxis,
+    ) -> Option<crate::WindowId> {
+        let redraw = self.terminal_redraw.clone()?;
+        // We need a buffer for the window manager (it requires a
+        // BufferId). Create a scratch buffer as a placeholder — the
+        // render path will detect it's a terminal and skip the buffer.
+        let placeholder_buf = self.buffers.create_scratch();
+        let new_id = self.windows.split_active(axis, placeholder_buf)?;
+        // Get the viewport size from the new window.
+        let data = self.windows.get(new_id)?;
+        let cols = if data.visible_cols > 0 { data.visible_cols } else { 80 };
+        let rows = if data.visible_rows > 0 { data.visible_rows } else { 24 };
+        match arx_terminal::TerminalPane::spawn(cols, rows, None, redraw) {
+            Ok(pane) => {
+                self.terminals.insert(new_id, pane);
+                self.mark_dirty();
+                Some(new_id)
+            }
+            Err(err) => {
+                tracing::warn!(%err, "failed to spawn terminal");
+                // Clean up the window we just created.
+                self.windows.close(new_id);
+                None
+            }
+        }
+    }
+
+    /// Close a terminal pane, removing it from both the window
+    /// manager and the terminals map.
+    pub fn close_terminal(&mut self, window_id: crate::WindowId) -> bool {
+        if self.terminals.remove(&window_id).is_some() {
+            self.windows.close(window_id);
+            self.mark_dirty();
+            true
+        } else {
+            false
+        }
     }
 
     /// Set the LSP event notifier. Called by the driver at startup

@@ -178,8 +178,10 @@ impl Driver {
         let (lsp_tx, lsp_rx) = tokio::sync::mpsc::channel(64);
         let lsp_manager = crate::lsp::LspManager::new(bus.clone());
         let _lsp_handle = tokio::spawn(lsp_manager.run(lsp_rx));
+        let terminal_redraw = redraw.clone();
         bus.invoke(move |editor| {
             editor.set_lsp_notifier(lsp_tx);
+            editor.set_terminal_redraw(terminal_redraw);
         })
         .await
         .ok();

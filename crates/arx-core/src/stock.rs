@@ -59,6 +59,7 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(LspNextDiagnostic);
     reg.register(LspPrevDiagnostic);
     reg.register(CompletionTrigger);
+    reg.register(TerminalOpen);
     reg.register(CompletionAccept);
     reg.register(CompletionDismiss);
     reg.register(CompletionNext);
@@ -1157,6 +1158,21 @@ impl LspPrevDiagnostic {
             }
             cx.editor.mark_dirty();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embedded terminal
+// ---------------------------------------------------------------------------
+
+stock_cmd!(
+    TerminalOpen,
+    TERMINAL_OPEN,
+    "Open an embedded terminal in a split pane"
+);
+impl TerminalOpen {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.open_terminal(SplitAxis::Horizontal);
     }
 }
 

@@ -23,7 +23,8 @@ use arx_core::{CommandBus, Layout as CoreLayout, SplitAxis, WindowId as CoreWind
 use arx_render::{
     Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree,
     PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SplitDirection, TerminalSize,
-    ViewState, WindowId as ViewWindowId, WindowState, diff, initial_paint, render,
+    TerminalViewCell, TerminalViewState, ViewState, WindowId as ViewWindowId, WindowState, diff,
+    initial_paint, render,
 };
 
 use crate::state::{SharedTerminalSize, Shutdown};
@@ -202,23 +203,52 @@ fn build_view_state_sync(
     // reflects the corrected scroll.
     editor.ensure_active_cursor_visible();
 
-    // Build the immutable WindowState projections using the freshly-
-    // adjusted WindowData.
+    // Build the immutable WindowState / TerminalViewState projections
+    // using the freshly-adjusted WindowData. Terminal panes are
+    // identified by the side-table on Editor; everything else is a
+    // buffer window.
     let gutter = GutterConfig::default();
-    let mut windows: Vec<WindowState> = Vec::with_capacity(visible_ids.len());
+    let mut windows: Vec<WindowState> = Vec::new();
+    let mut terminal_panes: Vec<TerminalViewState> = Vec::new();
     for &id in &visible_ids {
-        let data = editor.windows().get(id)?.clone();
-        let snapshot = editor.buffers().snapshot(data.buffer_id)?;
-        windows.push(WindowState {
-            id: ViewWindowId(id.0),
-            buffer: snapshot,
-            cursors: smallvec![Cursor::at(data.cursor_byte)],
-            scroll: ScrollPosition {
-                top_line: data.scroll_top_line,
-                left_col: data.scroll_left_col,
-            },
-            gutter,
-        });
+        if let Some(term) = editor.terminal(id) {
+            let snap = term.snapshot();
+            terminal_panes.push(TerminalViewState {
+                id: ViewWindowId(id.0),
+                cells: snap
+                    .cells
+                    .into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|c| TerminalViewCell {
+                                c: c.c,
+                                fg: c.fg,
+                                bg: c.bg,
+                                bold: c.bold,
+                                italic: c.italic,
+                                underline: c.underline,
+                            })
+                            .collect()
+                    })
+                    .collect(),
+                cursor: snap.cursor,
+                cols: snap.cols,
+                rows: snap.rows,
+            });
+        } else {
+            let data = editor.windows().get(id)?.clone();
+            let snapshot = editor.buffers().snapshot(data.buffer_id)?;
+            windows.push(WindowState {
+                id: ViewWindowId(id.0),
+                buffer: snapshot,
+                cursors: smallvec![Cursor::at(data.cursor_byte)],
+                scroll: ScrollPosition {
+                    top_line: data.scroll_top_line,
+                    left_col: data.scroll_left_col,
+                },
+                gutter,
+            });
+        }
     }
 
     let global = build_global_state(editor, active)?;
@@ -227,6 +257,7 @@ fn build_view_state_sync(
         size: TerminalSize::new(cols, rows),
         layout: view_layout,
         windows,
+        terminal_panes,
         active_window: Some(ViewWindowId(active.0)),
         global,
     })

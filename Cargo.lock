@@ -131,6 +131,7 @@ dependencies = [
  "arx-highlight",
  "arx-keymap",
  "arx-lsp",
+ "arx-terminal",
  "postcard",
  "serde",
  "tempfile",

@@ -101,3 +101,6 @@ pub const COMPLETION_DISMISS: &str = "completion.dismiss";
 pub const COMPLETION_NEXT: &str = "completion.next";
 /// Move the completion selection up one row.
 pub const COMPLETION_PREV: &str = "completion.prev";
+
+/// Open an embedded terminal in a split pane.
+pub const TERMINAL_OPEN: &str = "terminal.open";
