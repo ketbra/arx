@@ -139,6 +139,31 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(RectOpen);
     reg.register(ModeEnterVisualBlock);
     reg.register(ModeLeaveVisualBlock);
+    reg.register(OperatorDelete);
+    reg.register(OperatorChange);
+    reg.register(OperatorYank);
+    reg.register(OperatorIndent);
+    reg.register(OperatorDedent);
+    reg.register(OperatorCancel);
+    reg.register(OperatorLineApply);
+    reg.register(TextObjectInnerWord);
+    reg.register(TextObjectAWord);
+    reg.register(TextObjectInnerParagraph);
+    reg.register(TextObjectAParagraph);
+    reg.register(TextObjectInnerDoubleQuote);
+    reg.register(TextObjectADoubleQuote);
+    reg.register(TextObjectInnerSingleQuote);
+    reg.register(TextObjectASingleQuote);
+    reg.register(TextObjectInnerParen);
+    reg.register(TextObjectAParen);
+    reg.register(TextObjectInnerBrace);
+    reg.register(TextObjectABrace);
+    reg.register(TextObjectInnerBracket);
+    reg.register(TextObjectABracket);
+    reg.register(TextObjectInnerAngle);
+    reg.register(TextObjectAAngle);
+    reg.register(TextObjectInnerBacktick);
+    reg.register(TextObjectABacktick);
     reg.register(CompletionAccept);
     reg.register(CompletionDismiss);
     reg.register(CompletionNext);
@@ -329,6 +354,9 @@ impl CursorLineEnd {
         } else {
             rope.len_bytes()
         };
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, end, false) {
+            return;
+        }
         if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
             window.cursor_byte = end;
         }
@@ -404,18 +432,16 @@ stock_cmd!(
 impl CursorWordForward {
     fn run_impl(cx: &mut CommandContext<'_>) {
         let n = cx.count.max(1);
-        for _ in 0..n {
-            let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
-                return;
-            };
-            let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
-                return;
-            };
-            let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
-            let next = next_word_boundary(&text, cursor);
-            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
-                window.cursor_byte = next;
-            }
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+        let mut pos = cursor;
+        for _ in 0..n { pos = next_word_boundary(&text, pos); }
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, pos, false) {
+            return;
+        }
+        if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+            window.cursor_byte = pos;
         }
         cx.editor.mark_dirty();
     }
@@ -429,6 +455,15 @@ stock_cmd!(
 impl CursorWordBackward {
     fn run_impl(cx: &mut CommandContext<'_>) {
         let n = cx.count.max(1);
+        let Some((window_id, buffer_id, start_cursor)) = active(cx.editor) else { return };
+        // Check for operator before the loop.
+        if cx.editor.operator_state().operator.is_some() {
+            let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+            let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+            let mut pos = start_cursor;
+            for _ in 0..n { pos = prev_word_boundary(&text, pos); }
+            if try_apply_operator_motion(cx.editor, window_id, buffer_id, start_cursor, pos, false) { return; }
+        }
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
                 return;
@@ -493,15 +528,14 @@ impl CursorEndOfWord {
         let bytes = text.as_bytes();
         let len = bytes.len();
         if cursor >= len { return; }
-        // Skip current char, then skip non-word, then skip word, land at end.
         let mut pos = cursor + 1;
-        while pos < len && !bytes[pos].is_ascii_alphanumeric() && bytes[pos] != b'_' {
-            pos += 1;
-        }
-        while pos < len && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
-            pos += 1;
-        }
+        while pos < len && !bytes[pos].is_ascii_alphanumeric() && bytes[pos] != b'_' { pos += 1; }
+        while pos < len && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') { pos += 1; }
         let target = pos.saturating_sub(1).min(len.saturating_sub(1));
+        // For operators, include the end-of-word character.
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, target + 1, false) {
+            return;
+        }
         if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
         cx.editor.mark_dirty();
     }
@@ -515,7 +549,6 @@ impl CursorParagraphForward {
         let rope = buffer.rope();
         let cur_line = rope.byte_to_line(cursor);
         let total = rope.len_lines();
-        // Skip non-blank, then skip blank.
         let mut line = cur_line + 1;
         while line < total {
             let start = rope.line_to_byte(line);
@@ -525,6 +558,7 @@ impl CursorParagraphForward {
             line += 1;
         }
         let target = rope.line_to_byte(line.min(total.saturating_sub(1)));
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, target, true) { return; }
         if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
         cx.editor.mark_dirty();
         cx.editor.ensure_active_cursor_visible();
@@ -547,6 +581,7 @@ impl CursorParagraphBackward {
             line -= 1;
         }
         let target = rope.line_to_byte(line);
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, target, true) { return; }
         if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
         cx.editor.mark_dirty();
         cx.editor.ensure_active_cursor_visible();
@@ -646,43 +681,62 @@ impl CursorScreenBottom {
 stock_cmd!(CursorFindCharForward, CURSOR_FIND_CHAR_FORWARD, "Find char forward on line (f)");
 impl CursorFindCharForward {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        cx.editor.set_status("f: type a character...");
-        // TODO: implement read-char mode for f/F/t/T
+        cx.editor.operator_state_mut().char_read = Some(crate::editor::CharReadMode::FindForwardTo);
     }
 }
 
 stock_cmd!(CursorFindCharBackward, CURSOR_FIND_CHAR_BACKWARD, "Find char backward on line (F)");
 impl CursorFindCharBackward {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        cx.editor.set_status("F: type a character...");
+        cx.editor.operator_state_mut().char_read = Some(crate::editor::CharReadMode::FindBackwardTo);
     }
 }
 
 stock_cmd!(CursorTillCharForward, CURSOR_TILL_CHAR_FORWARD, "Move to before char forward (t)");
 impl CursorTillCharForward {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        cx.editor.set_status("t: type a character...");
+        cx.editor.operator_state_mut().char_read = Some(crate::editor::CharReadMode::FindForwardTill);
     }
 }
 
 stock_cmd!(CursorTillCharBackward, CURSOR_TILL_CHAR_BACKWARD, "Move to after char backward (T)");
 impl CursorTillCharBackward {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        cx.editor.set_status("T: type a character...");
+        cx.editor.operator_state_mut().char_read = Some(crate::editor::CharReadMode::FindBackwardTill);
     }
 }
 
 stock_cmd!(CursorRepeatFind, CURSOR_REPEAT_FIND, "Repeat last find-char motion");
 impl CursorRepeatFind {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        cx.editor.set_status("No previous find to repeat");
+        let Some(state) = cx.editor.last_find_char() else {
+            cx.editor.set_status("No previous find to repeat");
+            return;
+        };
+        let mode = match state.kind {
+            crate::editor::FindCharKind::ForwardTo => crate::editor::CharReadMode::FindForwardTo,
+            crate::editor::FindCharKind::ForwardTill => crate::editor::CharReadMode::FindForwardTill,
+            crate::editor::FindCharKind::BackwardTo => crate::editor::CharReadMode::FindBackwardTo,
+            crate::editor::FindCharKind::BackwardTill => crate::editor::CharReadMode::FindBackwardTill,
+        };
+        handle_char_read(cx.editor, state.ch, mode);
     }
 }
 
 stock_cmd!(CursorRepeatFindReverse, CURSOR_REPEAT_FIND_REVERSE, "Repeat last find-char reversed");
 impl CursorRepeatFindReverse {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        cx.editor.set_status("No previous find to repeat");
+        let Some(state) = cx.editor.last_find_char() else {
+            cx.editor.set_status("No previous find to repeat");
+            return;
+        };
+        let mode = match state.kind {
+            crate::editor::FindCharKind::ForwardTo => crate::editor::CharReadMode::FindBackwardTo,
+            crate::editor::FindCharKind::ForwardTill => crate::editor::CharReadMode::FindBackwardTill,
+            crate::editor::FindCharKind::BackwardTo => crate::editor::CharReadMode::FindForwardTo,
+            crate::editor::FindCharKind::BackwardTill => crate::editor::CharReadMode::FindForwardTill,
+        };
+        handle_char_read(cx.editor, state.ch, mode);
     }
 }
 
@@ -3096,6 +3150,538 @@ impl ModeLeaveVisualBlock {
         cx.editor.clear_status();
         cx.editor.mark_dirty();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Vim operator-pending mode
+// ---------------------------------------------------------------------------
+//
+// When the user presses `d`, `c`, `y`, `>`, or `<` in normal mode, the
+// editor enters operator-pending mode. The operator command:
+// 1. Stores which operator is pending in `Editor::operator_state`.
+// 2. Pushes the `vim.operator-pending` keymap layer.
+//
+// Motions (w, e, $, {, etc.) fall through to the normal layer. Text
+// objects (iw, ip, i", etc.) are handled by the operator-pending layer.
+// When a motion or text object executes, it checks `operator_state`:
+// - If an operator is pending, compute the range and apply it.
+// - If no operator, just move the cursor (normal motion).
+//
+// After applying the operator, the layer is popped and the state cleared.
+
+fn push_operator(cx: &mut CommandContext<'_>, op: crate::editor::PendingOperator) {
+    cx.editor.operator_state_mut().operator = Some(op);
+    cx.editor.operator_state_mut().count = cx.count;
+    if !cx.editor.keymap().has_layer("vim.operator-pending") {
+        cx.editor.keymap_mut().push_layer(Layer::new(
+            LayerId::from("vim.operator-pending"),
+            Arc::new(arx_keymap::profiles::operator_pending_layer()),
+        ));
+    }
+}
+
+fn pop_operator(editor: &mut Editor) {
+    editor.operator_state_mut().clear();
+    if editor.keymap().has_layer("vim.operator-pending") {
+        editor.keymap_mut().pop_layer();
+    }
+}
+
+/// Apply the pending operator to a byte range. Handles delete, change,
+/// yank, indent, and dedent.
+fn apply_operator_to_range(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    start: usize,
+    end: usize,
+    linewise: bool,
+) {
+    use crate::editor::PendingOperator;
+
+    let op = editor.operator_state().operator;
+    let Some(op) = op else { return };
+
+    // For linewise operations, extend to full lines.
+    let (start, end) = if linewise {
+        let buf = editor.buffers().get(buffer_id);
+        if let Some(buf) = buf {
+            let rope = buf.rope();
+            let start_line = rope.byte_to_line(start);
+            let end_line = rope.byte_to_line(end.saturating_sub(1).max(start));
+            let ls = rope.line_to_byte(start_line);
+            let le = if end_line + 1 < rope.len_lines() {
+                rope.line_to_byte(end_line + 1)
+            } else {
+                rope.len_bytes()
+            };
+            (ls, le)
+        } else {
+            (start, end)
+        }
+    } else {
+        (start, end)
+    };
+
+    if start >= end {
+        pop_operator(editor);
+        return;
+    }
+
+    match op {
+        PendingOperator::Delete => {
+            let killed = editor.buffers().get(buffer_id)
+                .map(|b| b.rope().slice_to_string(start..end))
+                .unwrap_or_default();
+            user_edit(editor, window_id, buffer_id, start..end, "", start, start);
+            editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
+        }
+        PendingOperator::Change => {
+            let killed = editor.buffers().get(buffer_id)
+                .map(|b| b.rope().slice_to_string(start..end))
+                .unwrap_or_default();
+            user_edit(editor, window_id, buffer_id, start..end, "", start, start);
+            editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
+            // Enter insert mode by directly pushing the insert layer.
+            editor.keymap_mut().push_layer(Layer::new(
+                LayerId::from("insert"),
+                Arc::new(arx_keymap::Keymap::named("vim.insert")),
+            ));
+        }
+        PendingOperator::Yank => {
+            let text = editor.buffers().get(buffer_id)
+                .map(|b| b.rope().slice_to_string(start..end))
+                .unwrap_or_default();
+            editor.kill_ring_push(crate::editor::KilledText::Linear(text));
+            editor.set_status("Yanked");
+        }
+        PendingOperator::Indent => {
+            let Some(buf) = editor.buffers().get(buffer_id) else { pop_operator(editor); return };
+            let start_line = buf.rope().byte_to_line(start);
+            let end_line = buf.rope().byte_to_line(end.saturating_sub(1).max(start));
+            for line_idx in (start_line..=end_line).rev() {
+                let Some(b) = editor.buffers().get(buffer_id) else { break };
+                let ls = b.rope().line_to_byte(line_idx);
+                user_edit(editor, window_id, buffer_id, ls..ls, "    ", ls, ls + 4);
+            }
+        }
+        PendingOperator::Dedent => {
+            let Some(buf) = editor.buffers().get(buffer_id) else { pop_operator(editor); return };
+            let start_line = buf.rope().byte_to_line(start);
+            let end_line = buf.rope().byte_to_line(end.saturating_sub(1).max(start));
+            for line_idx in (start_line..=end_line).rev() {
+                let Some(b) = editor.buffers().get(buffer_id) else { break };
+                let ls = b.rope().line_to_byte(line_idx);
+                let line_text = b.text();
+                let spaces = line_text[ls..].chars().take_while(|c| *c == ' ').count().min(4);
+                if spaces > 0 {
+                    user_edit(editor, window_id, buffer_id, ls..(ls + spaces), "", ls, ls);
+                }
+            }
+        }
+    }
+    pop_operator(editor);
+    editor.mark_dirty();
+}
+
+/// Check if an operator is pending and apply it to a motion range.
+/// Returns `true` if an operator was applied, `false` if normal motion.
+fn try_apply_operator_motion(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    from: usize,
+    to: usize,
+    linewise: bool,
+) -> bool {
+    if editor.operator_state().operator.is_none() {
+        return false;
+    }
+    let (start, end) = if from <= to { (from, to) } else { (to, from) };
+    apply_operator_to_range(editor, window_id, buffer_id, start, end, linewise);
+    true
+}
+
+stock_cmd!(OperatorDelete, OPERATOR_DELETE, "Delete operator (d)");
+impl OperatorDelete {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Delete);
+    }
+}
+
+stock_cmd!(OperatorChange, OPERATOR_CHANGE, "Change operator (c)");
+impl OperatorChange {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Change);
+    }
+}
+
+stock_cmd!(OperatorYank, OPERATOR_YANK, "Yank operator (y)");
+impl OperatorYank {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Yank);
+    }
+}
+
+stock_cmd!(OperatorIndent, OPERATOR_INDENT, "Indent operator (>)");
+impl OperatorIndent {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Indent);
+    }
+}
+
+stock_cmd!(OperatorDedent, OPERATOR_DEDENT, "Dedent operator (<)");
+impl OperatorDedent {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Dedent);
+    }
+}
+
+stock_cmd!(OperatorCancel, OPERATOR_CANCEL, "Cancel the pending operator");
+impl OperatorCancel {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        pop_operator(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(OperatorLineApply, OPERATOR_LINE, "Apply operator to current line (dd/yy/cc/>>/<< )");
+impl OperatorLineApply {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor);
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor);
+            return;
+        };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let start = rope.line_to_byte(line);
+        let end = if line + 1 < rope.len_lines() {
+            rope.line_to_byte(line + 1)
+        } else {
+            rope.len_bytes()
+        };
+        apply_operator_to_range(cx.editor, window_id, buffer_id, start, end, false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vim text objects
+// ---------------------------------------------------------------------------
+
+/// Find the byte range of the inner/outer delimited text (quotes, brackets).
+fn find_delimited(text: &str, cursor: usize, open: char, close: char, inner: bool) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    // Find the opening delimiter backward from cursor.
+    let mut open_pos = None;
+    if open == close {
+        // For quotes, find the nearest pair surrounding cursor.
+        let mut positions = Vec::new();
+        for (i, &b) in bytes.iter().enumerate() {
+            if b as char == open { positions.push(i); }
+        }
+        // Find the pair that surrounds cursor.
+        for pair in positions.windows(2) {
+            if pair[0] <= cursor && cursor <= pair[1] {
+                open_pos = Some(pair[0]);
+                let close_pos = pair[1];
+                return if inner {
+                    Some((open_pos? + 1, close_pos))
+                } else {
+                    Some((open_pos?, close_pos + 1))
+                };
+            }
+        }
+        return None;
+    }
+    // For brackets, handle nesting.
+    let mut depth = 0i32;
+    for i in (0..=cursor.min(bytes.len().saturating_sub(1))).rev() {
+        let bc = bytes[i] as char;
+        if bc == close { depth += 1; }
+        if bc == open {
+            if depth > 0 { depth -= 1; }
+            else { open_pos = Some(i); break; }
+        }
+    }
+    let open_pos = open_pos?;
+    // Find the closing delimiter forward.
+    depth = 0;
+    for (i, &byte) in bytes.iter().enumerate().skip(open_pos + 1) {
+        let bc = byte as char;
+        if bc == open { depth += 1; }
+        if bc == close {
+            if depth > 0 { depth -= 1; }
+            else {
+                return if inner {
+                    Some((open_pos + 1, i))
+                } else {
+                    Some((open_pos, i + 1))
+                };
+            }
+        }
+    }
+    None
+}
+
+/// Find inner/outer word range.
+fn find_word(text: &str, cursor: usize, include_surrounding: bool) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    if cursor >= bytes.len() { return None; }
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    // Find start of word.
+    let mut start = cursor;
+    if is_word(bytes[start]) {
+        while start > 0 && is_word(bytes[start - 1]) { start -= 1; }
+    }
+    // Find end of word.
+    let mut end = cursor;
+    if is_word(bytes[end]) {
+        while end + 1 < bytes.len() && is_word(bytes[end + 1]) { end += 1; }
+        end += 1;
+    } else {
+        // Cursor is on non-word char.
+        while end + 1 < bytes.len() && !is_word(bytes[end + 1]) { end += 1; }
+        end += 1;
+        while start > 0 && !is_word(bytes[start - 1]) { start -= 1; }
+    }
+    if include_surrounding {
+        // Include trailing whitespace.
+        while end < bytes.len() && bytes[end] == b' ' { end += 1; }
+    }
+    Some((start, end))
+}
+
+/// Find inner/outer paragraph range.
+#[allow(clippy::unnecessary_wraps)]
+fn find_paragraph(text: &str, cursor: usize, include_surrounding: bool) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut byte_offset = 0;
+    let mut cursor_line = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let next = byte_offset + line.len() + 1;
+        if cursor < next || i == lines.len() - 1 { cursor_line = i; break; }
+        byte_offset = next;
+    }
+    // Find paragraph boundaries (blank lines).
+    let mut start_line = cursor_line;
+    while start_line > 0 && !lines[start_line - 1].trim().is_empty() { start_line -= 1; }
+    let mut end_line = cursor_line;
+    while end_line + 1 < lines.len() && !lines[end_line + 1].trim().is_empty() { end_line += 1; }
+
+    let start_byte: usize = lines[..start_line].iter().map(|l| l.len() + 1).sum();
+    let mut end_byte: usize = lines[..=end_line].iter().map(|l| l.len() + 1).sum();
+    if end_byte > text.len() { end_byte = text.len(); }
+
+    if include_surrounding {
+        // Include trailing blank lines.
+        let mut extra = end_line + 1;
+        while extra < lines.len() && lines[extra].trim().is_empty() { extra += 1; }
+        end_byte = lines[..extra].iter().map(|l| l.len() + 1).sum::<usize>().min(text.len());
+    }
+    Some((start_byte, end_byte))
+}
+
+/// Apply a text object: compute range, then apply pending operator.
+fn apply_text_object(cx: &mut CommandContext<'_>, start: usize, end: usize) {
+    let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+        pop_operator(cx.editor);
+        return;
+    };
+    if cx.editor.operator_state().operator.is_some() {
+        apply_operator_to_range(cx.editor, window_id, buffer_id, start, end, false);
+    } else {
+        // No operator: select the range (set mark + move cursor).
+        cx.editor.set_mark(window_id, start);
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = end; }
+        cx.editor.mark_dirty();
+    }
+}
+
+macro_rules! text_object_delimited {
+    ($name:ident, $const_name:ident, $desc:literal, $open:expr, $close:expr, $inner:expr) => {
+        stock_cmd!($name, $const_name, $desc);
+        impl $name {
+            fn run_impl(cx: &mut CommandContext<'_>) {
+                let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+                    pop_operator(cx.editor); return;
+                };
+                let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                    pop_operator(cx.editor); return;
+                };
+                let text = buffer.text();
+                if let Some((s, e)) = find_delimited(&text, cursor, $open, $close, $inner) {
+                    apply_text_object(cx, s, e);
+                } else {
+                    pop_operator(cx.editor);
+                }
+            }
+        }
+    };
+}
+
+text_object_delimited!(TextObjectInnerDoubleQuote, TEXT_OBJECT_INNER_DOUBLE_QUOTE, "Inner double-quoted string", '"', '"', true);
+text_object_delimited!(TextObjectADoubleQuote, TEXT_OBJECT_A_DOUBLE_QUOTE, "A double-quoted string", '"', '"', false);
+text_object_delimited!(TextObjectInnerSingleQuote, TEXT_OBJECT_INNER_SINGLE_QUOTE, "Inner single-quoted string", '\'', '\'', true);
+text_object_delimited!(TextObjectASingleQuote, TEXT_OBJECT_A_SINGLE_QUOTE, "A single-quoted string", '\'', '\'', false);
+text_object_delimited!(TextObjectInnerParen, TEXT_OBJECT_INNER_PAREN, "Inner parentheses", '(', ')', true);
+text_object_delimited!(TextObjectAParen, TEXT_OBJECT_A_PAREN, "Including parentheses", '(', ')', false);
+text_object_delimited!(TextObjectInnerBrace, TEXT_OBJECT_INNER_BRACE, "Inner curly braces", '{', '}', true);
+text_object_delimited!(TextObjectABrace, TEXT_OBJECT_A_BRACE, "Including curly braces", '{', '}', false);
+text_object_delimited!(TextObjectInnerBracket, TEXT_OBJECT_INNER_BRACKET, "Inner square brackets", '[', ']', true);
+text_object_delimited!(TextObjectABracket, TEXT_OBJECT_A_BRACKET, "Including square brackets", '[', ']', false);
+text_object_delimited!(TextObjectInnerAngle, TEXT_OBJECT_INNER_ANGLE, "Inner angle brackets", '<', '>', true);
+text_object_delimited!(TextObjectAAngle, TEXT_OBJECT_A_ANGLE, "Including angle brackets", '<', '>', false);
+text_object_delimited!(TextObjectInnerBacktick, TEXT_OBJECT_INNER_BACKTICK, "Inner backtick string", '`', '`', true);
+text_object_delimited!(TextObjectABacktick, TEXT_OBJECT_A_BACKTICK, "Including backtick string", '`', '`', false);
+
+stock_cmd!(TextObjectInnerWord, TEXT_OBJECT_INNER_WORD, "Inner word");
+impl TextObjectInnerWord {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor); return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor); return;
+        };
+        let text = buffer.text();
+        if let Some((s, e)) = find_word(&text, cursor, false) {
+            apply_text_object(cx, s, e);
+        } else {
+            pop_operator(cx.editor);
+        }
+    }
+}
+
+stock_cmd!(TextObjectAWord, TEXT_OBJECT_A_WORD, "A word (including whitespace)");
+impl TextObjectAWord {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor); return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor); return;
+        };
+        let text = buffer.text();
+        if let Some((s, e)) = find_word(&text, cursor, true) {
+            apply_text_object(cx, s, e);
+        } else {
+            pop_operator(cx.editor);
+        }
+    }
+}
+
+stock_cmd!(TextObjectInnerParagraph, TEXT_OBJECT_INNER_PARAGRAPH, "Inner paragraph");
+impl TextObjectInnerParagraph {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor); return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor); return;
+        };
+        let text = buffer.text();
+        if let Some((s, e)) = find_paragraph(&text, cursor, false) {
+            apply_text_object(cx, s, e);
+        } else {
+            pop_operator(cx.editor);
+        }
+    }
+}
+
+stock_cmd!(TextObjectAParagraph, TEXT_OBJECT_A_PARAGRAPH, "A paragraph (including blank lines)");
+impl TextObjectAParagraph {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor); return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor); return;
+        };
+        let text = buffer.text();
+        if let Some((s, e)) = find_paragraph(&text, cursor, true) {
+            apply_text_object(cx, s, e);
+        } else {
+            pop_operator(cx.editor);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// f/F/t/T char-read mode
+// ---------------------------------------------------------------------------
+
+/// Called from `handle_printable_fallback` when the editor is in
+/// char-read mode (the user pressed `f`, `F`, `t`, or `T` and we're
+/// waiting for the target character).
+pub fn handle_char_read(editor: &mut Editor, ch: char, mode: crate::editor::CharReadMode) {
+    use crate::editor::{CharReadMode, FindCharKind, FindCharState};
+
+    let Some(window_id) = editor.windows().active() else {
+        pop_operator(editor);
+        return;
+    };
+    let Some(data) = editor.windows().get(window_id) else {
+        pop_operator(editor);
+        return;
+    };
+    let buffer_id = data.buffer_id;
+    let cursor = data.cursor_byte;
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        pop_operator(editor);
+        return;
+    };
+    let text = buffer.text();
+    let rope = buffer.rope();
+    let line = rope.byte_to_line(cursor);
+    let line_start = rope.line_to_byte(line);
+    let line_end = if line + 1 < rope.len_lines() {
+        rope.line_to_byte(line + 1).saturating_sub(1)
+    } else {
+        rope.len_bytes()
+    };
+
+    let target = match mode {
+        CharReadMode::FindForwardTo => {
+            text[(cursor + 1)..line_end].find(ch).map(|i| cursor + 1 + i)
+        }
+        CharReadMode::FindForwardTill => {
+            text[(cursor + 1)..line_end].find(ch).map(|i| cursor + i)
+        }
+        CharReadMode::FindBackwardTo => {
+            text[line_start..cursor].rfind(ch).map(|i| line_start + i)
+        }
+        CharReadMode::FindBackwardTill => {
+            text[line_start..cursor].rfind(ch).map(|i| line_start + i + 1)
+        }
+    };
+
+    let kind = match mode {
+        CharReadMode::FindForwardTo => FindCharKind::ForwardTo,
+        CharReadMode::FindForwardTill => FindCharKind::ForwardTill,
+        CharReadMode::FindBackwardTo => FindCharKind::BackwardTo,
+        CharReadMode::FindBackwardTill => FindCharKind::BackwardTill,
+    };
+    editor.set_last_find_char(FindCharState { ch, kind });
+
+    if let Some(target) = target {
+        if editor.operator_state().operator.is_some() {
+            // Apply operator to the range.
+            let (start, end) = if target > cursor { (cursor, target + 1) } else { (target, cursor) };
+            apply_operator_to_range(editor, window_id, buffer_id, start, end, false);
+        } else {
+            if let Some(w) = editor.windows_mut().get_mut(window_id) {
+                w.cursor_byte = target;
+            }
+            pop_operator(editor);
+        }
+    } else {
+        pop_operator(editor);
+    }
+    editor.mark_dirty();
 }
 
 // ---------------------------------------------------------------------------

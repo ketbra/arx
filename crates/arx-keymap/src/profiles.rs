@@ -252,6 +252,62 @@ pub fn search_layer() -> Keymap {
 }
 
 // ---------------------------------------------------------------------------
+// Vim operator-pending mode
+// ---------------------------------------------------------------------------
+
+/// Keymap pushed when a Vim operator (`d`, `c`, `y`, `>`, `<`) is
+/// pressed and waiting for a motion or text object. Motions like `w`,
+/// `e`, `$`, `{`, etc. fall through to the normal layer. This layer
+/// captures text-object prefixes (`i`, `a`) and special keys.
+pub fn operator_pending_layer() -> Keymap {
+    let mut m = Keymap::named("vim.operator-pending");
+    // Escape cancels the operator.
+    m.bind_str("<Esc>", OPERATOR_CANCEL).unwrap();
+    // Repeating the operator key applies to the current line (dd, cc, yy, >>, <<).
+    m.bind_str("d", OPERATOR_LINE).unwrap();
+    m.bind_str("c", OPERATOR_LINE).unwrap();
+    m.bind_str("y", OPERATOR_LINE).unwrap();
+    m.bind_str(">", OPERATOR_LINE).unwrap();
+    m.bind_str("<", OPERATOR_LINE).unwrap();
+
+    // Text objects: inner (i) and a (a) prefixes.
+    m.bind_str("i w", TEXT_OBJECT_INNER_WORD).unwrap();
+    m.bind_str("a w", TEXT_OBJECT_A_WORD).unwrap();
+    m.bind_str("i p", TEXT_OBJECT_INNER_PARAGRAPH).unwrap();
+    m.bind_str("a p", TEXT_OBJECT_A_PARAGRAPH).unwrap();
+    m.bind_str("i \"", TEXT_OBJECT_INNER_DOUBLE_QUOTE).unwrap();
+    m.bind_str("a \"", TEXT_OBJECT_A_DOUBLE_QUOTE).unwrap();
+    m.bind_str("i '", TEXT_OBJECT_INNER_SINGLE_QUOTE).unwrap();
+    m.bind_str("a '", TEXT_OBJECT_A_SINGLE_QUOTE).unwrap();
+    m.bind_str("i (", TEXT_OBJECT_INNER_PAREN).unwrap();
+    m.bind_str("a (", TEXT_OBJECT_A_PAREN).unwrap();
+    m.bind_str("i )", TEXT_OBJECT_INNER_PAREN).unwrap();
+    m.bind_str("a )", TEXT_OBJECT_A_PAREN).unwrap();
+    m.bind_str("i b", TEXT_OBJECT_INNER_PAREN).unwrap();
+    m.bind_str("a b", TEXT_OBJECT_A_PAREN).unwrap();
+    m.bind_str("i {", TEXT_OBJECT_INNER_BRACE).unwrap();
+    m.bind_str("a {", TEXT_OBJECT_A_BRACE).unwrap();
+    m.bind_str("i }", TEXT_OBJECT_INNER_BRACE).unwrap();
+    m.bind_str("a }", TEXT_OBJECT_A_BRACE).unwrap();
+    m.bind_str("i B", TEXT_OBJECT_INNER_BRACE).unwrap();
+    m.bind_str("a B", TEXT_OBJECT_A_BRACE).unwrap();
+    m.bind_str("i [", TEXT_OBJECT_INNER_BRACKET).unwrap();
+    m.bind_str("a [", TEXT_OBJECT_A_BRACKET).unwrap();
+    m.bind_str("i ]", TEXT_OBJECT_INNER_BRACKET).unwrap();
+    m.bind_str("a ]", TEXT_OBJECT_A_BRACKET).unwrap();
+    m.bind_str("i <", TEXT_OBJECT_INNER_ANGLE).unwrap();
+    m.bind_str("a <", TEXT_OBJECT_A_ANGLE).unwrap();
+    m.bind_str("i >", TEXT_OBJECT_INNER_ANGLE).unwrap();
+    m.bind_str("a >", TEXT_OBJECT_A_ANGLE).unwrap();
+    m.bind_str("i `", TEXT_OBJECT_INNER_BACKTICK).unwrap();
+    m.bind_str("a `", TEXT_OBJECT_A_BACKTICK).unwrap();
+
+    // Motions that don't exist in the normal layer (f/t with char-read):
+    // These are already in vim.normal and fall through.
+    m
+}
+
+// ---------------------------------------------------------------------------
 // Vim visual block mode
 // ---------------------------------------------------------------------------
 
@@ -369,15 +425,18 @@ pub fn vim() -> Profile {
     normal.bind_str("x", BUFFER_DELETE_FORWARD).unwrap();
     // Line operations.
     normal.bind_str("J", BUFFER_JOIN_LINES).unwrap();
-    normal.bind_str("d d", BUFFER_DELETE_LINE).unwrap();
-    normal.bind_str("y y", BUFFER_YANK_LINE).unwrap();
-    normal.bind_str("c c", BUFFER_CHANGE_LINE).unwrap();
     normal.bind_str("D", BUFFER_DELETE_TO_EOL).unwrap();
     normal.bind_str("C", BUFFER_CHANGE_TO_EOL).unwrap();
     normal.bind_str("Y", BUFFER_YANK_TO_EOL).unwrap();
-    normal.bind_str("> >", BUFFER_INDENT_LINE).unwrap();
-    normal.bind_str("< <", BUFFER_DEDENT_LINE).unwrap();
     normal.bind_str("g c", BUFFER_COMMENT_TOGGLE).unwrap();
+    // Operators: d/c/y/>/< enter operator-pending mode, waiting for
+    // a motion or text object. dd/cc/yy/>>/<<  are handled by the
+    // operator-pending layer's binding for the same key.
+    normal.bind_str("d", OPERATOR_DELETE).unwrap();
+    normal.bind_str("c", OPERATOR_CHANGE).unwrap();
+    normal.bind_str("y", OPERATOR_YANK).unwrap();
+    normal.bind_str(">", OPERATOR_INDENT).unwrap();
+    normal.bind_str("<", OPERATOR_DEDENT).unwrap();
     // Interactive buffer search (Vim `/` in normal mode).
     normal.bind_str("/", SEARCH_OPEN).unwrap();
     // Undo / redo: Vim's canonical `u` in normal mode, `C-r` for redo.

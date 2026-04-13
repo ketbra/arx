@@ -272,5 +272,61 @@ pub const MODE_ENTER_VISUAL_BLOCK: &str = "mode.enter-visual-block";
 /// Leave Vim visual-block selection mode.
 pub const MODE_LEAVE_VISUAL_BLOCK: &str = "mode.leave-visual-block";
 
+// --- Vim operator-pending ---
+
+/// Start a delete operator (Vim `d`): waits for motion/text-object.
+pub const OPERATOR_DELETE: &str = "operator.delete";
+/// Start a change operator (Vim `c`): waits for motion/text-object.
+pub const OPERATOR_CHANGE: &str = "operator.change";
+/// Start a yank operator (Vim `y`): waits for motion/text-object.
+pub const OPERATOR_YANK: &str = "operator.yank";
+/// Start an indent operator (Vim `>`): waits for motion.
+pub const OPERATOR_INDENT: &str = "operator.indent";
+/// Start a dedent operator (Vim `<`): waits for motion.
+pub const OPERATOR_DEDENT: &str = "operator.dedent";
+/// Cancel the pending operator.
+pub const OPERATOR_CANCEL: &str = "operator.cancel";
+/// Apply pending operator to the current line (dd/cc/yy/>>/<< shortcut).
+pub const OPERATOR_LINE: &str = "operator.line";
+
+// --- Vim text objects ---
+
+/// Inner word text object (Vim `iw`).
+pub const TEXT_OBJECT_INNER_WORD: &str = "text-object.inner-word";
+/// A word text object including surrounding whitespace (Vim `aw`).
+pub const TEXT_OBJECT_A_WORD: &str = "text-object.a-word";
+/// Inner paragraph text object (Vim `ip`).
+pub const TEXT_OBJECT_INNER_PARAGRAPH: &str = "text-object.inner-paragraph";
+/// A paragraph including surrounding blank lines (Vim `ap`).
+pub const TEXT_OBJECT_A_PARAGRAPH: &str = "text-object.a-paragraph";
+/// Inner double-quoted string (Vim `i"`).
+pub const TEXT_OBJECT_INNER_DOUBLE_QUOTE: &str = "text-object.inner-double-quote";
+/// A double-quoted string including quotes (Vim `a"`).
+pub const TEXT_OBJECT_A_DOUBLE_QUOTE: &str = "text-object.a-double-quote";
+/// Inner single-quoted string (Vim `i'`).
+pub const TEXT_OBJECT_INNER_SINGLE_QUOTE: &str = "text-object.inner-single-quote";
+/// A single-quoted string including quotes (Vim `a'`).
+pub const TEXT_OBJECT_A_SINGLE_QUOTE: &str = "text-object.a-single-quote";
+/// Inner parentheses (Vim `i(` / `ib`).
+pub const TEXT_OBJECT_INNER_PAREN: &str = "text-object.inner-paren";
+/// Including parentheses (Vim `a(` / `ab`).
+pub const TEXT_OBJECT_A_PAREN: &str = "text-object.a-paren";
+/// Inner curly braces (Vim `i{` / `iB`).
+pub const TEXT_OBJECT_INNER_BRACE: &str = "text-object.inner-brace";
+/// Including curly braces (Vim `a{` / `aB`).
+pub const TEXT_OBJECT_A_BRACE: &str = "text-object.a-brace";
+/// Inner square brackets (Vim `i[`).
+pub const TEXT_OBJECT_INNER_BRACKET: &str = "text-object.inner-bracket";
+/// Including square brackets (Vim `a[`).
+pub const TEXT_OBJECT_A_BRACKET: &str = "text-object.a-bracket";
+/// Inner angle brackets (Vim `i<`).
+pub const TEXT_OBJECT_INNER_ANGLE: &str = "text-object.inner-angle";
+/// Including angle brackets (Vim `a<`).
+pub const TEXT_OBJECT_A_ANGLE: &str = "text-object.a-angle";
+/// Inner backtick-quoted string (Vim `` i` ``).
+pub const TEXT_OBJECT_INNER_BACKTICK: &str = "text-object.inner-backtick";
+/// Including backtick quotes (Vim `` a` ``).
+pub const TEXT_OBJECT_A_BACKTICK: &str = "text-object.a-backtick";
+
 /// Open an embedded terminal in a split pane.
 pub const TERMINAL_OPEN: &str = "terminal.open";

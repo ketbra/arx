@@ -88,6 +88,53 @@ pub enum FindCharKind {
     BackwardTill,
 }
 
+/// Which Vim operator is pending (waiting for a motion/text-object).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingOperator {
+    /// Delete the range (Vim `d`).
+    Delete,
+    /// Change the range: delete and enter insert mode (Vim `c`).
+    Change,
+    /// Yank (copy) the range (Vim `y`).
+    Yank,
+    /// Indent the range (Vim `>`).
+    Indent,
+    /// Dedent the range (Vim `<`).
+    Dedent,
+}
+
+/// What the editor is waiting for when a special input mode is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharReadMode {
+    /// Waiting for a character for `f` (find forward to).
+    FindForwardTo,
+    /// Waiting for a character for `F` (find backward to).
+    FindBackwardTo,
+    /// Waiting for a character for `t` (find forward till).
+    FindForwardTill,
+    /// Waiting for a character for `T` (find backward till).
+    FindBackwardTill,
+}
+
+/// Tracks the state of a pending Vim operator or char-read.
+#[derive(Debug, Default)]
+pub struct OperatorState {
+    /// Which operator is pending, if any.
+    pub operator: Option<PendingOperator>,
+    /// Count prefix that was active when the operator was pressed.
+    pub count: u32,
+    /// Whether we're waiting for a single character input (f/F/t/T).
+    pub char_read: Option<CharReadMode>,
+}
+
+impl OperatorState {
+    pub fn clear(&mut self) {
+        self.operator = None;
+        self.count = 1;
+        self.char_read = None;
+    }
+}
+
 /// The editor's in-process state.
 ///
 /// Owns every piece of mutable editor state today. Lives on the event loop
@@ -115,6 +162,8 @@ pub struct Editor {
     nav_stack: Vec<(arx_buffer::BufferId, usize)>,
     /// Last find-char state for `;` and `,` repeat.
     last_find_char: Option<FindCharState>,
+    /// Vim operator-pending state (d/c/y waiting for motion).
+    operator_state: OperatorState,
     /// Which-key overlay: list of `(key, command)` pairs to show
     /// when the user pauses on a prefix chord.
     which_key: Option<Vec<(String, String)>>,
@@ -179,6 +228,7 @@ impl Editor {
             search: crate::search::BufferSearch::new(),
             nav_stack: Vec::new(),
             last_find_char: None,
+            operator_state: OperatorState::default(),
             terminals: HashMap::new(),
             terminal_redraw: None,
             #[cfg(feature = "syntax")]
@@ -414,10 +464,19 @@ impl Editor {
         if self.palette.is_open() {
             self.palette.append_char(ch);
             self.mark_dirty();
-        } else if self.search.is_open() {
+            return;
+        }
+        if self.search.is_open() {
             self.search.append_char(ch);
             self.mark_dirty();
-        } else if let Some(active) = self.windows().active() {
+            return;
+        }
+        // Char-read mode: f/F/t/T waiting for a character.
+        if let Some(mode) = self.operator_state.char_read.take() {
+            crate::stock::handle_char_read(self, ch, mode);
+            return;
+        }
+        if let Some(active) = self.windows().active() {
             if let Some(term) = self.terminal(active) {
                 // Active pane is a terminal — forward the character
                 // to the PTY instead of self-inserting into a buffer.
@@ -529,6 +588,16 @@ impl Editor {
     /// Set the last find-char state.
     pub fn set_last_find_char(&mut self, state: FindCharState) {
         self.last_find_char = Some(state);
+    }
+
+    /// Get the operator state (for Vim operator-pending mode).
+    pub fn operator_state(&self) -> &OperatorState {
+        &self.operator_state
+    }
+
+    /// Mutably borrow the operator state.
+    pub fn operator_state_mut(&mut self) -> &mut OperatorState {
+        &mut self.operator_state
     }
 
     /// Set a transient status message shown in the modeline. Cleared

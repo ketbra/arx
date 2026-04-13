@@ -87,7 +87,10 @@ pub mod stock;
 pub mod window;
 
 pub use command::{CommandBus, CommandFn, DispatchError};
-pub use editor::{BufferManager, Editor, KeyHandled, KilledText, MarkState, SelectionMode};
+pub use editor::{
+    BufferManager, CharReadMode, Editor, FindCharKind, FindCharState, KeyHandled, KilledText,
+    MarkState, OperatorState, PendingOperator, SelectionMode,
+};
 pub use event_loop::{DEFAULT_BUS_CAPACITY, EventLoop};
 pub use file::{OpenFileError, SaveFileError, open_file, save_file, save_file_as};
 pub use completion::{CompletionItem, CompletionPopup};
