@@ -119,8 +119,10 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let mut modifiers = KeyModifiers::default();
 
-        // Bracketed form: <...>
-        if self.peek() == Some('<') {
+        // Bracketed form: <...>. Only enter bracketed parsing if
+        // there is actually a closing `>` — a bare `<` is the literal
+        // less-than character (used e.g. for Vim's `<<` dedent).
+        if self.peek() == Some('<') && self.src[self.pos..].contains('>') {
             return self.parse_bracketed();
         }
 
