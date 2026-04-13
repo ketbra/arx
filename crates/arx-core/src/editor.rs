@@ -39,6 +39,37 @@ pub enum KeyHandled {
     Unbound { printable_fallback: Option<char> },
 }
 
+/// Whether the current selection is linear (contiguous bytes) or
+/// rectangular (column block).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionMode {
+    /// Standard contiguous byte range selection.
+    #[default]
+    Linear,
+    /// Column/rectangle selection for block operations.
+    Rectangle,
+}
+
+/// Per-window mark (selection anchor) with its mode.
+#[derive(Debug, Clone, Copy)]
+pub struct MarkState {
+    /// Byte offset of the mark in the buffer.
+    pub byte: usize,
+    /// Whether this selection is linear or rectangular.
+    pub mode: SelectionMode,
+}
+
+/// An entry in the kill ring. Distinguishes linear (contiguous) text
+/// from rectangular (column block) text so yank can paste them
+/// appropriately.
+#[derive(Debug, Clone)]
+pub enum KilledText {
+    /// A contiguous string of text.
+    Linear(String),
+    /// A column block — one string per line.
+    Rectangular(Vec<String>),
+}
+
 /// The editor's in-process state.
 ///
 /// Owns every piece of mutable editor state today. Lives on the event loop
@@ -68,9 +99,11 @@ pub struct Editor {
     /// (command name shown in the status bar) rather than executed.
     describe_key_mode: bool,
     /// Kill ring — a stack of killed (cut/copied) text for yank.
-    kill_ring: Vec<String>,
-    /// Per-window mark (selection anchor) byte offsets.
-    marks: HashMap<crate::WindowId, usize>,
+    /// Entries distinguish linear (contiguous) vs rectangular (column)
+    /// kills so yank can paste them appropriately.
+    kill_ring: Vec<KilledText>,
+    /// Per-window mark (selection anchor) with selection mode.
+    marks: HashMap<crate::WindowId, MarkState>,
     /// Transient message shown in the modeline (e.g. hover info, LSP
     /// status). Cleared on the next user keystroke.
     status_message: Option<String>,
@@ -359,6 +392,17 @@ impl Editor {
         } else if self.search.is_open() {
             self.search.append_char(ch);
             self.mark_dirty();
+        } else if let Some(active) = self.windows().active() {
+            if let Some(term) = self.terminal(active) {
+                // Active pane is a terminal — forward the character
+                // to the PTY instead of self-inserting into a buffer.
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                term.write(s.as_bytes().to_vec());
+                self.mark_dirty();
+            } else {
+                crate::stock::insert_at_cursor(self, &ch.to_string());
+            }
         } else {
             crate::stock::insert_at_cursor(self, &ch.to_string());
         }
@@ -389,7 +433,7 @@ impl Editor {
     }
 
     /// Push text onto the kill ring.
-    pub fn kill_ring_push(&mut self, text: String) {
+    pub fn kill_ring_push(&mut self, text: KilledText) {
         self.kill_ring.push(text);
         // Cap at 64 entries.
         if self.kill_ring.len() > 64 {
@@ -398,17 +442,39 @@ impl Editor {
     }
 
     /// Peek at the top of the kill ring (most recently killed text).
-    pub fn kill_ring_top(&self) -> Option<&str> {
-        self.kill_ring.last().map(String::as_str)
+    pub fn kill_ring_top(&self) -> Option<&KilledText> {
+        self.kill_ring.last()
     }
 
-    /// Set the mark (selection anchor) for `window_id`.
+    /// Set the mark (selection anchor) for `window_id` with linear
+    /// selection mode.
     pub fn set_mark(&mut self, window_id: crate::WindowId, byte: usize) {
-        self.marks.insert(window_id, byte);
+        self.marks.insert(
+            window_id,
+            MarkState {
+                byte,
+                mode: SelectionMode::Linear,
+            },
+        );
     }
 
-    /// Get the mark for `window_id`, if set.
+    /// Set the mark with a specific selection mode.
+    pub fn set_mark_with_mode(
+        &mut self,
+        window_id: crate::WindowId,
+        byte: usize,
+        mode: SelectionMode,
+    ) {
+        self.marks.insert(window_id, MarkState { byte, mode });
+    }
+
+    /// Get the mark byte offset for `window_id`, if set.
     pub fn mark(&self, window_id: crate::WindowId) -> Option<usize> {
+        self.marks.get(&window_id).map(|m| m.byte)
+    }
+
+    /// Get the full mark state (byte + selection mode) for `window_id`.
+    pub fn mark_state(&self, window_id: crate::WindowId) -> Option<MarkState> {
         self.marks.get(&window_id).copied()
     }
 

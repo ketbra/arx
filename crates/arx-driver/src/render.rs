@@ -23,7 +23,7 @@ use arx_core::{CommandBus, Layout as CoreLayout, SplitAxis, WindowId as CoreWind
 use arx_render::{
     Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree,
     PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SearchEntry, SearchView,
-    SplitDirection, TerminalSize,
+    Selection, SplitDirection, TerminalSize,
     TerminalViewCell, TerminalViewState, ViewState, WhichKeyEntry, WindowId as ViewWindowId,
     WindowState, diff,
     initial_paint, render,
@@ -247,11 +247,26 @@ fn build_view_state_sync(
         } else {
             let data = editor.windows().get(id)?.clone();
             let snapshot = editor.buffers().snapshot(data.buffer_id)?;
-            let selection = editor.mark(id).map(|mark| {
+            let selection = editor.mark_state(id).and_then(|ms| {
                 let cursor = data.cursor_byte;
-                let start = mark.min(cursor);
-                let end = mark.max(cursor);
-                start..end
+                match ms.mode {
+                    arx_core::SelectionMode::Linear => {
+                        let start = ms.byte.min(cursor);
+                        let end = ms.byte.max(cursor);
+                        Some(Selection::Linear(start..end))
+                    }
+                    arx_core::SelectionMode::Rectangle => {
+                        let rect = arx_core::column::RectRegion::from_mark_cursor(
+                            editor, data.buffer_id, ms.byte, cursor,
+                        )?;
+                        Some(Selection::Rectangle {
+                            start_line: rect.start_line,
+                            end_line: rect.end_line,
+                            left_col: rect.left_col,
+                            right_col: rect.right_col,
+                        })
+                    }
+                }
             });
             windows.push(WindowState {
                 id: ViewWindowId(id.0),

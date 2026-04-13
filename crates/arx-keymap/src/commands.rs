@@ -175,5 +175,19 @@ pub const SEARCH_HISTORY_PREV: &str = "search.history-prev";
 /// Navigate to the next (newer) search history entry.
 pub const SEARCH_HISTORY_NEXT: &str = "search.history-next";
 
+/// Kill (delete) the rectangular region between mark and cursor.
+pub const RECT_KILL: &str = "rect.kill";
+/// Yank (paste) the most recent rectangular kill at the cursor.
+pub const RECT_YANK: &str = "rect.yank";
+/// Copy the rectangular region between mark and cursor (without deleting).
+pub const RECT_COPY: &str = "rect.copy";
+/// Open (insert blank space into) the rectangular region.
+pub const RECT_OPEN: &str = "rect.open";
+
+/// Enter Vim visual-block selection mode.
+pub const MODE_ENTER_VISUAL_BLOCK: &str = "mode.enter-visual-block";
+/// Leave Vim visual-block selection mode.
+pub const MODE_LEAVE_VISUAL_BLOCK: &str = "mode.leave-visual-block";
+
 /// Open an embedded terminal in a split pane.
 pub const TERMINAL_OPEN: &str = "terminal.open";

@@ -73,6 +73,7 @@
 //! # }
 //! ```
 
+pub mod column;
 pub mod command;
 pub mod completion;
 pub mod editor;
@@ -86,7 +87,7 @@ pub mod stock;
 pub mod window;
 
 pub use command::{CommandBus, CommandFn, DispatchError};
-pub use editor::{BufferManager, Editor, KeyHandled};
+pub use editor::{BufferManager, Editor, KeyHandled, KilledText, MarkState, SelectionMode};
 pub use event_loop::{DEFAULT_BUS_CAPACITY, EventLoop};
 pub use file::{OpenFileError, SaveFileError, open_file, save_file, save_file_as};
 pub use completion::{CompletionItem, CompletionPopup};

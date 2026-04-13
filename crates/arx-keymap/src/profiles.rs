@@ -28,7 +28,8 @@ use crate::commands::{
     SEARCH_PREV, SEARCH_TOGGLE_MODE,
     COMPLETION_PAGE_DOWN, COMPLETION_PAGE_UP, COMPLETION_PREV,
     COMPLETION_TRIGGER, CURSOR_BUFFER_END,
-    LSP_HOVER, TERMINAL_OPEN,
+    LSP_HOVER, MODE_ENTER_VISUAL_BLOCK, MODE_LEAVE_VISUAL_BLOCK,
+    RECT_COPY, RECT_KILL, RECT_OPEN, RECT_YANK, TERMINAL_OPEN,
     CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
     CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_CANCEL,
     EDITOR_DESCRIBE_KEY, EDITOR_QUIT, LSP_NEXT_DIAGNOSTIC, LSP_PREV_DIAGNOSTIC,
@@ -130,6 +131,11 @@ pub fn emacs() -> Profile {
     m.bind_str("C-x u", BUFFER_UNDO).unwrap();
     m.bind_str("M-_", BUFFER_REDO).unwrap();
 
+    // Rectangle (column block) operations.
+    m.bind_str("C-x r k", RECT_KILL).unwrap();
+    m.bind_str("C-x r y", RECT_YANK).unwrap();
+    m.bind_str("C-x r o", RECT_OPEN).unwrap();
+
     // Completion.
     m.bind_str("M-/", COMPLETION_TRIGGER).unwrap();
 
@@ -150,6 +156,8 @@ pub fn emacs() -> Profile {
     m.bind_str("C-x 3", WINDOW_SPLIT_VERTICAL).unwrap();
     m.bind_str("C-x 0", WINDOW_CLOSE).unwrap();
     m.bind_str("C-x o", WINDOW_FOCUS_NEXT).unwrap();
+    // C-\ also cycles windows — useful as a quick escape from terminal panes.
+    m.bind_str("C-\\", WINDOW_FOCUS_NEXT).unwrap();
 
     // Command palette.
     m.bind_str("M-x", COMMAND_PALETTE_OPEN).unwrap();
@@ -243,6 +251,22 @@ pub fn search_layer() -> Keymap {
 }
 
 // ---------------------------------------------------------------------------
+// Vim visual block mode
+// ---------------------------------------------------------------------------
+
+/// Keymap pushed when Vim enters visual-block mode (`C-v` in normal
+/// mode). `d` kills the rectangle, `y` copies it, `Esc` cancels.
+/// Motion keys (arrows, h/j/k/l) fall through to the normal layer
+/// to extend the selection.
+pub fn visual_block_layer() -> Keymap {
+    let mut m = Keymap::named("vim.visual-block");
+    m.bind_str("d", RECT_KILL).unwrap();
+    m.bind_str("y", RECT_COPY).unwrap();
+    m.bind_str("<Esc>", MODE_LEAVE_VISUAL_BLOCK).unwrap();
+    m
+}
+
+// ---------------------------------------------------------------------------
 // Vim
 // ---------------------------------------------------------------------------
 
@@ -290,6 +314,8 @@ pub fn vim() -> Profile {
     global.bind_str("C-w o", WINDOW_DELETE_OTHER).unwrap();
     global.bind_str("C-w w", WINDOW_FOCUS_NEXT).unwrap();
     global.bind_str("C-w W", WINDOW_FOCUS_PREV).unwrap();
+    // C-\ also cycles windows — useful as a quick escape from terminal panes.
+    global.bind_str("C-\\", WINDOW_FOCUS_NEXT).unwrap();
     // Terminal.
     global.bind_str("C-w t", TERMINAL_OPEN).unwrap();
     // Completion (works in insert mode via the global layer).
@@ -332,8 +358,8 @@ pub fn vim() -> Profile {
     normal.bind_str("K", LSP_HOVER).unwrap();
     normal.bind_str("] d", LSP_NEXT_DIAGNOSTIC).unwrap();
     normal.bind_str("[ d", LSP_PREV_DIAGNOSTIC).unwrap();
-    // Shift-Z Shift-Z → save and quit. Minimalist vim exit.
-    // Ex-command line (`:w`, `:q`) is a follow-up milestone.
+    // Visual block mode (column selection).
+    normal.bind_str("C-v", MODE_ENTER_VISUAL_BLOCK).unwrap();
 
     Profile {
         global: Arc::new(global),

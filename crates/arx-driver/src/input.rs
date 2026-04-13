@@ -144,59 +144,12 @@ async fn handle_key(
     key: crossterm::event::KeyEvent,
     bus: &CommandBus,
 ) -> (ControlFlow<()>, bool) {
-    use crossterm::event::{KeyCode, KeyModifiers};
-
     let chord = KeyChord::from(&key);
 
-    // Check if the active pane is a terminal. If so, forward the
-    // raw keystroke to the PTY — unless it's the terminal-escape
-    // key (`C-\`), which cycles focus to the next window so the
-    // user can interact with buffer panes, close the terminal, etc.
-    let is_terminal_escape = key.modifiers.contains(KeyModifiers::CONTROL)
-        && key.code == KeyCode::Char('\\');
-    if is_terminal_escape {
-        // C-\ while a terminal is focused: cycle to the next window.
-        let was_terminal = bus
-            .invoke(|editor| {
-                let Some(active) = editor.windows().active() else {
-                    return false;
-                };
-                if !editor.is_terminal(active) {
-                    return false;
-                }
-                if editor.windows_mut().focus_next().is_some() {
-                    editor.mark_dirty();
-                    editor.ensure_active_cursor_visible();
-                }
-                true
-            })
-            .await;
-        if let Ok(true) = was_terminal {
-            return (ControlFlow::Continue(()), false);
-        }
-    } else {
-        let forwarded = bus
-            .invoke(move |editor| {
-                let Some(active) = editor.windows().active() else {
-                    return false;
-                };
-                if let Some(term) = editor.terminal(active) {
-                    // Convert the key event to bytes the PTY understands.
-                    if let Some(bytes) = key_to_pty_bytes(&key) {
-                        term.write(bytes);
-                    }
-                    editor.mark_dirty();
-                    return true;
-                }
-                false
-            })
-            .await;
-        if let Ok(true) = forwarded {
-            return (ControlFlow::Continue(()), false);
-        }
-    }
-
-    // Normal keymap path (buffer panes, or terminal-escape key).
+    // Always route through the editor keymap first. Editor-level
+    // bindings (window management, palette, search, etc.) take
+    // priority even when a terminal pane is focused. Only truly
+    // unbound keys are forwarded to the PTY.
     let bus_clone = bus.clone();
     let result = bus
         .invoke(move |editor| {
@@ -214,17 +167,41 @@ async fn handle_key(
 
     let is_pending = outcome == KeyHandled::Pending;
 
-    if let KeyHandled::Unbound {
-        printable_fallback: Some(ch),
-    } = outcome
-    {
-        if bus
-            .dispatch(move |editor| editor.handle_printable_fallback(ch))
-            .await
-            .is_err()
-        {
-            return (ControlFlow::Break(()), false);
+    match outcome {
+        KeyHandled::Unbound {
+            printable_fallback: Some(ch),
+        } => {
+            // Printable unbound key: self-insert, or forward to the
+            // terminal PTY if the active pane is a terminal.
+            if bus
+                .dispatch(move |editor| editor.handle_printable_fallback(ch))
+                .await
+                .is_err()
+            {
+                return (ControlFlow::Break(()), false);
+            }
         }
+        KeyHandled::Unbound {
+            printable_fallback: None,
+        } => {
+            // Non-printable unbound key (arrows, Enter, Backspace,
+            // etc.): forward to the PTY if the active pane is a
+            // terminal; otherwise silently drop.
+            let _ = bus
+                .dispatch(move |editor| {
+                    let Some(active) = editor.windows().active() else {
+                        return;
+                    };
+                    if let Some(term) = editor.terminal(active) {
+                        if let Some(bytes) = key_to_pty_bytes(&key) {
+                            term.write(bytes);
+                        }
+                        editor.mark_dirty();
+                    }
+                })
+                .await;
+        }
+        _ => {}
     }
     (ControlFlow::Continue(()), is_pending)
 }

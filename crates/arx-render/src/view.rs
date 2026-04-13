@@ -378,10 +378,42 @@ fn render_window(
 /// leaving the final column blank as padding between the gutter and the
 /// text area.
 /// Paint a selection highlight over the cells that fall within the
-/// byte range `sel`. Walks each visible row, converts byte positions
-/// to screen columns, and applies a highlight face (blue background,
-/// white foreground) to the affected cells.
+/// selection region. Dispatches to linear or rectangle painting.
 fn paint_selection(
+    window: &WindowState,
+    sel: &crate::view_state::Selection,
+    rect: Rect,
+    gutter_width: u16,
+    text_width: u16,
+    grid: &mut CellGrid,
+) {
+    match sel {
+        crate::view_state::Selection::Linear(range) => {
+            paint_linear_selection(window, range, rect, gutter_width, text_width, grid);
+        }
+        crate::view_state::Selection::Rectangle {
+            start_line,
+            end_line,
+            left_col,
+            right_col,
+        } => {
+            paint_rect_selection(
+                window,
+                *start_line,
+                *end_line,
+                *left_col,
+                *right_col,
+                rect,
+                gutter_width,
+                text_width,
+                grid,
+            );
+        }
+    }
+}
+
+/// Paint a linear (contiguous) selection highlight.
+fn paint_linear_selection(
     window: &WindowState,
     sel: &std::ops::Range<usize>,
     rect: Rect,
@@ -411,15 +443,12 @@ fn paint_selection(
         } else {
             rope.len_bytes()
         };
-        // Does this line overlap the selection?
         if line_end <= sel.start || line_start >= sel.end {
             continue;
         }
-        // Compute the column range within this line that's selected.
         let sel_start_in_line = sel.start.max(line_start) - line_start;
         let sel_end_in_line = sel.end.min(line_end) - line_start;
 
-        // Walk characters to convert byte offsets to display columns.
         let line_text = rope.slice_to_string(line_start..line_end);
         let mut byte_in_line: usize = 0;
         let mut display_col: u16 = 0;
@@ -430,18 +459,16 @@ fn paint_selection(
             if gi >= sel_end_in_line {
                 break;
             }
-            if g_end > sel_start_in_line && gi < sel_end_in_line {
-                // This grapheme overlaps the selection. Compute its
-                // screen column (accounting for horizontal scroll).
-                if display_col >= window.scroll.left_col
-                    && display_col - window.scroll.left_col < text_width
-                {
-                    let screen_col = text_x + (display_col - window.scroll.left_col);
-                    let y = rect.y + row_idx;
-                    for dx in 0..w {
-                        if let Some(cell) = grid.get_mut(screen_col + dx, y) {
-                            cell.face = sel_face;
-                        }
+            if g_end > sel_start_in_line
+                && gi < sel_end_in_line
+                && display_col >= window.scroll.left_col
+                && display_col - window.scroll.left_col < text_width
+            {
+                let screen_col = text_x + (display_col - window.scroll.left_col);
+                let y = rect.y + row_idx;
+                for dx in 0..w {
+                    if let Some(cell) = grid.get_mut(screen_col + dx, y) {
+                        cell.face = sel_face;
                     }
                 }
             }
@@ -449,6 +476,53 @@ fn paint_selection(
             byte_in_line = g_end;
         }
         let _ = byte_in_line;
+    }
+}
+
+/// Paint a rectangular (column block) selection highlight.
+#[allow(clippy::too_many_arguments)]
+fn paint_rect_selection(
+    window: &WindowState,
+    start_line: usize,
+    end_line: usize,
+    left_col: u16,
+    right_col: u16,
+    rect: Rect,
+    gutter_width: u16,
+    text_width: u16,
+    grid: &mut CellGrid,
+) {
+    if left_col == right_col || rect.is_empty() || text_width == 0 {
+        return;
+    }
+    let rope = window.buffer.rope();
+    let sel_face = ResolvedFace {
+        fg: Color::WHITE,
+        bg: Color::rgb(0x26, 0x4F, 0x78),
+        ..ResolvedFace::DEFAULT
+    };
+    let text_x = rect.x + gutter_width;
+
+    for row_idx in 0..rect.height {
+        let line_idx = window.scroll.top_line + row_idx as usize;
+        if line_idx >= rope.len_lines() {
+            break;
+        }
+        if line_idx < start_line || line_idx > end_line {
+            continue;
+        }
+        // Highlight the column range on this line.
+        for col in left_col..right_col {
+            if col >= window.scroll.left_col
+                && col - window.scroll.left_col < text_width
+            {
+                let screen_col = text_x + (col - window.scroll.left_col);
+                let y = rect.y + row_idx;
+                if let Some(cell) = grid.get_mut(screen_col, y) {
+                    cell.face = sel_face;
+                }
+            }
+        }
     }
 }
 

@@ -92,6 +92,12 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(SearchBackspace);
     reg.register(SearchHistoryPrev);
     reg.register(SearchHistoryNext);
+    reg.register(RectKill);
+    reg.register(RectCopy);
+    reg.register(RectYank);
+    reg.register(RectOpen);
+    reg.register(ModeEnterVisualBlock);
+    reg.register(ModeLeaveVisualBlock);
     reg.register(CompletionAccept);
     reg.register(CompletionDismiss);
     reg.register(CompletionNext);
@@ -452,7 +458,7 @@ impl CursorBufferEnd {
 /// itself, agent merges) go directly through
 /// [`crate::BufferManager::edit`] and deliberately *do not* show up
 /// in the undo tree — the user didn't type them.
-fn user_edit(
+pub(crate) fn user_edit(
     editor: &mut Editor,
     window_id: WindowId,
     buffer_id: BufferId,
@@ -720,7 +726,7 @@ impl BufferKillLine {
         let killed = rope.slice_to_string(cursor..end);
         let range: ByteRange = cursor..end;
         user_edit(cx.editor, window_id, buffer_id, range, "", cursor, cursor);
-        cx.editor.kill_ring_push(killed);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
     }
 }
 
@@ -745,7 +751,7 @@ impl BufferKillWord {
         let killed = text[cursor..end].to_owned();
         let range: ByteRange = cursor..end;
         user_edit(cx.editor, window_id, buffer_id, range, "", cursor, cursor);
-        cx.editor.kill_ring_push(killed);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
     }
 }
 
@@ -770,7 +776,7 @@ impl BufferKillWordBackward {
         let killed = text[start..cursor].to_owned();
         let range: ByteRange = start..cursor;
         user_edit(cx.editor, window_id, buffer_id, range, "", cursor, start);
-        cx.editor.kill_ring_push(killed);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
     }
 }
 
@@ -814,7 +820,7 @@ impl BufferKillRegion {
         let killed = buffer.rope().slice_to_string(start..end);
         let range: ByteRange = start..end;
         user_edit(cx.editor, window_id, buffer_id, range, "", cursor, start);
-        cx.editor.kill_ring_push(killed);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
         cx.editor.clear_mark(window_id);
     }
 }
@@ -842,7 +848,7 @@ impl BufferCopyRegion {
             return;
         };
         let copied = buffer.rope().slice_to_string(start..end);
-        cx.editor.kill_ring_push(copied);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(copied));
         cx.editor.clear_mark(window_id);
         cx.editor.set_status("Region copied");
     }
@@ -854,20 +860,27 @@ impl BufferYank {
         let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
             return;
         };
-        let Some(text) = cx.editor.kill_ring_top().map(str::to_owned) else {
+        let Some(entry) = cx.editor.kill_ring_top().cloned() else {
             cx.editor.set_status("Kill ring empty");
             return;
         };
-        let len = text.len();
-        user_edit(
-            cx.editor,
-            window_id,
-            buffer_id,
-            cursor..cursor,
-            &text,
-            cursor,
-            cursor + len,
-        );
+        match entry {
+            crate::editor::KilledText::Linear(text) => {
+                let len = text.len();
+                user_edit(
+                    cx.editor,
+                    window_id,
+                    buffer_id,
+                    cursor..cursor,
+                    &text,
+                    cursor,
+                    cursor + len,
+                );
+            }
+            crate::editor::KilledText::Rectangular(lines) => {
+                crate::column::yank_rectangle(cx.editor, window_id, buffer_id, &lines);
+            }
+        }
     }
 }
 
@@ -2149,6 +2162,178 @@ impl SearchHistoryNext {
         cx.editor.search_mut().history_next();
         apply_search_preview(cx.editor);
         apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rectangle (column block) operations
+// ---------------------------------------------------------------------------
+
+stock_cmd!(RectKill, RECT_KILL, "Kill (delete) the rectangular region between mark and cursor");
+impl RectKill {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+            cx.editor, buffer_id, mark, cursor,
+        ) else {
+            return;
+        };
+        let killed = crate::column::kill_rectangle(cx.editor, window_id, buffer_id, &rect);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Rectangular(killed));
+        cx.editor.clear_mark(window_id);
+        // Leave visual-block mode if active.
+        leave_visual_block_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(RectCopy, RECT_COPY, "Copy the rectangular region between mark and cursor");
+impl RectCopy {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+            cx.editor, buffer_id, mark, cursor,
+        ) else {
+            return;
+        };
+        // Extract text without deleting.
+        let mut copied_lines = Vec::new();
+        for line_idx in rect.start_line..=rect.end_line {
+            let text = cx.editor.buffers().get(buffer_id)
+                .map(|b| {
+                    let rope = b.rope();
+                    let start = rope.line_to_byte(line_idx);
+                    let end = if line_idx + 1 >= rope.len_lines() {
+                        rope.len_bytes()
+                    } else {
+                        rope.line_to_byte(line_idx + 1).saturating_sub(1)
+                    };
+                    rope.slice_to_string(start..end)
+                })
+                .unwrap_or_default();
+            let byte_start = crate::column::display_col_to_byte(&text, rect.left_col);
+            let byte_end = crate::column::display_col_to_byte(&text, rect.right_col);
+            copied_lines.push(text[byte_start..byte_end].to_owned());
+        }
+        cx.editor.kill_ring_push(crate::editor::KilledText::Rectangular(copied_lines));
+        cx.editor.clear_mark(window_id);
+        leave_visual_block_layer(cx.editor);
+        cx.editor.set_status("Rectangle copied");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(RectYank, RECT_YANK, "Yank (paste) the most recent rectangular kill");
+impl RectYank {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(entry) = cx.editor.kill_ring_top().cloned() else {
+            cx.editor.set_status("Kill ring empty");
+            return;
+        };
+        match entry {
+            crate::editor::KilledText::Rectangular(lines) => {
+                crate::column::yank_rectangle(cx.editor, window_id, buffer_id, &lines);
+            }
+            crate::editor::KilledText::Linear(text) => {
+                // Fall back to normal yank for linear text.
+                let cursor = cx.editor.windows().get(window_id)
+                    .map_or(0, |d| d.cursor_byte);
+                let len = text.len();
+                user_edit(
+                    cx.editor, window_id, buffer_id,
+                    cursor..cursor, &text, cursor, cursor + len,
+                );
+            }
+        }
+    }
+}
+
+stock_cmd!(RectOpen, RECT_OPEN, "Insert blank space into the rectangular region");
+impl RectOpen {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+            cx.editor, buffer_id, mark, cursor,
+        ) else {
+            return;
+        };
+        crate::column::open_rectangle(cx.editor, window_id, buffer_id, &rect);
+        cx.editor.clear_mark(window_id);
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vim visual-block mode
+// ---------------------------------------------------------------------------
+
+fn leave_visual_block_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("vim.visual-block") {
+        editor.keymap_mut().pop_layer();
+    }
+}
+
+stock_cmd!(
+    ModeEnterVisualBlock,
+    MODE_ENTER_VISUAL_BLOCK,
+    "Enter Vim visual-block selection mode"
+);
+impl ModeEnterVisualBlock {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor.set_mark_with_mode(
+            window_id,
+            cursor,
+            crate::editor::SelectionMode::Rectangle,
+        );
+        if !cx.editor.keymap().has_layer("vim.visual-block") {
+            cx.editor.keymap_mut().push_layer(Layer::new(
+                LayerId::from("vim.visual-block"),
+                Arc::new(arx_keymap::profiles::visual_block_layer()),
+            ));
+        }
+        cx.editor.set_status("-- VISUAL BLOCK --");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    ModeLeaveVisualBlock,
+    MODE_LEAVE_VISUAL_BLOCK,
+    "Leave Vim visual-block selection mode"
+);
+impl ModeLeaveVisualBlock {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let window_id = cx.editor.windows().active();
+        if let Some(wid) = window_id {
+            cx.editor.clear_mark(wid);
+        }
+        leave_visual_block_layer(cx.editor);
+        cx.editor.clear_status();
         cx.editor.mark_dirty();
     }
 }

@@ -276,9 +276,8 @@ pub struct WindowState {
     pub cursors: SmallVec<[Cursor; 1]>,
     pub scroll: ScrollPosition,
     pub gutter: GutterConfig,
-    /// Selection region (mark..cursor or cursor..mark) as a byte
-    /// range in the buffer. `None` when no mark is set.
-    pub selection: Option<std::ops::Range<usize>>,
+    /// Selection region. `None` when no mark is set.
+    pub selection: Option<Selection>,
 }
 
 impl WindowState {
@@ -286,6 +285,21 @@ impl WindowState {
     pub fn primary_cursor(&self) -> &Cursor {
         &self.cursors[0]
     }
+}
+
+/// A selection region — either a contiguous byte range or a
+/// rectangular column block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Selection {
+    /// Linear (contiguous) selection between two byte offsets.
+    Linear(std::ops::Range<usize>),
+    /// Rectangular (column block) selection.
+    Rectangle {
+        start_line: usize,
+        end_line: usize,
+        left_col: u16,
+        right_col: u16,
+    },
 }
 
 /// A cursor in a buffer. `byte_offset` is the anchor; the optional
