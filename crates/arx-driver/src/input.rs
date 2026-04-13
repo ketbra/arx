@@ -150,11 +150,31 @@ async fn handle_key(
 
     // Check if the active pane is a terminal. If so, forward the
     // raw keystroke to the PTY — unless it's the terminal-escape
-    // key (`C-\`), which breaks out to the normal keymap so the
-    // user can switch panes, close the terminal, etc.
+    // key (`C-\`), which cycles focus to the next window so the
+    // user can interact with buffer panes, close the terminal, etc.
     let is_terminal_escape = key.modifiers.contains(KeyModifiers::CONTROL)
         && key.code == KeyCode::Char('\\');
-    if !is_terminal_escape {
+    if is_terminal_escape {
+        // C-\ while a terminal is focused: cycle to the next window.
+        let was_terminal = bus
+            .invoke(|editor| {
+                let Some(active) = editor.windows().active() else {
+                    return false;
+                };
+                if !editor.is_terminal(active) {
+                    return false;
+                }
+                if editor.windows_mut().focus_next().is_some() {
+                    editor.mark_dirty();
+                    editor.ensure_active_cursor_visible();
+                }
+                true
+            })
+            .await;
+        if let Ok(true) = was_terminal {
+            return (ControlFlow::Continue(()), false);
+        }
+    } else {
         let forwarded = bus
             .invoke(move |editor| {
                 let Some(active) = editor.windows().active() else {
