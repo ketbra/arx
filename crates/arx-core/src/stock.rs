@@ -1853,7 +1853,7 @@ fn ensure_palette_layer(editor: &mut Editor) {
     if editor.keymap().has_layer("palette") {
         return;
     }
-    editor.keymap_mut().push_layer(Layer::new(
+    editor.keymap_mut().push_layer(Layer::absorbing(
         LayerId::from("palette"),
         Arc::new(arx_keymap::profiles::palette_layer()),
     ));
@@ -2678,7 +2678,7 @@ fn ensure_search_layer(editor: &mut Editor) {
     if editor.keymap().has_layer("search") {
         return;
     }
-    editor.keymap_mut().push_layer(Layer::new(
+    editor.keymap_mut().push_layer(Layer::absorbing(
         LayerId::from("search"),
         Arc::new(arx_keymap::profiles::search_layer()),
     ));
@@ -3764,7 +3764,7 @@ impl CompletionTrigger {
 
         // Push the completion keymap layer.
         if !cx.editor.keymap().has_layer("completion") {
-            cx.editor.keymap_mut().push_layer(Layer::new(
+            cx.editor.keymap_mut().push_layer(Layer::absorbing(
                 LayerId::from("completion"),
                 Arc::new(arx_keymap::profiles::completion_layer()),
             ));
