@@ -15,29 +15,8 @@
 
 use std::sync::Arc;
 
-use crate::commands::{
-    BUFFER_CLOSE, BUFFER_COPY_REGION, BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_FIND_FILE,
-    BUFFER_KILL_LINE, BUFFER_KILL_REGION, BUFFER_KILL_WORD, BUFFER_KILL_WORD_BACKWARD,
-    BUFFER_NEWLINE, BUFFER_OPEN_LINE, BUFFER_REDO, BUFFER_SAVE, BUFFER_SET_MARK, BUFFER_SWITCH,
-    BUFFER_TRANSPOSE_CHARS, BUFFER_UNDO, BUFFER_YANK, COMMAND_PALETTE_BACKSPACE,
-    COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE, COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN,
-    COMMAND_PALETTE_PREV, COMMAND_PALETTE_HISTORY_NEXT, COMMAND_PALETTE_HISTORY_PREV,
-    COMPLETION_ACCEPT, COMPLETION_DISMISS, COMPLETION_NEXT,
-    SEARCH_BACKSPACE, SEARCH_CLOSE, SEARCH_EXECUTE, SEARCH_HISTORY_NEXT,
-    SEARCH_HISTORY_PREV, SEARCH_NEXT, SEARCH_OPEN, SEARCH_PAGE_DOWN, SEARCH_PAGE_UP,
-    SEARCH_PREV, SEARCH_TOGGLE_MODE,
-    COMPLETION_PAGE_DOWN, COMPLETION_PAGE_UP, COMPLETION_PREV,
-    COMPLETION_TRIGGER, CURSOR_BUFFER_END,
-    LSP_HOVER, MODE_ENTER_VISUAL_BLOCK, MODE_LEAVE_VISUAL_BLOCK,
-    RECT_COPY, RECT_KILL, RECT_OPEN, RECT_YANK, TERMINAL_OPEN,
-    CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
-    CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_CANCEL,
-    EDITOR_DESCRIBE_KEY, EDITOR_QUIT, LSP_NEXT_DIAGNOSTIC, LSP_PREV_DIAGNOSTIC,
-    MODE_ENTER_INSERT, MODE_LEAVE_INSERT,
-    SCROLL_PAGE_DOWN, SCROLL_PAGE_UP, SCROLL_RECENTER, WINDOW_CLOSE, WINDOW_DELETE_OTHER,
-    WINDOW_FOCUS_NEXT, WINDOW_FOCUS_PREV,
-    WINDOW_SPLIT_HORIZONTAL, WINDOW_SPLIT_VERTICAL,
-};
+#[allow(clippy::wildcard_imports)]
+use crate::commands::*;
 use crate::engine::CountMode;
 use crate::keymap::Keymap;
 
@@ -86,6 +65,9 @@ pub fn emacs() -> Profile {
     m.bind_str("M-b", CURSOR_WORD_BACKWARD).unwrap();
     m.bind_str("M-<", CURSOR_BUFFER_START).unwrap();
     m.bind_str("M->", CURSOR_BUFFER_END).unwrap();
+    // Paragraph motion.
+    m.bind_str("C-<Up>", CURSOR_PARAGRAPH_BACKWARD).unwrap();
+    m.bind_str("C-<Down>", CURSOR_PARAGRAPH_FORWARD).unwrap();
 
     // Basic editing.
     m.bind_str("<Enter>", BUFFER_NEWLINE).unwrap();
@@ -93,7 +75,12 @@ pub fn emacs() -> Profile {
     m.bind_str("<Delete>", BUFFER_DELETE_FORWARD).unwrap();
     m.bind_str("C-d", BUFFER_DELETE_FORWARD).unwrap();
     m.bind_str("C-t", BUFFER_TRANSPOSE_CHARS).unwrap();
+    m.bind_str("M-t", BUFFER_TRANSPOSE_WORDS).unwrap();
     m.bind_str("C-o", BUFFER_OPEN_LINE).unwrap();
+    m.bind_str("M-^", BUFFER_JOIN_LINES).unwrap();
+    m.bind_str("M-<Up>", BUFFER_MOVE_LINE_UP).unwrap();
+    m.bind_str("M-<Down>", BUFFER_MOVE_LINE_DOWN).unwrap();
+    m.bind_str("M-;", BUFFER_COMMENT_TOGGLE).unwrap();
 
     // Kill / yank / mark.
     m.bind_str("C-k", BUFFER_KILL_LINE).unwrap();
@@ -102,7 +89,10 @@ pub fn emacs() -> Profile {
     m.bind_str("C-w", BUFFER_KILL_REGION).unwrap();
     m.bind_str("M-w", BUFFER_COPY_REGION).unwrap();
     m.bind_str("C-y", BUFFER_YANK).unwrap();
+    m.bind_str("M-y", BUFFER_YANK_POP).unwrap();
     m.bind_str("C-<Space>", BUFFER_SET_MARK).unwrap();
+    m.bind_str("C-x C-x", BUFFER_EXCHANGE_POINT_MARK).unwrap();
+    m.bind_str("C-x h", BUFFER_MARK_WHOLE).unwrap();
 
     // Scrolling.
     m.bind_str("<PageUp>", SCROLL_PAGE_UP).unwrap();
@@ -142,10 +132,21 @@ pub fn emacs() -> Profile {
     // Interactive buffer search (swiper-style).
     m.bind_str("C-s", SEARCH_OPEN).unwrap();
 
+    // Goto.
+    m.bind_str("M-g g", GOTO_LINE).unwrap();
+    m.bind_str("M-g M-g", GOTO_LINE).unwrap();
+
     // LSP / diagnostic.
     m.bind_str("C-c l h", LSP_HOVER).unwrap();
     m.bind_str("M-n", LSP_NEXT_DIAGNOSTIC).unwrap();
     m.bind_str("M-p", LSP_PREV_DIAGNOSTIC).unwrap();
+    m.bind_str("M-.", LSP_GOTO_DEFINITION).unwrap();
+    m.bind_str("M-,", LSP_POP_BACK).unwrap();
+
+    // Tree-sitter navigation.
+    m.bind_str("C-M-a", TREESITTER_PREV_FUNCTION).unwrap();
+    m.bind_str("C-M-e", TREESITTER_NEXT_FUNCTION).unwrap();
+    m.bind_str("C-M-u", TREESITTER_PARENT_NODE).unwrap();
 
     // Terminal.
     m.bind_str("C-x t", TERMINAL_OPEN).unwrap();
@@ -340,8 +341,25 @@ pub fn vim() -> Profile {
     // unconditional end-of-buffer.
     normal.bind_str("w", CURSOR_WORD_FORWARD).unwrap();
     normal.bind_str("b", CURSOR_WORD_BACKWARD).unwrap();
+    normal.bind_str("e", CURSOR_END_OF_WORD).unwrap();
     normal.bind_str("g g", CURSOR_BUFFER_START).unwrap();
     normal.bind_str("G", CURSOR_BUFFER_END).unwrap();
+    // Paragraph motion.
+    normal.bind_str("{", CURSOR_PARAGRAPH_BACKWARD).unwrap();
+    normal.bind_str("}", CURSOR_PARAGRAPH_FORWARD).unwrap();
+    // Find char on line.
+    normal.bind_str("f", CURSOR_FIND_CHAR_FORWARD).unwrap();
+    normal.bind_str("F", CURSOR_FIND_CHAR_BACKWARD).unwrap();
+    normal.bind_str("t", CURSOR_TILL_CHAR_FORWARD).unwrap();
+    normal.bind_str("T", CURSOR_TILL_CHAR_BACKWARD).unwrap();
+    normal.bind_str(";", CURSOR_REPEAT_FIND).unwrap();
+    normal.bind_str(",", CURSOR_REPEAT_FIND_REVERSE).unwrap();
+    // Matching bracket.
+    normal.bind_str("%", CURSOR_MATCHING_BRACKET).unwrap();
+    // Screen position.
+    normal.bind_str("H", CURSOR_SCREEN_TOP).unwrap();
+    normal.bind_str("M", CURSOR_SCREEN_MIDDLE).unwrap();
+    normal.bind_str("L", CURSOR_SCREEN_BOTTOM).unwrap();
     // `:` opens the command palette as a stand-in for the ex-command
     // line until Phase 2 wires up a real ex-prompt.
     normal.bind_str(":", COMMAND_PALETTE_OPEN).unwrap();
@@ -349,15 +367,39 @@ pub fn vim() -> Profile {
     normal.bind_str("a", MODE_ENTER_INSERT).unwrap(); // simplified: no trailing cursor move yet
     normal.bind_str("o", MODE_ENTER_INSERT).unwrap(); // simplified: no newline-below yet
     normal.bind_str("x", BUFFER_DELETE_FORWARD).unwrap();
+    // Line operations.
+    normal.bind_str("J", BUFFER_JOIN_LINES).unwrap();
+    normal.bind_str("d d", BUFFER_DELETE_LINE).unwrap();
+    normal.bind_str("y y", BUFFER_YANK_LINE).unwrap();
+    normal.bind_str("c c", BUFFER_CHANGE_LINE).unwrap();
+    normal.bind_str("D", BUFFER_DELETE_TO_EOL).unwrap();
+    normal.bind_str("C", BUFFER_CHANGE_TO_EOL).unwrap();
+    normal.bind_str("Y", BUFFER_YANK_TO_EOL).unwrap();
+    normal.bind_str("> >", BUFFER_INDENT_LINE).unwrap();
+    normal.bind_str("< <", BUFFER_DEDENT_LINE).unwrap();
+    normal.bind_str("g c", BUFFER_COMMENT_TOGGLE).unwrap();
     // Interactive buffer search (Vim `/` in normal mode).
     normal.bind_str("/", SEARCH_OPEN).unwrap();
     // Undo / redo: Vim's canonical `u` in normal mode, `C-r` for redo.
     normal.bind_str("u", BUFFER_UNDO).unwrap();
     normal.bind_str("C-r", BUFFER_REDO).unwrap();
+    // Scroll.
+    normal.bind_str("C-d", SCROLL_HALF_PAGE_DOWN).unwrap();
+    normal.bind_str("C-u", SCROLL_HALF_PAGE_UP).unwrap();
+    normal.bind_str("C-f", SCROLL_PAGE_DOWN).unwrap();
+    normal.bind_str("C-b", SCROLL_PAGE_UP).unwrap();
+    normal.bind_str("z t", SCROLL_CURSOR_TOP).unwrap();
+    normal.bind_str("z z", SCROLL_RECENTER).unwrap();
+    normal.bind_str("z b", SCROLL_CURSOR_BOTTOM).unwrap();
     // LSP / diagnostic navigation.
     normal.bind_str("K", LSP_HOVER).unwrap();
     normal.bind_str("] d", LSP_NEXT_DIAGNOSTIC).unwrap();
     normal.bind_str("[ d", LSP_PREV_DIAGNOSTIC).unwrap();
+    normal.bind_str("g d", LSP_GOTO_DEFINITION).unwrap();
+    normal.bind_str("C-t", LSP_POP_BACK).unwrap();
+    // Tree-sitter navigation.
+    normal.bind_str("] f", TREESITTER_NEXT_FUNCTION).unwrap();
+    normal.bind_str("[ f", TREESITTER_PREV_FUNCTION).unwrap();
     // Visual block mode (column selection).
     normal.bind_str("C-v", MODE_ENTER_VISUAL_BLOCK).unwrap();
 

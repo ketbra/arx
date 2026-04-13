@@ -30,6 +30,32 @@ pub const CURSOR_WORD_BACKWARD: &str = "cursor.word-backward";
 pub const CURSOR_BUFFER_START: &str = "cursor.buffer-start";
 /// Move the primary cursor to the end of the buffer.
 pub const CURSOR_BUFFER_END: &str = "cursor.buffer-end";
+/// Move the primary cursor to the end of the current/next word.
+pub const CURSOR_END_OF_WORD: &str = "cursor.end-of-word";
+/// Move forward to the next blank-line boundary (paragraph).
+pub const CURSOR_PARAGRAPH_FORWARD: &str = "cursor.paragraph-forward";
+/// Move backward to the previous blank-line boundary (paragraph).
+pub const CURSOR_PARAGRAPH_BACKWARD: &str = "cursor.paragraph-backward";
+/// Jump to the matching bracket / paren / brace.
+pub const CURSOR_MATCHING_BRACKET: &str = "cursor.matching-bracket";
+/// Move cursor to the top of the visible screen.
+pub const CURSOR_SCREEN_TOP: &str = "cursor.screen-top";
+/// Move cursor to the middle of the visible screen.
+pub const CURSOR_SCREEN_MIDDLE: &str = "cursor.screen-middle";
+/// Move cursor to the bottom of the visible screen.
+pub const CURSOR_SCREEN_BOTTOM: &str = "cursor.screen-bottom";
+/// Find char forward on current line (Vim `f`).
+pub const CURSOR_FIND_CHAR_FORWARD: &str = "cursor.find-char-forward";
+/// Find char backward on current line (Vim `F`).
+pub const CURSOR_FIND_CHAR_BACKWARD: &str = "cursor.find-char-backward";
+/// Move to just before char forward (Vim `t`).
+pub const CURSOR_TILL_CHAR_FORWARD: &str = "cursor.till-char-forward";
+/// Move to just after char backward (Vim `T`).
+pub const CURSOR_TILL_CHAR_BACKWARD: &str = "cursor.till-char-backward";
+/// Repeat the last find-char / till-char motion.
+pub const CURSOR_REPEAT_FIND: &str = "cursor.repeat-find";
+/// Repeat the last find-char / till-char motion in reverse.
+pub const CURSOR_REPEAT_FIND_REVERSE: &str = "cursor.repeat-find-reverse";
 
 /// Insert a newline at the cursor.
 pub const BUFFER_NEWLINE: &str = "buffer.newline";
@@ -79,6 +105,52 @@ pub const SCROLL_PAGE_DOWN: &str = "scroll.page-down";
 pub const BUFFER_OPEN_LINE: &str = "buffer.open-line";
 /// Transpose (swap) the two characters around the cursor.
 pub const BUFFER_TRANSPOSE_CHARS: &str = "buffer.transpose-chars";
+/// Transpose (swap) the two words around the cursor.
+pub const BUFFER_TRANSPOSE_WORDS: &str = "buffer.transpose-words";
+/// Join current line with the next line, collapsing whitespace.
+pub const BUFFER_JOIN_LINES: &str = "buffer.join-lines";
+/// Duplicate the current line below.
+pub const BUFFER_DUPLICATE_LINE: &str = "buffer.duplicate-line";
+/// Move the current line up one position.
+pub const BUFFER_MOVE_LINE_UP: &str = "buffer.move-line-up";
+/// Move the current line down one position.
+pub const BUFFER_MOVE_LINE_DOWN: &str = "buffer.move-line-down";
+/// Indent the current line by one level.
+pub const BUFFER_INDENT_LINE: &str = "buffer.indent-line";
+/// Dedent the current line by one level.
+pub const BUFFER_DEDENT_LINE: &str = "buffer.dedent-line";
+/// Toggle line comment (language-aware).
+pub const BUFFER_COMMENT_TOGGLE: &str = "buffer.comment-toggle";
+/// Select the entire buffer (set mark at start, cursor at end).
+pub const BUFFER_MARK_WHOLE: &str = "buffer.mark-whole";
+/// Exchange point (cursor) and mark.
+pub const BUFFER_EXCHANGE_POINT_MARK: &str = "buffer.exchange-point-mark";
+/// Cycle the kill ring after a yank (yank-pop).
+pub const BUFFER_YANK_POP: &str = "buffer.yank-pop";
+/// Delete the current line (Vim `dd`).
+pub const BUFFER_DELETE_LINE: &str = "buffer.delete-line";
+/// Yank (copy) the current line (Vim `yy`).
+pub const BUFFER_YANK_LINE: &str = "buffer.yank-line";
+/// Change the current line: delete and enter insert mode (Vim `cc`).
+pub const BUFFER_CHANGE_LINE: &str = "buffer.change-line";
+/// Delete from cursor to end of line (Vim `D`).
+pub const BUFFER_DELETE_TO_EOL: &str = "buffer.delete-to-eol";
+/// Change from cursor to end of line (Vim `C`).
+pub const BUFFER_CHANGE_TO_EOL: &str = "buffer.change-to-eol";
+/// Yank from cursor to end of line (Vim `Y`).
+pub const BUFFER_YANK_TO_EOL: &str = "buffer.yank-to-eol";
+
+/// Scroll down by half a page (Vim `C-d`).
+pub const SCROLL_HALF_PAGE_DOWN: &str = "scroll.half-page-down";
+/// Scroll up by half a page (Vim `C-u`).
+pub const SCROLL_HALF_PAGE_UP: &str = "scroll.half-page-up";
+/// Scroll so the cursor line is at the top of the window.
+pub const SCROLL_CURSOR_TOP: &str = "scroll.cursor-top";
+/// Scroll so the cursor line is at the bottom of the window.
+pub const SCROLL_CURSOR_BOTTOM: &str = "scroll.cursor-bottom";
+
+/// Go to a specific line number (opens prompt).
+pub const GOTO_LINE: &str = "goto.line";
 
 /// Request editor shutdown.
 pub const EDITOR_QUIT: &str = "editor.quit";
@@ -136,6 +208,17 @@ pub const LSP_HOVER: &str = "lsp.hover";
 pub const LSP_NEXT_DIAGNOSTIC: &str = "lsp.next-diagnostic";
 /// Jump to the previous diagnostic in the current buffer.
 pub const LSP_PREV_DIAGNOSTIC: &str = "lsp.prev-diagnostic";
+/// Jump to the definition of the symbol under the cursor.
+pub const LSP_GOTO_DEFINITION: &str = "lsp.goto-definition";
+/// Return to the previous location after a goto-definition jump.
+pub const LSP_POP_BACK: &str = "lsp.pop-back";
+
+/// Jump to the next function/method definition (tree-sitter).
+pub const TREESITTER_NEXT_FUNCTION: &str = "treesitter.next-function";
+/// Jump to the previous function/method definition (tree-sitter).
+pub const TREESITTER_PREV_FUNCTION: &str = "treesitter.prev-function";
+/// Jump to the enclosing parent syntax node (tree-sitter).
+pub const TREESITTER_PARENT_NODE: &str = "treesitter.parent-node";
 
 /// Trigger code completion at the cursor position.
 pub const COMPLETION_TRIGGER: &str = "completion.trigger";

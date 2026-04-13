@@ -70,6 +70,24 @@ pub enum KilledText {
     Rectangular(Vec<String>),
 }
 
+/// State for repeating the last `f`/`F`/`t`/`T` find-char motion.
+#[derive(Debug, Clone, Copy)]
+pub struct FindCharState {
+    /// The character that was searched for.
+    pub ch: char,
+    /// The kind of find (forward/backward, to/till).
+    pub kind: FindCharKind,
+}
+
+/// What kind of find-char motion was performed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindCharKind {
+    ForwardTo,
+    ForwardTill,
+    BackwardTo,
+    BackwardTill,
+}
+
 /// The editor's in-process state.
 ///
 /// Owns every piece of mutable editor state today. Lives on the event loop
@@ -92,6 +110,11 @@ pub struct Editor {
     terminal_redraw: Option<Arc<tokio::sync::Notify>>,
     #[cfg(feature = "lsp")]
     lsp_notifier: Option<tokio::sync::mpsc::Sender<arx_lsp::LspEvent>>,
+    /// Navigation stack for LSP go-to-definition / pop-back.
+    /// Each entry is `(buffer_id, byte_offset)`.
+    nav_stack: Vec<(arx_buffer::BufferId, usize)>,
+    /// Last find-char state for `;` and `,` repeat.
+    last_find_char: Option<FindCharState>,
     /// Which-key overlay: list of `(key, command)` pairs to show
     /// when the user pauses on a prefix chord.
     which_key: Option<Vec<(String, String)>>,
@@ -154,6 +177,8 @@ impl Editor {
             palette: CommandPalette::new(),
             completion: CompletionPopup::new(),
             search: crate::search::BufferSearch::new(),
+            nav_stack: Vec::new(),
+            last_find_char: None,
             terminals: HashMap::new(),
             terminal_redraw: None,
             #[cfg(feature = "syntax")]
@@ -481,6 +506,29 @@ impl Editor {
     /// Clear the mark for `window_id`.
     pub fn clear_mark(&mut self, window_id: crate::WindowId) {
         self.marks.remove(&window_id);
+    }
+
+    /// Push a location onto the navigation stack (for pop-back).
+    pub fn nav_stack_push(&mut self, buffer_id: arx_buffer::BufferId, byte: usize) {
+        self.nav_stack.push((buffer_id, byte));
+        if self.nav_stack.len() > 128 {
+            self.nav_stack.remove(0);
+        }
+    }
+
+    /// Pop the most recent location from the navigation stack.
+    pub fn nav_stack_pop(&mut self) -> Option<(arx_buffer::BufferId, usize)> {
+        self.nav_stack.pop()
+    }
+
+    /// Get the last find-char state (for `;` and `,` repeat).
+    pub fn last_find_char(&self) -> Option<FindCharState> {
+        self.last_find_char
+    }
+
+    /// Set the last find-char state.
+    pub fn set_last_find_char(&mut self, state: FindCharState) {
+        self.last_find_char = Some(state);
     }
 
     /// Set a transient status message shown in the modeline. Cleared
