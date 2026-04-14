@@ -203,6 +203,9 @@ macro_rules! stock_cmd {
 stock_cmd!(CursorLeft, CURSOR_LEFT, "Move the cursor one grapheme left");
 impl CursorLeft {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[D") {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
@@ -230,6 +233,9 @@ impl CursorLeft {
 stock_cmd!(CursorRight, CURSOR_RIGHT, "Move the cursor one grapheme right");
 impl CursorRight {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[C") {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
@@ -258,6 +264,9 @@ impl CursorRight {
 stock_cmd!(CursorUp, CURSOR_UP, "Move the cursor up one line");
 impl CursorUp {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[A") {
+            return;
+        }
         let delta = -(cx.count.max(1) as i32);
         move_cursor_vertical_by(cx.editor, delta);
         cx.editor.mark_dirty();
@@ -267,6 +276,9 @@ impl CursorUp {
 stock_cmd!(CursorDown, CURSOR_DOWN, "Move the cursor down one line");
 impl CursorDown {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[B") {
+            return;
+        }
         let delta = cx.count.max(1) as i32;
         move_cursor_vertical_by(cx.editor, delta);
         cx.editor.mark_dirty();
@@ -319,6 +331,9 @@ stock_cmd!(
 );
 impl CursorLineStart {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[H") {
+            return;
+        }
         let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
             return;
         };
@@ -341,6 +356,9 @@ stock_cmd!(
 );
 impl CursorLineEnd {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[F") {
+            return;
+        }
         let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
             return;
         };
@@ -872,6 +890,15 @@ pub(crate) fn user_edit(
 /// registry for literal text input without a dedicated command
 /// binding.
 pub fn insert_at_cursor(editor: &mut Editor, text: &str) {
+    // If the active pane is a terminal, forward the text to the PTY
+    // rather than attempting to edit a buffer.
+    if let Some(active) = editor.windows().active() {
+        if let Some(term) = editor.terminal(active) {
+            term.write(text.as_bytes().to_vec());
+            editor.mark_dirty();
+            return;
+        }
+    }
     let Some((window_id, buffer_id, cursor)) = active(editor) else {
         return;
     };
@@ -887,6 +914,17 @@ pub fn insert_at_cursor(editor: &mut Editor, text: &str) {
     );
 }
 
+/// Forward a key to the active pane's terminal PTY if one is focused.
+/// Returns `true` if forwarded, `false` if the active pane is a buffer
+/// (in which case the caller should do the normal buffer action).
+fn forward_to_terminal(editor: &mut Editor, bytes: &[u8]) -> bool {
+    let Some(active) = editor.windows().active() else { return false };
+    let Some(term) = editor.terminal(active) else { return false };
+    term.write(bytes.to_vec());
+    editor.mark_dirty();
+    true
+}
+
 stock_cmd!(
     BufferNewline,
     BUFFER_NEWLINE,
@@ -894,6 +932,10 @@ stock_cmd!(
 );
 impl BufferNewline {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        // Terminal panes expect a carriage return for Enter, not LF.
+        if forward_to_terminal(cx.editor, b"\r") {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             insert_at_cursor(cx.editor, "\n");
@@ -908,6 +950,10 @@ stock_cmd!(
 );
 impl BufferDeleteBackward {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        // Terminal panes: forward backspace (0x7f) to the PTY.
+        if forward_to_terminal(cx.editor, &[0x7f]) {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
@@ -939,6 +985,10 @@ stock_cmd!(
 );
 impl BufferDeleteForward {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        // Terminal panes: forward Delete (ESC [ 3 ~) to the PTY.
+        if forward_to_terminal(cx.editor, b"\x1b[3~") {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
@@ -1824,7 +1874,11 @@ impl ModeLeaveInsert {
                 .keymap_mut()
                 .set_count_mode(arx_keymap::CountMode::Accept);
             cx.editor.mark_dirty();
+            return;
         }
+        // No insert layer to leave — if a terminal pane is focused,
+        // forward Esc to the PTY so programs like vim/less work.
+        forward_to_terminal(cx.editor, b"\x1b");
     }
 }
 
