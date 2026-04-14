@@ -194,36 +194,52 @@ pub(crate) struct HitTest {
     pub row: u16,
 }
 
+/// How a left-mouse-down event was produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClickKind {
+    /// First click: move cursor, clear selection.
+    Single,
+    /// Shift+click: move cursor, keep the current mark (extend
+    /// selection). If no mark exists, plants one at the previous
+    /// cursor position so the click produces a selection.
+    ShiftClick,
+    /// Second quick click at the same position: select the word at
+    /// the click.
+    DoubleClick,
+    /// Third quick click at the same position: select the entire
+    /// line at the click.
+    TripleClick,
+    /// Mouse drag: move the cursor while the mark stays where it was
+    /// (or was anchored on mouse-down), creating a selection.
+    Drag,
+}
+
 /// Handle a left-click or drag at screen position `(x, y)`.
-/// `is_drag` = false: focus the pane and move the cursor, clearing
-/// any active selection. `is_drag` = true: keep mark where it was
-/// (or set it at the initial cursor position on first drag) and
-/// move the cursor, creating a selection from mark to cursor.
+/// See [`ClickKind`] for the semantics of each variant.
 pub(crate) fn hit_test_and_click(
     editor: &mut arx_core::Editor,
     cols: u16,
     rows: u16,
     x: u16,
     y: u16,
-    is_drag: bool,
+    kind: ClickKind,
 ) {
     let Some(hit) = hit_test_at(editor, cols, rows, x, y) else {
         return;
     };
 
-    // For terminal panes: focus the pane (so subsequent keystrokes
-    // are forwarded to the PTY) but don't try to set a "cursor" —
-    // the terminal handles its own cursor.
+    // For terminal panes: focus on a fresh click but don't try to
+    // place a "cursor" — the terminal handles its own cursor.
     if hit.is_terminal {
-        if !is_drag {
+        if !matches!(kind, ClickKind::Drag) {
             editor.windows_mut().set_active(hit.window_id);
             editor.mark_dirty();
         }
         return;
     }
 
-    // Buffer pane: focus, then move cursor to the hit position.
-    if !is_drag {
+    // Buffer pane: focus on a fresh click.
+    if !matches!(kind, ClickKind::Drag) {
         editor.windows_mut().set_active(hit.window_id);
     }
 
@@ -246,24 +262,100 @@ pub(crate) fn hit_test_and_click(
     };
     let line_text = rope.slice_to_string(line_start..line_end);
     let target_col = (hit.text_col as usize).saturating_add(data.scroll_left_col as usize);
-    let byte_in_line = arx_core::column::display_col_to_byte(&line_text, target_col as u16);
+    let byte_in_line =
+        arx_core::column::display_col_to_byte(&line_text, target_col as u16);
     let target_byte = line_start + byte_in_line.min(line_end - line_start);
 
-    // On the initial click (not a drag), clear any existing mark so
-    // the selection disappears. On drag, if there's no mark yet,
-    // place it at the current cursor position so the drag creates
-    // a selection from the click point.
-    if is_drag {
-        if editor.mark(hit.window_id).is_none() {
-            editor.set_mark(hit.window_id, data.cursor_byte);
+    match kind {
+        ClickKind::Single => {
+            editor.clear_mark(hit.window_id);
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = target_byte;
+            }
         }
-    } else {
-        editor.clear_mark(hit.window_id);
-    }
-    if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
-        w.cursor_byte = target_byte;
+        ClickKind::ShiftClick => {
+            // Extend selection: if no mark, anchor at old cursor so
+            // the click produces a visible selection.
+            if editor.mark(hit.window_id).is_none() {
+                editor.set_mark(hit.window_id, data.cursor_byte);
+            }
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = target_byte;
+            }
+        }
+        ClickKind::Drag => {
+            // Continue dragging: if no mark, anchor at the previous
+            // cursor so the drag creates a selection from where it
+            // started.
+            if editor.mark(hit.window_id).is_none() {
+                editor.set_mark(hit.window_id, data.cursor_byte);
+            }
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = target_byte;
+            }
+        }
+        ClickKind::DoubleClick => {
+            // Select the word at target_byte.
+            let (word_start, word_end) = word_range_at(&line_text, byte_in_line);
+            let sel_start = line_start + word_start;
+            let sel_end = line_start + word_end;
+            editor.set_mark(hit.window_id, sel_start);
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = sel_end;
+            }
+        }
+        ClickKind::TripleClick => {
+            // Select the entire line (including trailing newline if
+            // one exists, so "delete selection" removes the line
+            // cleanly).
+            let sel_end = if target_line + 1 < rope.len_lines() {
+                rope.line_to_byte(target_line + 1)
+            } else {
+                rope.len_bytes()
+            };
+            editor.set_mark(hit.window_id, line_start);
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = sel_end;
+            }
+        }
     }
     editor.mark_dirty();
+}
+
+/// Find the start and end byte offsets of the word containing
+/// `byte_in_line` within `line_text`. If the position is on a
+/// non-word character, returns the range of the contiguous run of
+/// non-word non-whitespace characters (so e.g. double-clicking on a
+/// `->` selects the operator). Whitespace runs are preserved as-is.
+fn word_range_at(line_text: &str, byte_in_line: usize) -> (usize, usize) {
+    let bytes = line_text.as_bytes();
+    let len = bytes.len();
+    if len == 0 {
+        return (0, 0);
+    }
+    let pos = byte_in_line.min(len.saturating_sub(1));
+    let is_word_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let is_space = |b: u8| b == b' ' || b == b'\t';
+
+    let classify = |b: u8| -> u8 {
+        if is_word_char(b) {
+            0
+        } else if is_space(b) {
+            1
+        } else {
+            2
+        }
+    };
+    let target_class = classify(bytes[pos]);
+    let mut start = pos;
+    while start > 0 && classify(bytes[start - 1]) == target_class {
+        start -= 1;
+    }
+    let mut end = pos;
+    while end < len && classify(bytes[end]) == target_class {
+        end += 1;
+    }
+    (start, end)
 }
 
 /// Scroll the pane under `(x, y)` by `delta` lines (positive = down,
@@ -721,6 +813,41 @@ mod tests {
     use super::*;
     use arx_core::EventLoop;
     use arx_render::TestBackend;
+
+    #[test]
+    fn word_range_selects_alphanumeric_run() {
+        assert_eq!(word_range_at("hello world", 0), (0, 5));
+        assert_eq!(word_range_at("hello world", 2), (0, 5));
+        assert_eq!(word_range_at("hello world", 4), (0, 5));
+        assert_eq!(word_range_at("hello world", 6), (6, 11));
+        assert_eq!(word_range_at("hello world", 10), (6, 11));
+    }
+
+    #[test]
+    fn word_range_selects_whitespace_run() {
+        assert_eq!(word_range_at("a   b", 1), (1, 4));
+        assert_eq!(word_range_at("a   b", 2), (1, 4));
+        assert_eq!(word_range_at("a   b", 3), (1, 4));
+    }
+
+    #[test]
+    fn word_range_selects_punctuation_run() {
+        assert_eq!(word_range_at("foo->bar", 3), (3, 5));
+        assert_eq!(word_range_at("foo->bar", 4), (3, 5));
+        assert_eq!(word_range_at("a == b", 2), (2, 4));
+    }
+
+    #[test]
+    fn word_range_handles_underscore_as_word_char() {
+        assert_eq!(word_range_at("my_var = 1", 0), (0, 6));
+        assert_eq!(word_range_at("my_var = 1", 3), (0, 6));
+    }
+
+    #[test]
+    fn word_range_handles_empty_and_past_end() {
+        assert_eq!(word_range_at("", 0), (0, 0));
+        assert_eq!(word_range_at("abc", 100), (0, 3));
+    }
 
     #[tokio::test]
     async fn draws_the_current_buffer_into_the_backend() {

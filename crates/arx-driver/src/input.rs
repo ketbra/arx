@@ -15,6 +15,7 @@
 //! stream drains.
 
 use std::ops::ControlFlow;
+use std::time::{Duration as StdDuration, Instant};
 
 use crossterm::event::Event;
 use futures_util::StreamExt;
@@ -24,6 +25,42 @@ use arx_core::{CommandBus, Editor, KeyHandled};
 use arx_keymap::KeyChord;
 
 use crate::state::{SharedTerminalSize, Shutdown};
+
+/// Maximum time between consecutive clicks to count as a multi-click.
+const MULTI_CLICK_INTERVAL: StdDuration = StdDuration::from_millis(400);
+
+/// State for tracking double/triple clicks.
+#[derive(Debug, Clone, Copy, Default)]
+struct ClickState {
+    /// When the last left-mouse-down occurred.
+    last_time: Option<Instant>,
+    /// Screen (x, y) of the last click.
+    last_pos: (u16, u16),
+    /// How many consecutive clicks have landed at roughly the same
+    /// position within `MULTI_CLICK_INTERVAL`. `1` = single click,
+    /// `2` = double click, `3` = triple click. Caps at 3.
+    count: u8,
+}
+
+impl ClickState {
+    /// Record a new left-click at `(x, y)`. Returns the click count
+    /// (1, 2, or 3) after this click.
+    fn record(&mut self, x: u16, y: u16) -> u8 {
+        let now = Instant::now();
+        let is_continuation = self.last_time.is_some_and(|t| {
+            now.duration_since(t) <= MULTI_CLICK_INTERVAL
+                && self.last_pos == (x, y)
+        });
+        if is_continuation {
+            self.count = (self.count + 1).min(3);
+        } else {
+            self.count = 1;
+        }
+        self.last_time = Some(now);
+        self.last_pos = (x, y);
+        self.count
+    }
+}
 
 /// Everything the input task needs to run.
 pub struct InputTask<S>
@@ -64,6 +101,7 @@ where
             shutdown,
         } = self;
         let mut pending_prefix = false;
+        let mut click_state = ClickState::default();
         let which_key_delay = Duration::from_millis(500);
 
         loop {
@@ -76,7 +114,7 @@ where
                     event = events.next() => {
                         match event {
                             Some(Ok(ev)) => {
-                                let (flow, is_pending) = handle_with_pending(ev, &bus, &size).await;
+                                let (flow, is_pending) = handle_with_pending(ev, &bus, &size, &mut click_state).await;
                                 pending_prefix = is_pending;
                                 if flow.is_break() {
                                     debug!("shutdown requested from input");
@@ -103,7 +141,7 @@ where
                 match events.next().await {
                     Some(Ok(ev)) => {
                         trace!(?ev, "input event");
-                        let (flow, is_pending) = handle_with_pending(ev, &bus, &size).await;
+                        let (flow, is_pending) = handle_with_pending(ev, &bus, &size, &mut click_state).await;
                         pending_prefix = is_pending;
                         if flow.is_break() {
                             debug!("shutdown requested from input");
@@ -128,6 +166,7 @@ async fn handle_with_pending(
     event: Event,
     bus: &CommandBus,
     size: &SharedTerminalSize,
+    click_state: &mut ClickState,
 ) -> (ControlFlow<()>, bool) {
     match event {
         Event::Key(key) => handle_key(key, bus).await,
@@ -137,42 +176,78 @@ async fn handle_with_pending(
             (ControlFlow::Continue(()), false)
         }
         Event::Mouse(mev) => {
-            handle_mouse(mev, bus, size).await;
+            handle_mouse(mev, bus, size, click_state).await;
             (ControlFlow::Continue(()), false)
         }
         _ => (ControlFlow::Continue(()), false),
     }
 }
 
-/// Handle a mouse event: left-click moves the cursor to the hit
-/// position; left-drag updates the cursor while keeping the mark at
-/// the click position (creating a selection); wheel scrolls the pane.
+/// Handle a mouse event.
+///
+/// - Left-click (count=1): moves the cursor, clears selection. If
+///   Shift is held, extends the selection instead (keeps the mark).
+/// - Left-click (count=2): selects the word at the click.
+/// - Left-click (count=3): selects the entire line.
+/// - Left-drag: updates the cursor with the mark anchored at the
+///   click position, creating a selection.
+/// - Wheel up/down: scrolls the pane under the cursor.
 async fn handle_mouse(
     mev: crossterm::event::MouseEvent,
     bus: &CommandBus,
     size: &SharedTerminalSize,
+    click_state: &mut ClickState,
 ) {
-    use crossterm::event::{MouseButton, MouseEventKind};
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
     let (cols, rows) = size.get();
     let x = mev.column;
     let y = mev.row;
-    let _ = bus
-        .dispatch(move |editor| match mev.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                crate::render::hit_test_and_click(editor, cols, rows, x, y, false);
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                crate::render::hit_test_and_click(editor, cols, rows, x, y, true);
-            }
-            MouseEventKind::ScrollUp => {
-                crate::render::mouse_scroll(editor, cols, rows, x, y, -3);
-            }
-            MouseEventKind::ScrollDown => {
-                crate::render::mouse_scroll(editor, cols, rows, x, y, 3);
-            }
-            _ => {}
-        })
-        .await;
+    let shift = mev.modifiers.contains(KeyModifiers::SHIFT);
+    match mev.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let count = click_state.record(x, y);
+            let kind = match count {
+                2 => crate::render::ClickKind::DoubleClick,
+                3 => crate::render::ClickKind::TripleClick,
+                _ if shift => crate::render::ClickKind::ShiftClick,
+                _ => crate::render::ClickKind::Single,
+            };
+            let _ = bus
+                .dispatch(move |editor| {
+                    crate::render::hit_test_and_click(editor, cols, rows, x, y, kind);
+                })
+                .await;
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let _ = bus
+                .dispatch(move |editor| {
+                    crate::render::hit_test_and_click(
+                        editor,
+                        cols,
+                        rows,
+                        x,
+                        y,
+                        crate::render::ClickKind::Drag,
+                    );
+                })
+                .await;
+        }
+        MouseEventKind::ScrollUp => {
+            let _ = bus
+                .dispatch(move |editor| {
+                    crate::render::mouse_scroll(editor, cols, rows, x, y, -3);
+                })
+                .await;
+        }
+        MouseEventKind::ScrollDown => {
+            let _ = bus
+                .dispatch(move |editor| {
+                    crate::render::mouse_scroll(editor, cols, rows, x, y, 3);
+                })
+                .await;
+        }
+        _ => {}
+    }
 }
 
 async fn handle_key(
