@@ -2281,7 +2281,7 @@ fn apply_undo_record(
     // Inverting the edit means: at `offset`, replace the `inserted`
     // span with the `removed` bytes.
     let invert_range = record.offset..record.offset + record.inserted.len();
-    editor.buffers_mut().edit(
+    editor.edit_with_highlight(
         buffer_id,
         invert_range,
         &record.removed,
@@ -2302,7 +2302,7 @@ fn apply_redo_record(
     record: &EditRecord,
 ) {
     let redo_range = record.offset..record.offset + record.removed.len();
-    editor.buffers_mut().edit(
+    editor.edit_with_highlight(
         buffer_id,
         redo_range,
         &record.inserted,
