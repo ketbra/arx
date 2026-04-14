@@ -254,7 +254,21 @@ async fn handle_key(
     key: crossterm::event::KeyEvent,
     bus: &CommandBus,
 ) -> (ControlFlow<()>, bool) {
+    use crossterm::event::KeyEventKind;
+    // With the Kitty keyboard protocol enabled some terminals report
+    // both press and release events. We only want to act on press/repeat —
+    // releases would double-trigger bindings.
+    if matches!(key.kind, KeyEventKind::Release) {
+        return (ControlFlow::Continue(()), false);
+    }
+
     let chord = KeyChord::from(&key);
+    // Log the raw event and the derived chord. Users debugging
+    // key-binding issues (especially around Ctrl+/ / Ctrl+_ / M-<
+    // that terminals report inconsistently) can run with
+    // `RUST_LOG=arx_driver::input=debug` to see exactly what the
+    // terminal is sending.
+    debug!(?key, %chord, "key event");
 
     // Always route through the editor keymap first. Editor-level
     // bindings (window management, palette, search, etc.) take

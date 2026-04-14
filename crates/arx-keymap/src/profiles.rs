@@ -118,6 +118,9 @@ pub fn emacs() -> Profile {
     // matches the `undo-tree.el` convention for redo.
     m.bind_str("C-/", BUFFER_UNDO).unwrap();
     m.bind_str("C-_", BUFFER_UNDO).unwrap();
+    // Some terminals report Ctrl+Shift+/ as Ctrl+? (where `?` is the
+    // shifted form of `/` on US layouts). Bind it as undo too.
+    m.bind_str("C-?", BUFFER_UNDO).unwrap();
     m.bind_str("C-x u", BUFFER_UNDO).unwrap();
     m.bind_str("M-_", BUFFER_REDO).unwrap();
 

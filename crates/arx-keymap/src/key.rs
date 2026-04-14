@@ -378,4 +378,60 @@ mod tests {
         let chord = KeyChord::from(&ev);
         assert_eq!(chord, KeyChord::named(NamedKey::F(5)));
     }
+
+    // --- Ctrl+/ and Ctrl+_ normalization tests ---
+
+    #[test]
+    fn ctrl_slash_direct_works() {
+        // Modern terminals (Ghostty with Kitty protocol, etc.) send
+        // Ctrl+/ as Char('/') with CONTROL.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as XM};
+        let ev = KeyEvent::new(KeyCode::Char('/'), XM::CONTROL);
+        let chord = KeyChord::from(&ev);
+        assert_eq!(chord.key, Key::Char('/'));
+        assert!(chord.modifiers.ctrl);
+    }
+
+    #[test]
+    fn ctrl_underscore_direct_works() {
+        // Modern terminals send Ctrl+_ as Char('_') with CONTROL.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as XM};
+        let ev = KeyEvent::new(KeyCode::Char('_'), XM::CONTROL);
+        let chord = KeyChord::from(&ev);
+        assert_eq!(chord.key, Key::Char('_'));
+        assert!(chord.modifiers.ctrl);
+    }
+
+    #[test]
+    fn ctrl_shift_minus_normalizes_to_ctrl_underscore() {
+        // Some terminals report Ctrl+_ as Ctrl+Shift+-, since `_` is
+        // Shift+- on a US keyboard. Normalize to Ctrl+_.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as XM};
+        let ev = KeyEvent::new(KeyCode::Char('-'), XM::CONTROL | XM::SHIFT);
+        let chord = KeyChord::from(&ev);
+        assert_eq!(chord.key, Key::Char('_'));
+        assert!(chord.modifiers.ctrl);
+        assert!(!chord.modifiers.shift);
+    }
+
+    #[test]
+    fn ascii_0x1f_normalizes_to_ctrl_slash() {
+        // Legacy terminals send both Ctrl+/ and Ctrl+_ as the raw
+        // ASCII control byte 0x1F. Reconstruct as Ctrl+/.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as XM};
+        let ev = KeyEvent::new(KeyCode::Char('\x1f'), XM::NONE);
+        let chord = KeyChord::from(&ev);
+        assert_eq!(chord.key, Key::Char('/'));
+        assert!(chord.modifiers.ctrl);
+    }
+
+    #[test]
+    fn ascii_0x1f_with_ctrl_still_normalizes() {
+        // Some terminals send 0x1F with CONTROL modifier set.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as XM};
+        let ev = KeyEvent::new(KeyCode::Char('\x1f'), XM::CONTROL);
+        let chord = KeyChord::from(&ev);
+        assert_eq!(chord.key, Key::Char('/'));
+        assert!(chord.modifiers.ctrl);
+    }
 }

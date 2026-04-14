@@ -19,7 +19,10 @@ use std::io::{self, Stdout, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::{ExecutableCommand, cursor, terminal};
 use futures_util::Stream;
 use tokio::sync::Notify;
@@ -245,6 +248,7 @@ impl Driver {
 /// input task can't leave the user's terminal in a wedged state.
 struct TerminalGuard {
     enabled: bool,
+    keyboard_enhancements_pushed: bool,
 }
 
 impl TerminalGuard {
@@ -255,8 +259,21 @@ impl TerminalGuard {
         // Enable mouse reporting so the user can click to move the
         // cursor, drag to select, and scroll with the wheel.
         out.execute(EnableMouseCapture)?;
+        // Try to enable the Kitty keyboard protocol so modifier keys
+        // like Ctrl+/, Ctrl+_, and Ctrl+Shift+<char> are reported
+        // unambiguously. The terminal may refuse (e.g. plain xterm);
+        // that's fine — we fall back to legacy reporting.
+        let keyboard_enhancements_pushed = out
+            .execute(PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+            ))
+            .is_ok();
         out.flush()?;
-        Ok(Self { enabled: true })
+        Ok(Self {
+            enabled: true,
+            keyboard_enhancements_pushed,
+        })
     }
 }
 
@@ -266,6 +283,11 @@ impl Drop for TerminalGuard {
             return;
         }
         let mut out = io::stdout();
+        if self.keyboard_enhancements_pushed {
+            if let Err(err) = out.execute(PopKeyboardEnhancementFlags) {
+                warn!(%err, "failed to pop keyboard enhancement flags");
+            }
+        }
         if let Err(err) = out.execute(DisableMouseCapture) {
             warn!(%err, "failed to disable mouse capture");
         }
