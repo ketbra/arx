@@ -136,8 +136,43 @@ async fn handle_with_pending(
             let _ = bus.dispatch(Editor::mark_dirty).await;
             (ControlFlow::Continue(()), false)
         }
+        Event::Mouse(mev) => {
+            handle_mouse(mev, bus, size).await;
+            (ControlFlow::Continue(()), false)
+        }
         _ => (ControlFlow::Continue(()), false),
     }
+}
+
+/// Handle a mouse event: left-click moves the cursor to the hit
+/// position; left-drag updates the cursor while keeping the mark at
+/// the click position (creating a selection); wheel scrolls the pane.
+async fn handle_mouse(
+    mev: crossterm::event::MouseEvent,
+    bus: &CommandBus,
+    size: &SharedTerminalSize,
+) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (cols, rows) = size.get();
+    let x = mev.column;
+    let y = mev.row;
+    let _ = bus
+        .dispatch(move |editor| match mev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                crate::render::hit_test_and_click(editor, cols, rows, x, y, false);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                crate::render::hit_test_and_click(editor, cols, rows, x, y, true);
+            }
+            MouseEventKind::ScrollUp => {
+                crate::render::mouse_scroll(editor, cols, rows, x, y, -3);
+            }
+            MouseEventKind::ScrollDown => {
+                crate::render::mouse_scroll(editor, cols, rows, x, y, 3);
+            }
+            _ => {}
+        })
+        .await;
 }
 
 async fn handle_key(

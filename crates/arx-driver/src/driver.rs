@@ -19,7 +19,7 @@ use std::io::{self, Stdout, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crossterm::event::Event;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::{ExecutableCommand, cursor, terminal};
 use futures_util::Stream;
 use tokio::sync::Notify;
@@ -252,6 +252,9 @@ impl TerminalGuard {
         terminal::enable_raw_mode()?;
         out.execute(terminal::EnterAlternateScreen)?;
         out.execute(cursor::Hide)?;
+        // Enable mouse reporting so the user can click to move the
+        // cursor, drag to select, and scroll with the wheel.
+        out.execute(EnableMouseCapture)?;
         out.flush()?;
         Ok(Self { enabled: true })
     }
@@ -263,6 +266,9 @@ impl Drop for TerminalGuard {
             return;
         }
         let mut out = io::stdout();
+        if let Err(err) = out.execute(DisableMouseCapture) {
+            warn!(%err, "failed to disable mouse capture");
+        }
         if let Err(err) = out.execute(cursor::Show) {
             warn!(%err, "failed to restore cursor visibility");
         }

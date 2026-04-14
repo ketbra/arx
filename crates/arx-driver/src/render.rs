@@ -180,6 +180,192 @@ async fn build_view_state(bus: &CommandBus, cols: u16, rows: u16) -> Option<View
         .flatten()
 }
 
+/// Result of hit-testing a screen position against the layout.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HitTest {
+    /// The window (buffer pane or terminal pane) containing (x, y).
+    pub window_id: CoreWindowId,
+    /// Whether the hit is in a terminal pane.
+    pub is_terminal: bool,
+    /// Column relative to the pane's text area (0-based; 0 = first
+    /// text column after the gutter). Clamped to `[0, text_width)`.
+    pub text_col: u16,
+    /// Row relative to the pane (0-based). Clamped to `[0, pane_height)`.
+    pub row: u16,
+}
+
+/// Handle a left-click or drag at screen position `(x, y)`.
+/// `is_drag` = false: focus the pane and move the cursor, clearing
+/// any active selection. `is_drag` = true: keep mark where it was
+/// (or set it at the initial cursor position on first drag) and
+/// move the cursor, creating a selection from mark to cursor.
+pub(crate) fn hit_test_and_click(
+    editor: &mut arx_core::Editor,
+    cols: u16,
+    rows: u16,
+    x: u16,
+    y: u16,
+    is_drag: bool,
+) {
+    let Some(hit) = hit_test_at(editor, cols, rows, x, y) else {
+        return;
+    };
+
+    // For terminal panes: focus the pane (so subsequent keystrokes
+    // are forwarded to the PTY) but don't try to set a "cursor" —
+    // the terminal handles its own cursor.
+    if hit.is_terminal {
+        if !is_drag {
+            editor.windows_mut().set_active(hit.window_id);
+            editor.mark_dirty();
+        }
+        return;
+    }
+
+    // Buffer pane: focus, then move cursor to the hit position.
+    if !is_drag {
+        editor.windows_mut().set_active(hit.window_id);
+    }
+
+    let Some(data) = editor.windows().get(hit.window_id).cloned() else {
+        return;
+    };
+    let Some(buffer) = editor.buffers().get(data.buffer_id) else {
+        return;
+    };
+    let rope = buffer.rope();
+    let target_line = data
+        .scroll_top_line
+        .saturating_add(hit.row as usize)
+        .min(rope.len_lines().saturating_sub(1));
+    let line_start = rope.line_to_byte(target_line);
+    let line_end = if target_line + 1 < rope.len_lines() {
+        rope.line_to_byte(target_line + 1).saturating_sub(1)
+    } else {
+        rope.len_bytes()
+    };
+    let line_text = rope.slice_to_string(line_start..line_end);
+    let target_col = (hit.text_col as usize).saturating_add(data.scroll_left_col as usize);
+    let byte_in_line = arx_core::column::display_col_to_byte(&line_text, target_col as u16);
+    let target_byte = line_start + byte_in_line.min(line_end - line_start);
+
+    // On the initial click (not a drag), clear any existing mark so
+    // the selection disappears. On drag, if there's no mark yet,
+    // place it at the current cursor position so the drag creates
+    // a selection from the click point.
+    if is_drag {
+        if editor.mark(hit.window_id).is_none() {
+            editor.set_mark(hit.window_id, data.cursor_byte);
+        }
+    } else {
+        editor.clear_mark(hit.window_id);
+    }
+    if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+        w.cursor_byte = target_byte;
+    }
+    editor.mark_dirty();
+}
+
+/// Scroll the pane under `(x, y)` by `delta` lines (positive = down,
+/// negative = up).
+pub(crate) fn mouse_scroll(
+    editor: &mut arx_core::Editor,
+    cols: u16,
+    rows: u16,
+    x: u16,
+    y: u16,
+    delta: i32,
+) {
+    let Some(hit) = hit_test_at(editor, cols, rows, x, y) else {
+        return;
+    };
+    if hit.is_terminal {
+        return;
+    }
+    let Some(data) = editor.windows().get(hit.window_id).cloned() else {
+        return;
+    };
+    let Some(buffer) = editor.buffers().get(data.buffer_id) else {
+        return;
+    };
+    let max_line = buffer.rope().len_lines().saturating_sub(1);
+    let new_top = if delta < 0 {
+        data.scroll_top_line.saturating_sub(delta.unsigned_abs() as usize)
+    } else {
+        (data.scroll_top_line + delta as usize).min(max_line)
+    };
+    if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+        w.scroll_top_line = new_top;
+    }
+    editor.mark_dirty();
+}
+
+/// Hit-test a screen position against the current layout. Returns the
+/// pane under `(x, y)` along with pane-local coordinates, or `None`
+/// if the position is outside any pane (e.g. in the modeline).
+pub(crate) fn hit_test_at(
+    editor: &arx_core::Editor,
+    cols: u16,
+    rows: u16,
+    x: u16,
+    y: u16,
+) -> Option<HitTest> {
+    let layout = editor.windows().layout()?;
+    // Same geometry as build_view_state_sync: reserve 1 row for modeline.
+    let text_rows = rows.saturating_sub(1);
+    let root_rect = Rect::new(0, 0, cols, text_rows);
+
+    let mut visible_ids: Vec<CoreWindowId> = Vec::new();
+    let view_layout = build_view_layout(layout, &mut visible_ids);
+
+    let mut hit: Option<HitTest> = None;
+    view_layout.walk_pane_rects(root_rect, &mut |vid, rect| {
+        if hit.is_some() || rect.is_empty() {
+            return;
+        }
+        if x < rect.x
+            || x >= rect.x + rect.width
+            || y < rect.y
+            || y >= rect.y + rect.height
+        {
+            return;
+        }
+        let window_id = CoreWindowId(vid.0);
+        let is_terminal = editor.terminal(window_id).is_some();
+
+        // Compute gutter width for buffer panes so we can return a
+        // text-area-relative column. Terminal panes have no gutter.
+        let gutter_width = if is_terminal {
+            0
+        } else if let Some(data) = editor.windows().get(window_id) {
+            let len_lines = editor
+                .buffers()
+                .get(data.buffer_id)
+                .map_or(1, |b| b.rope().len_lines().max(1));
+            let digits = digit_count(len_lines);
+            let gc = GutterConfig::default();
+            if gc.line_numbers {
+                (digits.max(gc.min_width as usize) as u16) + 1
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let pane_col = x.saturating_sub(rect.x);
+        let row = y.saturating_sub(rect.y);
+        let text_col = pane_col.saturating_sub(gutter_width);
+        hit = Some(HitTest {
+            window_id,
+            is_terminal,
+            text_col,
+            row,
+        });
+    });
+    hit
+}
+
 fn build_view_state_sync(
     editor: &mut arx_core::Editor,
     cols: u16,
