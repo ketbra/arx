@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 arx-buffer = { workspace = true }
+arx-tree-sitter-perl = { path = "../arx-tree-sitter-perl" }
 tree-sitter = "0.25"
 tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"

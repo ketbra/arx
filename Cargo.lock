@@ -175,6 +175,7 @@ name = "arx-highlight"
 version = "0.1.0"
 dependencies = [
  "arx-buffer",
+ "arx-tree-sitter-perl",
  "streaming-iterator",
  "tracing",
  "tree-sitter",
@@ -266,6 +267,15 @@ dependencies = [
  "portable-pty",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "arx-tree-sitter-perl"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]

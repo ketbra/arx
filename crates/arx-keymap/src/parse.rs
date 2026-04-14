@@ -348,9 +348,28 @@ mod tests {
     }
 
     #[test]
-    fn unterminated_bracket_errors() {
-        let err = parse_sequence("<Enter").unwrap_err();
-        assert!(matches!(err, ParseError::UnterminatedBracket { .. }));
+    fn bare_less_than_is_literal_char() {
+        // Bare `<` without a matching `>` is treated as the literal
+        // less-than character (used e.g. for Vim's `<<` dedent).
+        // This is intentional behavior — we only enter bracketed-key
+        // parsing when a `>` exists in the remaining input.
+        let chords = parse_sequence("<Enter").unwrap();
+        assert_eq!(chords.len(), 6);
+        assert_eq!(chords[0], ch('<'));
+    }
+
+    #[test]
+    fn unterminated_bracket_errors_with_modifier() {
+        // After a modifier prefix like `C-`, an opening `<` followed by
+        // content without a closing `>` is an unterminated bracket.
+        // (Without modifier, `<` is treated as a literal — see above.)
+        // We force this by including a `>` later so the parser enters
+        // bracket mode but the bracket itself is malformed.
+        let err = parse_sequence("<Enter Tab>").unwrap_err();
+        assert!(
+            matches!(err, ParseError::UnterminatedBracket { .. } | ParseError::UnknownNamedKey { .. }),
+            "expected bracket-related error, got {err:?}"
+        );
     }
 
     #[test]

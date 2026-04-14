@@ -206,6 +206,18 @@ impl LanguageRegistry {
         });
         by_extension.insert("lua", Arc::clone(&lua));
 
+        // Perl — uses our vendored arx-tree-sitter-perl subcrate
+        // because the upstream tree-sitter-perl crate pulls in an
+        // incompatible tree-sitter version.
+        let perl = Arc::new(LanguageConfig {
+            name: "Perl",
+            language: arx_tree_sitter_perl::LANGUAGE.into(),
+            highlights_query: arx_tree_sitter_perl::HIGHLIGHTS_QUERY,
+        });
+        by_extension.insert("pl", Arc::clone(&perl));
+        by_extension.insert("pm", Arc::clone(&perl));
+        by_extension.insert("t", Arc::clone(&perl));
+
         Self { by_extension }
     }
 
@@ -238,7 +250,7 @@ mod tests {
         let extensions = [
             "rs", "py", "c", "cpp", "json", "js", "ts", "tsx", "go",
             "toml", "sh", "java", "cs", "html", "css", "rb", "md",
-            "yaml", "lua",
+            "yaml", "lua", "pl",
         ];
         for ext in extensions {
             let config = reg

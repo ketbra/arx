@@ -12,6 +12,7 @@ members = [
     "crates/arx-protocol",
     "crates/arx-render",
     "crates/arx-sdk",
+    "crates/arx-tree-sitter-perl",
     "examples/ext-hello",
 ]
 
