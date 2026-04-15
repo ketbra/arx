@@ -24,6 +24,7 @@ fn window(text: &str) -> WindowState {
         scroll: ScrollPosition::default(),
         gutter: GutterConfig::default(),
         selection: None,
+        excluded_lines: std::collections::BTreeSet::new(),
     }
 }
 
@@ -73,6 +74,7 @@ fn typed_character_diffs_to_two_setcell_ops() {
         scroll: ScrollPosition::default(),
         gutter: GutterConfig::default(),
         selection: None,
+        excluded_lines: std::collections::BTreeSet::new(),
     };
     let state0 = state_with(w0, 20, 3);
     let tree0 = render(&state0, 0);
@@ -85,6 +87,7 @@ fn typed_character_diffs_to_two_setcell_ops() {
         scroll: ScrollPosition::default(),
         gutter: GutterConfig::default(),
         selection: None,
+        excluded_lines: std::collections::BTreeSet::new(),
     };
     let state1 = state_with(w1, 20, 3);
     let tree1 = render(&state1, 1);
@@ -127,6 +130,7 @@ fn property_decoration_flows_into_cell_face() {
         scroll: ScrollPosition::default(),
         gutter: GutterConfig::default(),
         selection: None,
+        excluded_lines: std::collections::BTreeSet::new(),
     };
     let state = state_with(w, 20, 3);
     let tree = render(&state, 0);

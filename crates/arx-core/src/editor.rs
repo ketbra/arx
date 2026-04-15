@@ -23,6 +23,7 @@ use arx_highlight::HighlightManager;
 
 use crate::command::CommandBus;
 use crate::completion::CompletionPopup;
+use crate::filter::FilterState;
 use crate::kedit::{BlockKind, KeditState};
 use crate::palette::CommandPalette;
 use crate::registry::{CommandContext, CommandRegistry};
@@ -186,6 +187,11 @@ pub struct Editor {
     /// KEDIT-style persistent command line state. Disabled by default;
     /// the `kedit` profile enables it at editor startup.
     kedit: KeditState,
+    /// Per-buffer line-exclusion filters. Present only for buffers
+    /// where the user has run `ALL <pattern>` (KEDIT verb). An entry
+    /// here means the buffer has hidden lines; a missing entry means
+    /// every line is visible.
+    filters: HashMap<arx_buffer::BufferId, FilterState>,
     /// Transient message shown in the modeline (e.g. hover info, LSP
     /// status). Cleared on the next user keystroke.
     status_message: Option<String>,
@@ -257,6 +263,7 @@ impl Editor {
             marks: HashMap::new(),
             block_kinds: HashMap::new(),
             kedit,
+            filters: HashMap::new(),
             status_message: None,
             dirty: false,
             quit_requested: false,
@@ -567,6 +574,29 @@ impl Editor {
         &mut self.kedit
     }
 
+    /// The line-exclusion filter for `buffer_id`, if one is active.
+    pub fn filter(&self, buffer_id: arx_buffer::BufferId) -> Option<&FilterState> {
+        self.filters.get(&buffer_id)
+    }
+
+    /// Install (or replace) the line-exclusion filter for `buffer_id`.
+    pub fn set_filter(&mut self, buffer_id: arx_buffer::BufferId, filter: FilterState) {
+        self.filters.insert(buffer_id, filter);
+    }
+
+    /// Clear the line-exclusion filter for `buffer_id`, if any. Returns
+    /// the removed filter so callers can inspect what was dropped.
+    pub fn clear_filter(&mut self, buffer_id: arx_buffer::BufferId) -> Option<FilterState> {
+        self.filters.remove(&buffer_id)
+    }
+
+    /// True when `buffer_id` has a filter that hides `line`.
+    pub fn is_line_excluded(&self, buffer_id: arx_buffer::BufferId, line: usize) -> bool {
+        self.filters
+            .get(&buffer_id)
+            .is_some_and(|f| f.is_excluded(line))
+    }
+
     /// Record the [`BlockKind`] of the block currently marked in
     /// `window_id`. Paired with [`Self::set_mark_with_mode`] so the
     /// block-operation commands can reproduce the right kedit
@@ -839,13 +869,39 @@ impl Editor {
         let cursor_byte = data.cursor_byte.min(rope.len_bytes());
         let cursor_line = rope.byte_to_line(cursor_byte);
 
-        // Vertical follow.
+        // Vertical follow. Under a KEDIT `ALL` filter the visible-row
+        // distance from `scroll_top_line` to `cursor_line` differs
+        // from the raw line delta, so we count visible intervening
+        // lines when deciding whether the cursor is off-screen.
         let rows = visible_rows as usize;
         let mut new_top = data.scroll_top_line;
+        let filter = self.filters.get(&data.buffer_id);
         if cursor_line < new_top {
             new_top = cursor_line;
-        } else if cursor_line >= new_top.saturating_add(rows) {
-            new_top = cursor_line + 1 - rows;
+        } else {
+            // Number of visible rows strictly between new_top and
+            // cursor_line, plus both endpoints if visible, gives the
+            // screen-row delta. If the cursor is currently displayed
+            // it sits at `visible_between + 1`; if that reaches or
+            // exceeds `rows`, we scroll so it's on the last row.
+            let rows_needed = filter.map_or_else(
+                || cursor_line - new_top + 1,
+                |f| f.visible_lines_between(new_top, cursor_line) + 2,
+            );
+            if rows_needed > rows {
+                // Move `new_top` down until the cursor fits on the
+                // last row. For the unfiltered case we can compute
+                // directly; with a filter we step through visible
+                // lines to find the right new_top.
+                new_top = match filter {
+                    None => cursor_line + 1 - rows,
+                    Some(f) => {
+                        // Walk `rows - 1` visible lines *backwards*
+                        // from the cursor to place the top line.
+                        f.step_visible(cursor_line, -((rows - 1) as i32), rope.len_lines())
+                    }
+                };
+            }
         }
         // Don't bother clamping to len_lines — scrolling past the end
         // just shows blank rows, which is fine and matches how we

@@ -318,6 +318,12 @@ impl CursorDown {
 /// commands — moving the cursor by a page's worth of lines and letting
 /// [`Editor::ensure_active_cursor_visible`] chase it is how page-up /
 /// page-down end up scrolling in this editor.
+///
+/// When a KEDIT `ALL` filter is active on the buffer, `delta` counts
+/// *visible* lines rather than raw buffer lines: stepping down by 1
+/// skips every excluded line between the cursor and the next visible
+/// line. This is what makes `Up`/`Down`/`Page*` behave consistently
+/// with the rendered viewport.
 fn move_cursor_vertical_by(editor: &mut Editor, delta: i32) {
     let Some(window_id) = editor.windows().active() else {
         return;
@@ -332,13 +338,19 @@ fn move_cursor_vertical_by(editor: &mut Editor, delta: i32) {
     };
     let rope = buffer.rope();
     let current_line = rope.byte_to_line(cursor);
-    let target_line = current_line
-        .saturating_add_signed(delta as isize)
-        .min(rope.len_lines().saturating_sub(1));
+    let total_lines = rope.len_lines();
+    // If the buffer has a filter, step through visible lines only.
+    let target_line = if let Some(filter) = editor.filter(buffer_id) {
+        filter.step_visible(current_line, delta, total_lines)
+    } else {
+        current_line
+            .saturating_add_signed(delta as isize)
+            .min(total_lines.saturating_sub(1))
+    };
     let line_start = rope.line_to_byte(current_line);
     let col = cursor - line_start;
     let new_line_start = rope.line_to_byte(target_line);
-    let new_line_end = if target_line + 1 < rope.len_lines() {
+    let new_line_end = if target_line + 1 < total_lines {
         rope.line_to_byte(target_line + 1).saturating_sub(1)
     } else {
         rope.len_bytes()
@@ -531,11 +543,14 @@ stock_cmd!(
 );
 impl CursorBufferStart {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        let Some((window_id, _, _)) = active(cx.editor) else {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
             return;
         };
+        // Under a KEDIT `ALL` filter, snap to the first *visible*
+        // line rather than byte 0 (which may be on an excluded line).
+        let target = first_visible_line_byte(cx.editor, buffer_id).unwrap_or(0);
         if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = 0;
+            window.cursor_byte = target;
         }
         cx.editor.mark_dirty();
     }
@@ -555,11 +570,51 @@ impl CursorBufferEnd {
             return;
         };
         let end = buffer.len_bytes();
+        // Under a filter, snap to the end of the last *visible* line.
+        let target = last_visible_line_end(cx.editor, buffer_id).unwrap_or(end);
         if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = end;
+            window.cursor_byte = target;
         }
         cx.editor.mark_dirty();
     }
+}
+
+/// Byte offset of the start of the first *visible* line for
+/// `buffer_id`. Returns `None` when the buffer has no filter (the
+/// caller should fall back to 0) or when every line is excluded.
+fn first_visible_line_byte(editor: &Editor, buffer_id: BufferId) -> Option<usize> {
+    let filter = editor.filter(buffer_id)?;
+    let buffer = editor.buffers().get(buffer_id)?;
+    let rope = buffer.rope();
+    for line in 0..rope.len_lines() {
+        if !filter.is_excluded(line) {
+            return Some(rope.line_to_byte(line));
+        }
+    }
+    None
+}
+
+/// Byte offset of the end of the last *visible* line for
+/// `buffer_id`. Returns `None` when the buffer has no filter.
+fn last_visible_line_end(editor: &Editor, buffer_id: BufferId) -> Option<usize> {
+    let filter = editor.filter(buffer_id)?;
+    let buffer = editor.buffers().get(buffer_id)?;
+    let rope = buffer.rope();
+    let total = rope.len_lines();
+    if total == 0 {
+        return Some(0);
+    }
+    for line in (0..total).rev() {
+        if !filter.is_excluded(line) {
+            let end = if line + 1 < total {
+                rope.line_to_byte(line + 1).saturating_sub(1)
+            } else {
+                rope.len_bytes()
+            };
+            return Some(end);
+        }
+    }
+    None
 }
 
 stock_cmd!(CursorEndOfWord, CURSOR_END_OF_WORD, "Move to end of current/next word");
@@ -846,6 +901,42 @@ impl ScrollCursorBottom {
 // Editing
 // ---------------------------------------------------------------------------
 
+/// True when `range` (about to be passed to [`user_edit`]) covers or
+/// borders any line hidden by a KEDIT `ALL` filter on `buffer_id`.
+///
+/// The guard logic:
+///
+/// * Compute the line indices of both endpoints.
+/// * Pure insert at a single byte (`range.start == range.end`): allowed
+///   only if the cursor's line is visible. The new line created by
+///   inserting `\n` there sits *after* the current line, so it doesn't
+///   conflict with any excluded line.
+/// * Non-empty range: every line from `line(start)` through `line(end)`
+///   must be visible. A range that starts on the last visible line
+///   but extends into an excluded one (e.g. `buffer.delete-forward`
+///   at EOL with the next line hidden) is rejected.
+fn edit_touches_excluded(
+    editor: &Editor,
+    buffer_id: BufferId,
+    range: &ByteRange,
+) -> bool {
+    let Some(filter) = editor.filter(buffer_id) else {
+        return false;
+    };
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return false;
+    };
+    let rope = buffer.rope();
+    let start_line = rope.byte_to_line(range.start.min(rope.len_bytes()));
+    let end_line = rope.byte_to_line(range.end.min(rope.len_bytes()));
+    for line in start_line..=end_line {
+        if filter.is_excluded(line) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Apply a user edit to `buffer_id` *and* push a matching
 /// [`EditRecord`] to the buffer's undo tree, then set the invoking
 /// window's cursor to `cursor_after`. This is the single path every
@@ -866,6 +957,18 @@ pub(crate) fn user_edit(
     cursor_before: usize,
     cursor_after: usize,
 ) -> bool {
+    // KEDIT `ALL` filter guard: user edits may not touch any line
+    // that's currently hidden by an active filter. A pure insert at
+    // a visible cursor (range.start == range.end, line(start) not
+    // excluded) is always safe — that's how self-insert and newline
+    // work. Any range that spans excluded lines, or sits on one,
+    // is rejected with a status message.
+    if edit_touches_excluded(editor, buffer_id, &range) {
+        editor.set_status("Edit blocked: excluded lines are read-only");
+        editor.mark_dirty();
+        return false;
+    }
+
     // Capture the bytes that will be removed BEFORE we apply the
     // edit, so the undo tree gets the pre-edit content.
     let Some(buffer) = editor.buffers().get(buffer_id) else {
@@ -4297,6 +4400,7 @@ fn execute_kedit_command(cx: &mut CommandContext<'_>, input: &str) -> KeditComma
             }
         }
         "change" | "c" => change_command(cx.editor, args),
+        "all" => all_command(cx.editor, args),
         _ => {
             // Fallback: treat the input as a registered command name
             // (e.g. `buffer.save`). Keeps the cmd line useful without
@@ -4394,6 +4498,95 @@ fn change_command(editor: &mut Editor, args: &str) -> KeditCommandResult {
         cursor_after,
     );
     KeditCommandResult::Message("Changed".into())
+}
+
+/// `ALL <pattern>` — install a line-exclusion filter on the active
+/// buffer. Lines matching `<pattern>` stay visible; every other line
+/// is hidden from rendering, cursor motion, and edits. `ALL` with no
+/// arguments (or with just a delimiter enclosing nothing) clears the
+/// filter. Re-running `ALL` with a new pattern replaces the previous
+/// filter — each invocation is evaluated against the full buffer.
+///
+/// Delimiter handling mirrors `CHANGE`: the first character is taken
+/// as the delimiter and the pattern is everything up to (but not
+/// including) the next occurrence, if any. `ALL /foo/` and `ALL foo`
+/// are both accepted.
+fn all_command(editor: &mut Editor, args: &str) -> KeditCommandResult {
+    let Some(window_id) = editor.windows().active() else {
+        return KeditCommandResult::Unknown;
+    };
+    let Some(data) = editor.windows().get(window_id).cloned() else {
+        return KeditCommandResult::Unknown;
+    };
+    let buffer_id = data.buffer_id;
+
+    // Parse the pattern. Empty args → clear the filter.
+    let pattern = extract_delimited_pattern(args);
+    if pattern.is_empty() {
+        let removed = editor.clear_filter(buffer_id);
+        // Snap the cursor out of any excluded line that becomes
+        // visible again — nothing to do here, since clearing means
+        // everything is visible.
+        editor.mark_dirty();
+        if removed.is_some() {
+            return KeditCommandResult::Message("ALL cleared".into());
+        }
+        return KeditCommandResult::Message("ALL: no active filter".into());
+    }
+
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return KeditCommandResult::Unknown;
+    };
+    let text = buffer.text();
+    let total_lines = buffer.rope().len_lines();
+    let filter = match crate::filter::FilterState::build(pattern, &text) {
+        Ok(f) => f,
+        Err(err) => {
+            return KeditCommandResult::Message(format!("ALL: invalid regex: {err}"));
+        }
+    };
+    let excluded = filter.excluded_count();
+    let visible = total_lines.saturating_sub(excluded);
+
+    // If the cursor ended up on an excluded line, snap it to the
+    // nearest visible one so subsequent motion and edits work.
+    let cursor_line = buffer.rope().byte_to_line(data.cursor_byte.min(text.len()));
+    let snapped_line = filter.snap_to_visible(cursor_line, total_lines);
+    if snapped_line != cursor_line {
+        let new_cursor = buffer.rope().line_to_byte(snapped_line);
+        if let Some(window) = editor.windows_mut().get_mut(window_id) {
+            window.cursor_byte = new_cursor;
+        }
+    }
+
+    editor.set_filter(buffer_id, filter);
+    editor.mark_dirty();
+    KeditCommandResult::Message(format!(
+        "ALL /{pattern}/: {visible} of {total_lines} visible ({excluded} excluded)"
+    ))
+}
+
+/// Strip a leading-delimiter wrapper from `args`. Accepts `/pat/`,
+/// `|pat|`, `"pat"`, etc. — the first char is the delimiter, and the
+/// pattern is everything between the first and second delimiter. A
+/// bare `pat` (no delimiter) is treated as the pattern as-is.
+/// Returns the inner pattern, possibly empty.
+fn extract_delimited_pattern(args: &str) -> &str {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return "";
+    }
+    // Heuristic: if the first char is a non-alphanumeric printable
+    // that commonly appears as a delimiter, treat it as one.
+    let first = trimmed.chars().next().unwrap_or('\0');
+    if first.is_ascii_alphanumeric() || first == '_' {
+        return trimmed;
+    }
+    let rest = &trimmed[first.len_utf8()..];
+    match rest.find(first) {
+        Some(end) => &rest[..end],
+        None => rest, // unterminated delimiter; take the rest
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5866,6 +6059,266 @@ mod tests {
             .await
             .unwrap();
         assert!(cleared);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- KEDIT ALL command ----
+
+    /// Helper: open a kedit-profile editor over `text` and run the
+    /// given cmd-line input through `kedit.cmdline-execute`. Leaves
+    /// the editor in buffer-focus mode (execute blurs the cmd line).
+    async fn run_kedit_cmdline(
+        bus: &crate::CommandBus,
+        input: &'static str,
+    ) {
+        bus.invoke(move |editor| {
+            editor.kedit_mut().enable();
+            editor.kedit_mut().focus();
+            editor.kedit_mut().set_query(input);
+        })
+        .await
+        .unwrap();
+        run_named(bus, names::KEDIT_CMDLINE_EXECUTE).await;
+    }
+
+    #[tokio::test]
+    async fn all_filter_excludes_non_matching_lines() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text(
+                "foo line\nbar line\nanother foo\nbaz\nfoo again",
+                None,
+            );
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        let (has_filter, excluded) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let f = editor.filter(data.buffer_id);
+                let count = f.map_or(0, crate::filter::FilterState::excluded_count);
+                (f.is_some(), count)
+            })
+            .await
+            .unwrap();
+        assert!(has_filter, "ALL should install a filter");
+        // Lines 1 ("bar line") and 3 ("baz") don't match /foo/.
+        assert_eq!(excluded, 2);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_with_no_args_clears_filter() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nfoo\n", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_kedit_cmdline(&bus, "ALL").await;
+        let has_filter = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor.filter(data.buffer_id).is_some()
+            })
+            .await
+            .unwrap();
+        assert!(!has_filter, "bare ALL should clear the filter");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_replacing_filter_re_evaluates_against_full_buffer() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nbaz\nbar", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_kedit_cmdline(&bus, "ALL /bar/").await;
+        let excluded = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor
+                    .filter(data.buffer_id)
+                    .map_or(0, crate::filter::FilterState::excluded_count)
+            })
+            .await
+            .unwrap();
+        // Lines 0 ("foo") and 2 ("baz") don't match /bar/ → 2 excluded.
+        assert_eq!(excluded, 2);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_invalid_regex_reports_error_and_leaves_filter_off() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text("line\n", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /(/").await;
+        let has_filter = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor.filter(data.buffer_id).is_some()
+            })
+            .await
+            .unwrap();
+        assert!(!has_filter, "invalid regex should not install a filter");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cursor_down_skips_excluded_lines() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            // Lines 0, 2, 4 match; 1, 3 don't.
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nfoo\nbar\nfoo", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_named(&bus, names::CURSOR_DOWN).await;
+        let cursor_line = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                buffer.rope().byte_to_line(data.cursor_byte)
+            })
+            .await
+            .unwrap();
+        // One cursor.down should land on line 2 (skipping excluded 1).
+        assert_eq!(cursor_line, 2);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_on_visible_line_succeeds_under_filter() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nfoo", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 3;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        // Cursor was at byte 3 (end of "foo") — line 0, which is
+        // visible. Self-insert is allowed.
+        bus.invoke(|editor| editor.handle_printable_fallback('X'))
+            .await
+            .unwrap();
+        let text = active_text_and_cursor(&bus).await.0;
+        assert_eq!(text, "fooX\nbar\nfoo");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_on_excluded_line_is_blocked() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nfoo", None);
+            let win = editor.windows_mut().open(buf);
+            // Park the cursor explicitly on line 1 (the "bar" line)
+            // which will be excluded by ALL /foo/. This bypasses the
+            // snap-to-visible logic so we can test the edit guard in
+            // isolation.
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 4;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        // Manually plant the cursor back on the excluded line (the
+        // ALL command snaps it off); then attempt an edit.
+        bus.invoke(|editor| {
+            let win = editor.windows().active().unwrap();
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 5;
+        })
+        .await
+        .unwrap();
+        bus.invoke(|editor| editor.handle_printable_fallback('Z'))
+            .await
+            .unwrap();
+        let text = active_text_and_cursor(&bus).await.0;
+        assert_eq!(text, "foo\nbar\nfoo", "edit on excluded line must be rejected");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_snaps_cursor_off_excluded_line_into_next_visible() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("bar\nfoo\nbar\nfoo", None);
+            let win = editor.windows_mut().open(buf);
+            // Cursor on line 0 ("bar"), which will be excluded.
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        let cursor_line = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                buffer.rope().byte_to_line(data.cursor_byte)
+            })
+            .await
+            .unwrap();
+        // Snapped down to line 1 ("foo").
+        assert_eq!(cursor_line, 1);
         drop(bus);
         let _ = handle.await.unwrap();
     }

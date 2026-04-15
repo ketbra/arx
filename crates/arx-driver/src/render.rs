@@ -544,6 +544,13 @@ fn build_view_state_sync(
                     }
                 }
             });
+            // KEDIT `ALL` filter: project the per-buffer excluded
+            // line set into the ViewState so the renderer can skip
+            // hidden lines without reaching back into the editor.
+            let excluded_lines = editor
+                .filter(data.buffer_id)
+                .map(|f| f.excluded.clone())
+                .unwrap_or_default();
             windows.push(WindowState {
                 id: ViewWindowId(id.0),
                 buffer: snapshot,
@@ -554,6 +561,7 @@ fn build_view_state_sync(
                 },
                 gutter,
                 selection,
+                excluded_lines,
             });
         }
     }
@@ -709,11 +717,18 @@ fn build_global_state(
 
     // If there's a status message (hover info, LSP status), show it
     // in the modeline instead of the default line/byte info.
+    // KEDIT `ALL` hidden-line count. Shown after the line-position
+    // info so users can tell at a glance how much of the buffer is
+    // filtered out.
+    let filter_tag = editor
+        .filter(active_data.buffer_id)
+        .map(|f| format!("  [ALL /{pat}/  {n} excluded]", pat = f.pattern, n = f.excluded_count()))
+        .unwrap_or_default();
     let left = if let Some(status) = editor.status_message() {
         status.to_owned()
     } else {
         format!(
-            "{label}{modified_tag}  (ln {}/{})",
+            "{label}{modified_tag}  (ln {}/{}){filter_tag}",
             snapshot.rope().byte_to_line(active_data.cursor_byte) + 1,
             snapshot.rope().len_lines(),
         )

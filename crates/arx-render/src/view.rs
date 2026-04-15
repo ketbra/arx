@@ -335,21 +335,28 @@ fn render_window(
     let rope = buffer.rope();
     let properties = buffer.properties();
 
-    // How much of the window the gutter claims. We need the final line
-    // number to know the gutter width.
-    let last_visible_line =
-        (window.scroll.top_line + rect.height as usize).min(rope.len_lines());
-    let gutter_width = compute_gutter_width(window.gutter, last_visible_line);
+    // Walk only visible (non-excluded) lines; `visible_lines[i]` is
+    // the buffer line number painted on screen row `i`. An empty
+    // vec means nothing to paint (buffer empty, or every line
+    // hidden). KEDIT's `ALL` filter populates `excluded_lines`.
+    let visible_lines = visible_lines_for_window(window, rect.height, rope.len_lines());
+
+    // How much of the window the gutter claims. Use the *highest*
+    // buffer line number we'll paint, so the gutter width reflects
+    // the actual max digit count (with excluded lines skipped the
+    // painted range can extend well past `top_line + height`).
+    let max_painted_line = visible_lines
+        .last()
+        .map_or(window.scroll.top_line, |l| l + 1);
+    let gutter_width = compute_gutter_width(window.gutter, max_painted_line);
     let text_x = rect.x + gutter_width;
     let text_width = rect.width.saturating_sub(gutter_width);
 
-    for row_idx in 0..rect.height {
-        let line_idx = window.scroll.top_line + row_idx as usize;
-        if line_idx >= rope.len_lines() {
-            break;
-        }
-        let y = rect.y + row_idx;
+    for (row_idx, &line_idx) in visible_lines.iter().enumerate() {
+        let y = rect.y + row_idx as u16;
         if window.gutter.line_numbers && gutter_width > 0 {
+            // Paint the *original* 1-indexed buffer line number so the
+            // user can see the jumps where excluded lines used to be.
             paint_gutter(grid, rect.x, y, gutter_width, line_idx + 1);
         }
         if text_width > 0 {
@@ -371,7 +378,7 @@ fn render_window(
     // Selection highlight: paint the region between mark and cursor
     // with an inverted face so the user sees what's selected.
     if let Some(ref sel) = window.selection {
-        paint_selection(window, sel, rect, gutter_width, text_width, grid);
+        paint_selection(window, sel, rect, gutter_width, text_width, &visible_lines, grid);
     }
 
     // Primary cursor position — only for the active pane.
@@ -384,6 +391,7 @@ fn render_window(
         rect,
         text_x,
         text_width,
+        &visible_lines,
     ) {
         // Flag the underlying cell too, so backends that want to paint a
         // block cursor purely through cell styling can do so.
@@ -394,22 +402,59 @@ fn render_window(
     }
 }
 
+/// Compute which buffer line is painted on which screen row for
+/// `window`. Walks upward from `scroll.top_line` and skips any line
+/// index that's in `window.excluded_lines`. Stops when either the
+/// window height is full or the buffer runs out of lines.
+///
+/// The result's length is at most `rect_height` and at most the
+/// count of non-excluded lines from `scroll.top_line` onward.
+fn visible_lines_for_window(
+    window: &WindowState,
+    rect_height: u16,
+    total_lines: usize,
+) -> Vec<usize> {
+    let cap = rect_height as usize;
+    let mut out = Vec::with_capacity(cap);
+    let mut line = window.scroll.top_line;
+    while out.len() < cap && line < total_lines {
+        if !window.excluded_lines.contains(&line) {
+            out.push(line);
+        }
+        line += 1;
+    }
+    out
+}
+
 /// Paint a line number at `(x, y)` right-justified to `width - 1` cells,
 /// leaving the final column blank as padding between the gutter and the
 /// text area.
 /// Paint a selection highlight over the cells that fall within the
 /// selection region. Dispatches to linear or rectangle painting.
+///
+/// `visible_lines` is the row→buffer-line mapping computed once per
+/// frame in [`render_window`]; selections only paint on rows whose
+/// buffer line is visible (i.e. not hidden by a KEDIT `ALL` filter).
 fn paint_selection(
     window: &WindowState,
     sel: &crate::view_state::Selection,
     rect: Rect,
     gutter_width: u16,
     text_width: u16,
+    visible_lines: &[usize],
     grid: &mut CellGrid,
 ) {
     match sel {
         crate::view_state::Selection::Linear(range) => {
-            paint_linear_selection(window, range, rect, gutter_width, text_width, grid);
+            paint_linear_selection(
+                window,
+                range,
+                rect,
+                gutter_width,
+                text_width,
+                visible_lines,
+                grid,
+            );
         }
         crate::view_state::Selection::Rectangle {
             start_line,
@@ -426,6 +471,7 @@ fn paint_selection(
                 rect,
                 gutter_width,
                 text_width,
+                visible_lines,
                 grid,
             );
         }
@@ -433,12 +479,14 @@ fn paint_selection(
 }
 
 /// Paint a linear (contiguous) selection highlight.
+#[allow(clippy::too_many_arguments)]
 fn paint_linear_selection(
     window: &WindowState,
     sel: &std::ops::Range<usize>,
     rect: Rect,
     gutter_width: u16,
     text_width: u16,
+    visible_lines: &[usize],
     grid: &mut CellGrid,
 ) {
     if sel.start == sel.end || rect.is_empty() || text_width == 0 {
@@ -452,8 +500,8 @@ fn paint_linear_selection(
     };
     let text_x = rect.x + gutter_width;
 
-    for row_idx in 0..rect.height {
-        let line_idx = window.scroll.top_line + row_idx as usize;
+    for (row_idx_usize, &line_idx) in visible_lines.iter().enumerate() {
+        let row_idx = row_idx_usize as u16;
         if line_idx >= rope.len_lines() {
             break;
         }
@@ -510,6 +558,7 @@ fn paint_rect_selection(
     rect: Rect,
     gutter_width: u16,
     text_width: u16,
+    visible_lines: &[usize],
     grid: &mut CellGrid,
 ) {
     if left_col == right_col || rect.is_empty() || text_width == 0 {
@@ -523,8 +572,8 @@ fn paint_rect_selection(
     };
     let text_x = rect.x + gutter_width;
 
-    for row_idx in 0..rect.height {
-        let line_idx = window.scroll.top_line + row_idx as usize;
+    for (row_idx_usize, &line_idx) in visible_lines.iter().enumerate() {
+        let row_idx = row_idx_usize as u16;
         if line_idx >= rope.len_lines() {
             break;
         }
@@ -777,22 +826,29 @@ fn flags_for_byte(runs: &[StyledRun], byte_offset: usize) -> CellFlags {
 }
 
 /// Convert a cursor's byte offset in the buffer to a `(col, row)` on the
-/// terminal grid, or `None` if the cursor is scrolled out of view.
+/// terminal grid, or `None` if the cursor is scrolled out of view or
+/// sitting on a line hidden by a KEDIT `ALL` filter.
+///
+/// `visible_lines` is the row→buffer-line mapping produced by
+/// [`visible_lines_for_window`]; finding the cursor's row is a linear
+/// scan over that (at most `rect.height` long).
 fn resolve_cursor(
     byte_offset: usize,
     window: &WindowState,
     rect: Rect,
     text_x: u16,
     text_width: u16,
+    visible_lines: &[usize],
 ) -> Option<CursorRender> {
     let rope = window.buffer.rope();
     let len = rope.len_bytes();
     let byte = byte_offset.min(len);
     let line = rope.byte_to_line(byte);
-    if line < window.scroll.top_line {
-        return None;
-    }
-    let row_offset = line - window.scroll.top_line;
+    // The cursor only renders if its buffer line appears in the
+    // visible-row mapping. Out-of-view cursors (scrolled above
+    // `scroll.top_line` or below the last rendered row) and cursors
+    // on excluded lines both fail this lookup.
+    let row_offset = visible_lines.iter().position(|&l| l == line)?;
     if row_offset >= rect.height as usize {
         return None;
     }
@@ -1583,6 +1639,7 @@ mod tests {
             scroll: ScrollPosition::default(),
             gutter: GutterConfig::default(),
             selection: None,
+            excluded_lines: std::collections::BTreeSet::new(),
         }
     }
 
@@ -1920,6 +1977,7 @@ mod tests {
             scroll: ScrollPosition::default(),
             gutter: GutterConfig::default(),
             selection: None,
+            excluded_lines: std::collections::BTreeSet::new(),
         }
     }
 
@@ -2113,6 +2171,67 @@ mod tests {
             "cursor at col {} should be right of divider at {}",
             tree.cursors[0].col,
             divider_col
+        );
+    }
+
+    // ---- KEDIT ALL exclusion ----
+
+    #[test]
+    fn excluded_lines_skip_in_render() {
+        // Buffer has 5 lines; lines 1 and 3 are excluded. The render
+        // should paint 0, 2, 4 on screen rows 0, 1, 2.
+        let mut w = window_for("l0\nl1\nl2\nl3\nl4");
+        w.excluded_lines = [1_usize, 3].into_iter().collect();
+        let state = state_for(w, 30, 5); // 5 rows incl. modeline
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert!(lines[0].contains("l0"), "row 0: {:?}", lines[0]);
+        assert!(lines[1].contains("l2"), "row 1: {:?}", lines[1]);
+        assert!(lines[2].contains("l4"), "row 2: {:?}", lines[2]);
+        // l1 and l3 should not appear anywhere.
+        assert!(!text.contains("l1"), "l1 should be hidden, got:\n{text}");
+        assert!(!text.contains("l3"), "l3 should be hidden, got:\n{text}");
+    }
+
+    #[test]
+    fn gutter_shows_original_line_numbers_under_filter() {
+        // The gutter must show 1, 3, 5 (original 1-indexed line
+        // numbers) not 1, 2, 3 (sequential).
+        let mut w = window_for("l0\nl1\nl2\nl3\nl4");
+        w.excluded_lines = [1_usize, 3].into_iter().collect();
+        let state = state_for(w, 30, 5);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let rows: Vec<&str> = text.split('\n').collect();
+        // The first non-space run on each row's gutter is its line
+        // number. Look for "1", "3", "5".
+        let nums: Vec<String> = rows
+            .iter()
+            .take(3)
+            .map(|r| {
+                r.split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(nums[0], "1");
+        assert_eq!(nums[1], "3");
+        assert_eq!(nums[2], "5");
+    }
+
+    #[test]
+    fn cursor_on_excluded_line_is_not_rendered() {
+        // Cursor sits at byte 3 (start of "l1"), which is excluded.
+        let mut w = window_for("l0\nl1\nl2");
+        w.cursors = sv![Cursor::at(3)];
+        w.excluded_lines = [1_usize].into_iter().collect();
+        let state = state_for(w, 30, 4);
+        let tree = render(&state, 0);
+        assert!(
+            tree.cursors.is_empty(),
+            "cursor on excluded line should produce no render entry"
         );
     }
 }

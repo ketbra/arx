@@ -79,6 +79,7 @@ pub mod completion;
 pub mod editor;
 pub mod event_loop;
 pub mod file;
+pub mod filter;
 pub mod kedit;
 pub mod palette;
 pub mod registry;
@@ -95,6 +96,7 @@ pub use editor::{
 pub use event_loop::{DEFAULT_BUS_CAPACITY, EventLoop};
 pub use file::{OpenFileError, SaveFileError, open_file, save_file, save_file_as};
 pub use completion::{CompletionItem, CompletionPopup};
+pub use filter::FilterState;
 pub use kedit::{BlockKind, ClipboardBlock, KeditState};
 pub use palette::{CommandPalette, PaletteMatch, PaletteMode};
 pub use search::{BufferSearch, SearchMatch, SearchMode};

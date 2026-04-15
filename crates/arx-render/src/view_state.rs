@@ -13,6 +13,8 @@
 //! viewport-size writeback call it so there's no way for them to
 //! disagree about how much space each pane gets.
 
+use std::collections::BTreeSet;
+
 use arx_buffer::BufferSnapshot;
 use smallvec::SmallVec;
 
@@ -278,6 +280,10 @@ pub struct WindowState {
     pub gutter: GutterConfig,
     /// Selection region. `None` when no mark is set.
     pub selection: Option<Selection>,
+    /// Buffer line indices (0-based) hidden by a KEDIT `ALL` filter.
+    /// Empty when no filter is active. The renderer walks visible
+    /// lines by skipping any index in this set.
+    pub excluded_lines: BTreeSet<usize>,
 }
 
 impl WindowState {

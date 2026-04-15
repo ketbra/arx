@@ -114,13 +114,29 @@ and **completion framework** (item 5). The editor has:
   modeled in `arx_core::kedit::KeditState`: focus toggles between
   buffer and cmd line with `Home`/`F11`/`F12`/`Esc`; typed verbs
   include `QUIT`, `SAVE`, `FILE`, `TOP`, `BOTTOM`, `:N` (go to
-  line), `LOCATE <pat>`, and `CHANGE /old/new/`, with a fallback to
-  any registered stock command name. Block operations are tagged
-  with a `BlockKind` (Line/Box/Char) so copy/paste reproduce the
-  right geometry — line blocks insert on their own rows, box blocks
-  round-trip through `column::{kill,yank}_rectangle`.
+  line), `LOCATE <pat>`, `CHANGE /old/new/`, and `ALL <pattern>`,
+  with a fallback to any registered stock command name. Block
+  operations are tagged with a `BlockKind` (Line/Box/Char) so
+  copy/paste reproduce the right geometry — line blocks insert on
+  their own rows, box blocks round-trip through
+  `column::{kill,yank}_rectangle`.
 
-**413 tests green** (up from Phase 1's 274).
+- **(Phase 2)** **KEDIT `ALL` line filter** — `ALL <regex>` hides
+  every line that doesn't match the pattern; `ALL` alone clears the
+  filter; re-running `ALL` with a new pattern replaces the previous
+  filter (each invocation is evaluated against the full buffer).
+  Excluded lines are transparent to the renderer, cursor motion,
+  and the edit guard: they don't paint, they're skipped by
+  `cursor.up/down/page-*`, and any edit whose byte range touches an
+  excluded line is rejected at the single `user_edit` choke-point
+  with a `"Edit blocked: excluded lines are read-only"` status.
+  State lives in `arx_core::filter::FilterState` (keyed per
+  `BufferId` on `Editor`), projected into `WindowState::excluded_lines`
+  by the driver. The gutter keeps painting *original* 1-indexed line
+  numbers so gaps are visible, and the modeline shows
+  `[ALL /pat/ N excluded]`.
+
+**432 tests green** (up from Phase 1's 274).
 `cargo clippy --workspace --all-targets` clean under the workspace
 pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.
