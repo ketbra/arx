@@ -39,12 +39,109 @@ pub enum KeyHandled {
     Unbound { printable_fallback: Option<char> },
 }
 
+/// Whether the current selection is linear (contiguous bytes) or
+/// rectangular (column block).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionMode {
+    /// Standard contiguous byte range selection.
+    #[default]
+    Linear,
+    /// Column/rectangle selection for block operations.
+    Rectangle,
+}
+
+/// Per-window mark (selection anchor) with its mode.
+#[derive(Debug, Clone, Copy)]
+pub struct MarkState {
+    /// Byte offset of the mark in the buffer.
+    pub byte: usize,
+    /// Whether this selection is linear or rectangular.
+    pub mode: SelectionMode,
+}
+
+/// An entry in the kill ring. Distinguishes linear (contiguous) text
+/// from rectangular (column block) text so yank can paste them
+/// appropriately.
+#[derive(Debug, Clone)]
+pub enum KilledText {
+    /// A contiguous string of text.
+    Linear(String),
+    /// A column block — one string per line.
+    Rectangular(Vec<String>),
+}
+
+/// State for repeating the last `f`/`F`/`t`/`T` find-char motion.
+#[derive(Debug, Clone, Copy)]
+pub struct FindCharState {
+    /// The character that was searched for.
+    pub ch: char,
+    /// The kind of find (forward/backward, to/till).
+    pub kind: FindCharKind,
+}
+
+/// What kind of find-char motion was performed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindCharKind {
+    ForwardTo,
+    ForwardTill,
+    BackwardTo,
+    BackwardTill,
+}
+
+/// Which Vim operator is pending (waiting for a motion/text-object).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingOperator {
+    /// Delete the range (Vim `d`).
+    Delete,
+    /// Change the range: delete and enter insert mode (Vim `c`).
+    Change,
+    /// Yank (copy) the range (Vim `y`).
+    Yank,
+    /// Indent the range (Vim `>`).
+    Indent,
+    /// Dedent the range (Vim `<`).
+    Dedent,
+}
+
+/// What the editor is waiting for when a special input mode is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharReadMode {
+    /// Waiting for a character for `f` (find forward to).
+    FindForwardTo,
+    /// Waiting for a character for `F` (find backward to).
+    FindBackwardTo,
+    /// Waiting for a character for `t` (find forward till).
+    FindForwardTill,
+    /// Waiting for a character for `T` (find backward till).
+    FindBackwardTill,
+}
+
+/// Tracks the state of a pending Vim operator or char-read.
+#[derive(Debug, Default)]
+pub struct OperatorState {
+    /// Which operator is pending, if any.
+    pub operator: Option<PendingOperator>,
+    /// Count prefix that was active when the operator was pressed.
+    pub count: u32,
+    /// Whether we're waiting for a single character input (f/F/t/T).
+    pub char_read: Option<CharReadMode>,
+}
+
+impl OperatorState {
+    pub fn clear(&mut self) {
+        self.operator = None;
+        self.count = 1;
+        self.char_read = None;
+    }
+}
+
 /// The editor's in-process state.
 ///
 /// Owns every piece of mutable editor state today. Lives on the event loop
 /// task only — never shared across threads — so it doesn't need to be
 /// `Sync` (and isn't, deliberately, so we catch accidental cross-task use
 /// at compile time).
+#[allow(clippy::struct_excessive_bools)]
 pub struct Editor {
     buffers: BufferManager,
     windows: WindowManager,
@@ -52,6 +149,7 @@ pub struct Editor {
     commands: CommandRegistry,
     palette: CommandPalette,
     completion: CompletionPopup,
+    search: crate::search::BufferSearch,
     #[cfg(feature = "syntax")]
     highlight: HighlightManager,
     terminals: HashMap<crate::WindowId, arx_terminal::TerminalPane>,
@@ -60,6 +158,13 @@ pub struct Editor {
     terminal_redraw: Option<Arc<tokio::sync::Notify>>,
     #[cfg(feature = "lsp")]
     lsp_notifier: Option<tokio::sync::mpsc::Sender<arx_lsp::LspEvent>>,
+    /// Navigation stack for LSP go-to-definition / pop-back.
+    /// Each entry is `(buffer_id, byte_offset)`.
+    nav_stack: Vec<(arx_buffer::BufferId, usize)>,
+    /// Last find-char state for `;` and `,` repeat.
+    last_find_char: Option<FindCharState>,
+    /// Vim operator-pending state (d/c/y waiting for motion).
+    operator_state: OperatorState,
     /// Which-key overlay: list of `(key, command)` pairs to show
     /// when the user pauses on a prefix chord.
     which_key: Option<Vec<(String, String)>>,
@@ -67,14 +172,17 @@ pub struct Editor {
     /// (command name shown in the status bar) rather than executed.
     describe_key_mode: bool,
     /// Kill ring — a stack of killed (cut/copied) text for yank.
-    kill_ring: Vec<String>,
-    /// Per-window mark (selection anchor) byte offsets.
-    marks: HashMap<crate::WindowId, usize>,
+    /// Entries distinguish linear (contiguous) vs rectangular (column)
+    /// kills so yank can paste them appropriately.
+    kill_ring: Vec<KilledText>,
+    /// Per-window mark (selection anchor) with selection mode.
+    marks: HashMap<crate::WindowId, MarkState>,
     /// Transient message shown in the modeline (e.g. hover info, LSP
     /// status). Cleared on the next user keystroke.
     status_message: Option<String>,
     dirty: bool,
     quit_requested: bool,
+    suspend_requested: bool,
 }
 
 impl std::fmt::Debug for Editor {
@@ -119,6 +227,10 @@ impl Editor {
             commands,
             palette: CommandPalette::new(),
             completion: CompletionPopup::new(),
+            search: crate::search::BufferSearch::new(),
+            nav_stack: Vec::new(),
+            last_find_char: None,
+            operator_state: OperatorState::default(),
             terminals: HashMap::new(),
             terminal_redraw: None,
             #[cfg(feature = "syntax")]
@@ -132,6 +244,7 @@ impl Editor {
             status_message: None,
             dirty: false,
             quit_requested: false,
+            suspend_requested: false,
         }
     }
 
@@ -184,6 +297,16 @@ impl Editor {
     /// Mutably borrow the command palette state.
     pub fn palette_mut(&mut self) -> &mut CommandPalette {
         &mut self.palette
+    }
+
+    /// Borrow the interactive buffer search state.
+    pub fn search(&self) -> &crate::search::BufferSearch {
+        &self.search
+    }
+
+    /// Mutably borrow the interactive buffer search state.
+    pub fn search_mut(&mut self) -> &mut crate::search::BufferSearch {
+        &mut self.search
     }
 
     /// Attach syntax highlighting to `buffer_id` based on `extension`.
@@ -344,6 +467,29 @@ impl Editor {
         if self.palette.is_open() {
             self.palette.append_char(ch);
             self.mark_dirty();
+            return;
+        }
+        if self.search.is_open() {
+            self.search.append_char(ch);
+            self.mark_dirty();
+            return;
+        }
+        // Char-read mode: f/F/t/T waiting for a character.
+        if let Some(mode) = self.operator_state.char_read.take() {
+            crate::stock::handle_char_read(self, ch, mode);
+            return;
+        }
+        if let Some(active) = self.windows().active() {
+            if let Some(term) = self.terminal(active) {
+                // Active pane is a terminal — forward the character
+                // to the PTY instead of self-inserting into a buffer.
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                term.write(s.as_bytes().to_vec());
+                self.mark_dirty();
+            } else {
+                crate::stock::insert_at_cursor(self, &ch.to_string());
+            }
         } else {
             crate::stock::insert_at_cursor(self, &ch.to_string());
         }
@@ -374,7 +520,7 @@ impl Editor {
     }
 
     /// Push text onto the kill ring.
-    pub fn kill_ring_push(&mut self, text: String) {
+    pub fn kill_ring_push(&mut self, text: KilledText) {
         self.kill_ring.push(text);
         // Cap at 64 entries.
         if self.kill_ring.len() > 64 {
@@ -383,23 +529,78 @@ impl Editor {
     }
 
     /// Peek at the top of the kill ring (most recently killed text).
-    pub fn kill_ring_top(&self) -> Option<&str> {
-        self.kill_ring.last().map(String::as_str)
+    pub fn kill_ring_top(&self) -> Option<&KilledText> {
+        self.kill_ring.last()
     }
 
-    /// Set the mark (selection anchor) for `window_id`.
+    /// Set the mark (selection anchor) for `window_id` with linear
+    /// selection mode.
     pub fn set_mark(&mut self, window_id: crate::WindowId, byte: usize) {
-        self.marks.insert(window_id, byte);
+        self.marks.insert(
+            window_id,
+            MarkState {
+                byte,
+                mode: SelectionMode::Linear,
+            },
+        );
     }
 
-    /// Get the mark for `window_id`, if set.
+    /// Set the mark with a specific selection mode.
+    pub fn set_mark_with_mode(
+        &mut self,
+        window_id: crate::WindowId,
+        byte: usize,
+        mode: SelectionMode,
+    ) {
+        self.marks.insert(window_id, MarkState { byte, mode });
+    }
+
+    /// Get the mark byte offset for `window_id`, if set.
     pub fn mark(&self, window_id: crate::WindowId) -> Option<usize> {
+        self.marks.get(&window_id).map(|m| m.byte)
+    }
+
+    /// Get the full mark state (byte + selection mode) for `window_id`.
+    pub fn mark_state(&self, window_id: crate::WindowId) -> Option<MarkState> {
         self.marks.get(&window_id).copied()
     }
 
     /// Clear the mark for `window_id`.
     pub fn clear_mark(&mut self, window_id: crate::WindowId) {
         self.marks.remove(&window_id);
+    }
+
+    /// Push a location onto the navigation stack (for pop-back).
+    pub fn nav_stack_push(&mut self, buffer_id: arx_buffer::BufferId, byte: usize) {
+        self.nav_stack.push((buffer_id, byte));
+        if self.nav_stack.len() > 128 {
+            self.nav_stack.remove(0);
+        }
+    }
+
+    /// Pop the most recent location from the navigation stack.
+    pub fn nav_stack_pop(&mut self) -> Option<(arx_buffer::BufferId, usize)> {
+        self.nav_stack.pop()
+    }
+
+    /// Get the last find-char state (for `;` and `,` repeat).
+    pub fn last_find_char(&self) -> Option<FindCharState> {
+        self.last_find_char
+    }
+
+    /// Set the last find-char state.
+    pub fn set_last_find_char(&mut self, state: FindCharState) {
+        self.last_find_char = Some(state);
+    }
+
+    /// Get the operator state (for Vim operator-pending mode).
+    pub fn operator_state(&self) -> &OperatorState {
+        &self.operator_state
+    }
+
+    /// Mutably borrow the operator state.
+    pub fn operator_state_mut(&mut self) -> &mut OperatorState {
+        &mut self.operator_state
     }
 
     /// Set a transient status message shown in the modeline. Cleared
@@ -453,6 +654,27 @@ impl Editor {
     /// each command and fires its shutdown signal when it flips.
     pub fn quit_requested(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Request that the driver suspend the editor (SIGTSTP). On Unix
+    /// the input task tears down terminal state, raises SIGTSTP, and
+    /// rebuilds the terminal when the process resumes via `fg`.
+    /// No-op on Windows.
+    pub fn request_suspend(&mut self) {
+        self.suspend_requested = true;
+        self.mark_dirty();
+    }
+
+    /// Whether a suspend has been requested. The input task polls this
+    /// after each command and suspends the process when it flips.
+    pub fn suspend_requested(&self) -> bool {
+        self.suspend_requested
+    }
+
+    /// Clear the suspend-requested flag. Called by the input task
+    /// after it finishes the suspend/resume dance.
+    pub fn clear_suspend_request(&mut self) {
+        self.suspend_requested = false;
     }
 
     /// Feed a key to the keymap engine. If it resolves to a command,

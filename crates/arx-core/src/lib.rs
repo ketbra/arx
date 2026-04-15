@@ -73,6 +73,7 @@
 //! # }
 //! ```
 
+pub mod column;
 pub mod command;
 pub mod completion;
 pub mod editor;
@@ -80,16 +81,21 @@ pub mod event_loop;
 pub mod file;
 pub mod palette;
 pub mod registry;
+pub mod search;
 pub mod session;
 pub mod stock;
 pub mod window;
 
 pub use command::{CommandBus, CommandFn, DispatchError};
-pub use editor::{BufferManager, Editor, KeyHandled};
+pub use editor::{
+    BufferManager, CharReadMode, Editor, FindCharKind, FindCharState, KeyHandled, KilledText,
+    MarkState, OperatorState, PendingOperator, SelectionMode,
+};
 pub use event_loop::{DEFAULT_BUS_CAPACITY, EventLoop};
 pub use file::{OpenFileError, SaveFileError, open_file, save_file, save_file_as};
 pub use completion::{CompletionItem, CompletionPopup};
 pub use palette::{CommandPalette, PaletteMatch, PaletteMode};
+pub use search::{BufferSearch, SearchMatch, SearchMode};
 pub use registry::{Command, CommandContext, CommandRegistry};
 pub use session::{SerializedBuffer, SerializedWindow, Session, SessionFile};
 pub use window::{Layout, SplitAxis, WindowData, WindowId, WindowManager};

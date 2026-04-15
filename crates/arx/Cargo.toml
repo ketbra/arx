@@ -18,6 +18,7 @@ path = "src/main.rs"
 arx-buffer = { workspace = true }
 arx-core = { workspace = true }
 arx-driver = { workspace = true }
+arx-keymap = { workspace = true }
 arx-protocol = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

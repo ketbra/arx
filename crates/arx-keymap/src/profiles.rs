@@ -15,23 +15,8 @@
 
 use std::sync::Arc;
 
-use crate::commands::{
-    BUFFER_CLOSE, BUFFER_COPY_REGION, BUFFER_DELETE_BACKWARD, BUFFER_DELETE_FORWARD, BUFFER_FIND_FILE,
-    BUFFER_KILL_LINE, BUFFER_KILL_REGION, BUFFER_KILL_WORD, BUFFER_KILL_WORD_BACKWARD,
-    BUFFER_NEWLINE, BUFFER_OPEN_LINE, BUFFER_REDO, BUFFER_SAVE, BUFFER_SET_MARK, BUFFER_SWITCH,
-    BUFFER_TRANSPOSE_CHARS, BUFFER_UNDO, BUFFER_YANK, COMMAND_PALETTE_BACKSPACE,
-    COMMAND_PALETTE_CLOSE, COMMAND_PALETTE_EXECUTE, COMMAND_PALETTE_NEXT, COMMAND_PALETTE_OPEN,
-    COMMAND_PALETTE_PREV, COMPLETION_ACCEPT, COMPLETION_DISMISS, COMPLETION_NEXT, COMPLETION_PREV,
-    COMPLETION_TRIGGER, CURSOR_BUFFER_END,
-    LSP_HOVER, TERMINAL_OPEN,
-    CURSOR_BUFFER_START, CURSOR_DOWN, CURSOR_LEFT, CURSOR_LINE_END, CURSOR_LINE_START,
-    CURSOR_RIGHT, CURSOR_UP, CURSOR_WORD_BACKWARD, CURSOR_WORD_FORWARD, EDITOR_CANCEL,
-    EDITOR_DESCRIBE_KEY, EDITOR_QUIT, LSP_NEXT_DIAGNOSTIC, LSP_PREV_DIAGNOSTIC,
-    MODE_ENTER_INSERT, MODE_LEAVE_INSERT,
-    SCROLL_PAGE_DOWN, SCROLL_PAGE_UP, SCROLL_RECENTER, WINDOW_CLOSE, WINDOW_FOCUS_NEXT,
-    WINDOW_FOCUS_PREV,
-    WINDOW_SPLIT_HORIZONTAL, WINDOW_SPLIT_VERTICAL,
-};
+#[allow(clippy::wildcard_imports)]
+use crate::commands::*;
 use crate::engine::CountMode;
 use crate::keymap::Keymap;
 
@@ -80,6 +65,9 @@ pub fn emacs() -> Profile {
     m.bind_str("M-b", CURSOR_WORD_BACKWARD).unwrap();
     m.bind_str("M-<", CURSOR_BUFFER_START).unwrap();
     m.bind_str("M->", CURSOR_BUFFER_END).unwrap();
+    // Paragraph motion.
+    m.bind_str("C-<Up>", CURSOR_PARAGRAPH_BACKWARD).unwrap();
+    m.bind_str("C-<Down>", CURSOR_PARAGRAPH_FORWARD).unwrap();
 
     // Basic editing.
     m.bind_str("<Enter>", BUFFER_NEWLINE).unwrap();
@@ -87,7 +75,12 @@ pub fn emacs() -> Profile {
     m.bind_str("<Delete>", BUFFER_DELETE_FORWARD).unwrap();
     m.bind_str("C-d", BUFFER_DELETE_FORWARD).unwrap();
     m.bind_str("C-t", BUFFER_TRANSPOSE_CHARS).unwrap();
+    m.bind_str("M-t", BUFFER_TRANSPOSE_WORDS).unwrap();
     m.bind_str("C-o", BUFFER_OPEN_LINE).unwrap();
+    m.bind_str("M-^", BUFFER_JOIN_LINES).unwrap();
+    m.bind_str("M-<Up>", BUFFER_MOVE_LINE_UP).unwrap();
+    m.bind_str("M-<Down>", BUFFER_MOVE_LINE_DOWN).unwrap();
+    m.bind_str("M-;", BUFFER_COMMENT_TOGGLE).unwrap();
 
     // Kill / yank / mark.
     m.bind_str("C-k", BUFFER_KILL_LINE).unwrap();
@@ -96,7 +89,10 @@ pub fn emacs() -> Profile {
     m.bind_str("C-w", BUFFER_KILL_REGION).unwrap();
     m.bind_str("M-w", BUFFER_COPY_REGION).unwrap();
     m.bind_str("C-y", BUFFER_YANK).unwrap();
+    m.bind_str("M-y", BUFFER_YANK_POP).unwrap();
     m.bind_str("C-<Space>", BUFFER_SET_MARK).unwrap();
+    m.bind_str("C-x C-x", BUFFER_EXCHANGE_POINT_MARK).unwrap();
+    m.bind_str("C-x h", BUFFER_MARK_WHOLE).unwrap();
 
     // Scrolling.
     m.bind_str("<PageUp>", SCROLL_PAGE_UP).unwrap();
@@ -114,6 +110,10 @@ pub fn emacs() -> Profile {
     m.bind_str("C-x C-s", BUFFER_SAVE).unwrap();
     m.bind_str("C-x C-c", EDITOR_QUIT).unwrap();
     m.bind_str("C-x C-q", EDITOR_QUIT).unwrap();
+    // Ctrl-Z suspends the editor (SIGTSTP). Use `fg` in the shell
+    // to resume. No-op on Windows.
+    m.bind_str("C-z", EDITOR_SUSPEND).unwrap();
+    m.bind_str("C-x C-z", EDITOR_SUSPEND).unwrap();
     m.bind_str("C-x k", BUFFER_CLOSE).unwrap();
     m.bind_str("C-x b", BUFFER_SWITCH).unwrap();
 
@@ -122,25 +122,50 @@ pub fn emacs() -> Profile {
     // matches the `undo-tree.el` convention for redo.
     m.bind_str("C-/", BUFFER_UNDO).unwrap();
     m.bind_str("C-_", BUFFER_UNDO).unwrap();
+    // Some terminals report Ctrl+Shift+/ as Ctrl+? (where `?` is the
+    // shifted form of `/` on US layouts). Bind it as undo too.
+    m.bind_str("C-?", BUFFER_UNDO).unwrap();
     m.bind_str("C-x u", BUFFER_UNDO).unwrap();
     m.bind_str("M-_", BUFFER_REDO).unwrap();
 
+    // Rectangle (column block) operations.
+    m.bind_str("C-x r k", RECT_KILL).unwrap();
+    m.bind_str("C-x r y", RECT_YANK).unwrap();
+    m.bind_str("C-x r o", RECT_OPEN).unwrap();
+
     // Completion.
     m.bind_str("M-/", COMPLETION_TRIGGER).unwrap();
+
+    // Interactive buffer search (swiper-style).
+    m.bind_str("C-s", SEARCH_OPEN).unwrap();
+
+    // Goto.
+    m.bind_str("M-g g", GOTO_LINE).unwrap();
+    m.bind_str("M-g M-g", GOTO_LINE).unwrap();
 
     // LSP / diagnostic.
     m.bind_str("C-c l h", LSP_HOVER).unwrap();
     m.bind_str("M-n", LSP_NEXT_DIAGNOSTIC).unwrap();
     m.bind_str("M-p", LSP_PREV_DIAGNOSTIC).unwrap();
+    m.bind_str("M-.", LSP_GOTO_DEFINITION).unwrap();
+    m.bind_str("M-,", LSP_POP_BACK).unwrap();
+
+    // Tree-sitter navigation.
+    m.bind_str("C-M-a", TREESITTER_PREV_FUNCTION).unwrap();
+    m.bind_str("C-M-e", TREESITTER_NEXT_FUNCTION).unwrap();
+    m.bind_str("C-M-u", TREESITTER_PARENT_NODE).unwrap();
 
     // Terminal.
     m.bind_str("C-x t", TERMINAL_OPEN).unwrap();
 
     // Window splits (Emacs conventions).
+    m.bind_str("C-x 1", WINDOW_DELETE_OTHER).unwrap();
     m.bind_str("C-x 2", WINDOW_SPLIT_HORIZONTAL).unwrap();
     m.bind_str("C-x 3", WINDOW_SPLIT_VERTICAL).unwrap();
     m.bind_str("C-x 0", WINDOW_CLOSE).unwrap();
     m.bind_str("C-x o", WINDOW_FOCUS_NEXT).unwrap();
+    // C-\ also cycles windows — useful as a quick escape from terminal panes.
+    m.bind_str("C-\\", WINDOW_FOCUS_NEXT).unwrap();
 
     // Command palette.
     m.bind_str("M-x", COMMAND_PALETTE_OPEN).unwrap();
@@ -175,6 +200,8 @@ pub fn palette_layer() -> Keymap {
     m.bind_str("<Down>", COMMAND_PALETTE_NEXT).unwrap();
     m.bind_str("C-p", COMMAND_PALETTE_PREV).unwrap();
     m.bind_str("C-n", COMMAND_PALETTE_NEXT).unwrap();
+    m.bind_str("M-p", COMMAND_PALETTE_HISTORY_PREV).unwrap();
+    m.bind_str("M-n", COMMAND_PALETTE_HISTORY_NEXT).unwrap();
     m.bind_str("<Backspace>", COMMAND_PALETTE_BACKSPACE).unwrap();
     m
 }
@@ -196,6 +223,110 @@ pub fn completion_layer() -> Keymap {
     m.bind_str("<Down>", COMPLETION_NEXT).unwrap();
     m.bind_str("C-p", COMPLETION_PREV).unwrap();
     m.bind_str("C-n", COMPLETION_NEXT).unwrap();
+    m.bind_str("C-v", COMPLETION_PAGE_DOWN).unwrap();
+    m.bind_str("M-v", COMPLETION_PAGE_UP).unwrap();
+    m.bind_str("<PageDown>", COMPLETION_PAGE_DOWN).unwrap();
+    m.bind_str("<PageUp>", COMPLETION_PAGE_UP).unwrap();
+    m
+}
+
+// ---------------------------------------------------------------------------
+// Interactive buffer search
+// ---------------------------------------------------------------------------
+
+/// Keymap pushed when the interactive search overlay opens. Similar to
+/// the palette layer: `<Enter>` accepts, `<Esc>` / `C-g` cancels,
+/// arrows and `C-n` / `C-p` navigate, printable keys fall through to
+/// the query via `handle_printable_fallback`.
+pub fn search_layer() -> Keymap {
+    let mut m = Keymap::named("search");
+    m.bind_str("<Enter>", SEARCH_EXECUTE).unwrap();
+    m.bind_str("<Esc>", SEARCH_CLOSE).unwrap();
+    m.bind_str("C-g", SEARCH_CLOSE).unwrap();
+    m.bind_str("<Up>", SEARCH_PREV).unwrap();
+    m.bind_str("<Down>", SEARCH_NEXT).unwrap();
+    m.bind_str("C-p", SEARCH_PREV).unwrap();
+    m.bind_str("C-n", SEARCH_NEXT).unwrap();
+    m.bind_str("C-v", SEARCH_PAGE_DOWN).unwrap();
+    m.bind_str("M-v", SEARCH_PAGE_UP).unwrap();
+    m.bind_str("<PageDown>", SEARCH_PAGE_DOWN).unwrap();
+    m.bind_str("<PageUp>", SEARCH_PAGE_UP).unwrap();
+    m.bind_str("M-s", SEARCH_TOGGLE_MODE).unwrap();
+    m.bind_str("<Backspace>", SEARCH_BACKSPACE).unwrap();
+    m.bind_str("M-p", SEARCH_HISTORY_PREV).unwrap();
+    m.bind_str("M-n", SEARCH_HISTORY_NEXT).unwrap();
+    m
+}
+
+// ---------------------------------------------------------------------------
+// Vim operator-pending mode
+// ---------------------------------------------------------------------------
+
+/// Keymap pushed when a Vim operator (`d`, `c`, `y`, `>`, `<`) is
+/// pressed and waiting for a motion or text object. Motions like `w`,
+/// `e`, `$`, `{`, etc. fall through to the normal layer. This layer
+/// captures text-object prefixes (`i`, `a`) and special keys.
+pub fn operator_pending_layer() -> Keymap {
+    let mut m = Keymap::named("vim.operator-pending");
+    // Escape cancels the operator.
+    m.bind_str("<Esc>", OPERATOR_CANCEL).unwrap();
+    // Repeating the operator key applies to the current line (dd, cc, yy, >>, <<).
+    m.bind_str("d", OPERATOR_LINE).unwrap();
+    m.bind_str("c", OPERATOR_LINE).unwrap();
+    m.bind_str("y", OPERATOR_LINE).unwrap();
+    m.bind_str(">", OPERATOR_LINE).unwrap();
+    m.bind_str("<", OPERATOR_LINE).unwrap();
+
+    // Text objects: inner (i) and a (a) prefixes.
+    m.bind_str("i w", TEXT_OBJECT_INNER_WORD).unwrap();
+    m.bind_str("a w", TEXT_OBJECT_A_WORD).unwrap();
+    m.bind_str("i p", TEXT_OBJECT_INNER_PARAGRAPH).unwrap();
+    m.bind_str("a p", TEXT_OBJECT_A_PARAGRAPH).unwrap();
+    m.bind_str("i \"", TEXT_OBJECT_INNER_DOUBLE_QUOTE).unwrap();
+    m.bind_str("a \"", TEXT_OBJECT_A_DOUBLE_QUOTE).unwrap();
+    m.bind_str("i '", TEXT_OBJECT_INNER_SINGLE_QUOTE).unwrap();
+    m.bind_str("a '", TEXT_OBJECT_A_SINGLE_QUOTE).unwrap();
+    m.bind_str("i (", TEXT_OBJECT_INNER_PAREN).unwrap();
+    m.bind_str("a (", TEXT_OBJECT_A_PAREN).unwrap();
+    m.bind_str("i )", TEXT_OBJECT_INNER_PAREN).unwrap();
+    m.bind_str("a )", TEXT_OBJECT_A_PAREN).unwrap();
+    m.bind_str("i b", TEXT_OBJECT_INNER_PAREN).unwrap();
+    m.bind_str("a b", TEXT_OBJECT_A_PAREN).unwrap();
+    m.bind_str("i {", TEXT_OBJECT_INNER_BRACE).unwrap();
+    m.bind_str("a {", TEXT_OBJECT_A_BRACE).unwrap();
+    m.bind_str("i }", TEXT_OBJECT_INNER_BRACE).unwrap();
+    m.bind_str("a }", TEXT_OBJECT_A_BRACE).unwrap();
+    m.bind_str("i B", TEXT_OBJECT_INNER_BRACE).unwrap();
+    m.bind_str("a B", TEXT_OBJECT_A_BRACE).unwrap();
+    m.bind_str("i [", TEXT_OBJECT_INNER_BRACKET).unwrap();
+    m.bind_str("a [", TEXT_OBJECT_A_BRACKET).unwrap();
+    m.bind_str("i ]", TEXT_OBJECT_INNER_BRACKET).unwrap();
+    m.bind_str("a ]", TEXT_OBJECT_A_BRACKET).unwrap();
+    m.bind_str("i <", TEXT_OBJECT_INNER_ANGLE).unwrap();
+    m.bind_str("a <", TEXT_OBJECT_A_ANGLE).unwrap();
+    m.bind_str("i >", TEXT_OBJECT_INNER_ANGLE).unwrap();
+    m.bind_str("a >", TEXT_OBJECT_A_ANGLE).unwrap();
+    m.bind_str("i `", TEXT_OBJECT_INNER_BACKTICK).unwrap();
+    m.bind_str("a `", TEXT_OBJECT_A_BACKTICK).unwrap();
+
+    // Motions that don't exist in the normal layer (f/t with char-read):
+    // These are already in vim.normal and fall through.
+    m
+}
+
+// ---------------------------------------------------------------------------
+// Vim visual block mode
+// ---------------------------------------------------------------------------
+
+/// Keymap pushed when Vim enters visual-block mode (`C-v` in normal
+/// mode). `d` kills the rectangle, `y` copies it, `Esc` cancels.
+/// Motion keys (arrows, h/j/k/l) fall through to the normal layer
+/// to extend the selection.
+pub fn visual_block_layer() -> Keymap {
+    let mut m = Keymap::named("vim.visual-block");
+    m.bind_str("d", RECT_KILL).unwrap();
+    m.bind_str("y", RECT_COPY).unwrap();
+    m.bind_str("<Esc>", MODE_LEAVE_VISUAL_BLOCK).unwrap();
     m
 }
 
@@ -239,13 +370,17 @@ pub fn vim() -> Profile {
     // Rescue save/quit bindings that work in every mode.
     global.bind_str("C-s", BUFFER_SAVE).unwrap();
     global.bind_str("C-q", EDITOR_QUIT).unwrap();
+    global.bind_str("C-z", EDITOR_SUSPEND).unwrap();
     // Window splits (Vim conventions — prefix is `C-w`).
     global.bind_str("C-w s", WINDOW_SPLIT_HORIZONTAL).unwrap();
     global.bind_str("C-w v", WINDOW_SPLIT_VERTICAL).unwrap();
     global.bind_str("C-w c", WINDOW_CLOSE).unwrap();
     global.bind_str("C-w q", WINDOW_CLOSE).unwrap();
+    global.bind_str("C-w o", WINDOW_DELETE_OTHER).unwrap();
     global.bind_str("C-w w", WINDOW_FOCUS_NEXT).unwrap();
     global.bind_str("C-w W", WINDOW_FOCUS_PREV).unwrap();
+    // C-\ also cycles windows — useful as a quick escape from terminal panes.
+    global.bind_str("C-\\", WINDOW_FOCUS_NEXT).unwrap();
     // Terminal.
     global.bind_str("C-w t", TERMINAL_OPEN).unwrap();
     // Completion (works in insert mode via the global layer).
@@ -270,8 +405,25 @@ pub fn vim() -> Profile {
     // unconditional end-of-buffer.
     normal.bind_str("w", CURSOR_WORD_FORWARD).unwrap();
     normal.bind_str("b", CURSOR_WORD_BACKWARD).unwrap();
+    normal.bind_str("e", CURSOR_END_OF_WORD).unwrap();
     normal.bind_str("g g", CURSOR_BUFFER_START).unwrap();
     normal.bind_str("G", CURSOR_BUFFER_END).unwrap();
+    // Paragraph motion.
+    normal.bind_str("{", CURSOR_PARAGRAPH_BACKWARD).unwrap();
+    normal.bind_str("}", CURSOR_PARAGRAPH_FORWARD).unwrap();
+    // Find char on line.
+    normal.bind_str("f", CURSOR_FIND_CHAR_FORWARD).unwrap();
+    normal.bind_str("F", CURSOR_FIND_CHAR_BACKWARD).unwrap();
+    normal.bind_str("t", CURSOR_TILL_CHAR_FORWARD).unwrap();
+    normal.bind_str("T", CURSOR_TILL_CHAR_BACKWARD).unwrap();
+    normal.bind_str(";", CURSOR_REPEAT_FIND).unwrap();
+    normal.bind_str(",", CURSOR_REPEAT_FIND_REVERSE).unwrap();
+    // Matching bracket.
+    normal.bind_str("%", CURSOR_MATCHING_BRACKET).unwrap();
+    // Screen position.
+    normal.bind_str("H", CURSOR_SCREEN_TOP).unwrap();
+    normal.bind_str("M", CURSOR_SCREEN_MIDDLE).unwrap();
+    normal.bind_str("L", CURSOR_SCREEN_BOTTOM).unwrap();
     // `:` opens the command palette as a stand-in for the ex-command
     // line until Phase 2 wires up a real ex-prompt.
     normal.bind_str(":", COMMAND_PALETTE_OPEN).unwrap();
@@ -279,15 +431,44 @@ pub fn vim() -> Profile {
     normal.bind_str("a", MODE_ENTER_INSERT).unwrap(); // simplified: no trailing cursor move yet
     normal.bind_str("o", MODE_ENTER_INSERT).unwrap(); // simplified: no newline-below yet
     normal.bind_str("x", BUFFER_DELETE_FORWARD).unwrap();
+    // Line operations.
+    normal.bind_str("J", BUFFER_JOIN_LINES).unwrap();
+    normal.bind_str("D", BUFFER_DELETE_TO_EOL).unwrap();
+    normal.bind_str("C", BUFFER_CHANGE_TO_EOL).unwrap();
+    normal.bind_str("Y", BUFFER_YANK_TO_EOL).unwrap();
+    normal.bind_str("g c", BUFFER_COMMENT_TOGGLE).unwrap();
+    // Operators: d/c/y/>/< enter operator-pending mode, waiting for
+    // a motion or text object. dd/cc/yy/>>/<<  are handled by the
+    // operator-pending layer's binding for the same key.
+    normal.bind_str("d", OPERATOR_DELETE).unwrap();
+    normal.bind_str("c", OPERATOR_CHANGE).unwrap();
+    normal.bind_str("y", OPERATOR_YANK).unwrap();
+    normal.bind_str(">", OPERATOR_INDENT).unwrap();
+    normal.bind_str("<", OPERATOR_DEDENT).unwrap();
+    // Interactive buffer search (Vim `/` in normal mode).
+    normal.bind_str("/", SEARCH_OPEN).unwrap();
     // Undo / redo: Vim's canonical `u` in normal mode, `C-r` for redo.
     normal.bind_str("u", BUFFER_UNDO).unwrap();
     normal.bind_str("C-r", BUFFER_REDO).unwrap();
+    // Scroll.
+    normal.bind_str("C-d", SCROLL_HALF_PAGE_DOWN).unwrap();
+    normal.bind_str("C-u", SCROLL_HALF_PAGE_UP).unwrap();
+    normal.bind_str("C-f", SCROLL_PAGE_DOWN).unwrap();
+    normal.bind_str("C-b", SCROLL_PAGE_UP).unwrap();
+    normal.bind_str("z t", SCROLL_CURSOR_TOP).unwrap();
+    normal.bind_str("z z", SCROLL_RECENTER).unwrap();
+    normal.bind_str("z b", SCROLL_CURSOR_BOTTOM).unwrap();
     // LSP / diagnostic navigation.
     normal.bind_str("K", LSP_HOVER).unwrap();
     normal.bind_str("] d", LSP_NEXT_DIAGNOSTIC).unwrap();
     normal.bind_str("[ d", LSP_PREV_DIAGNOSTIC).unwrap();
-    // Shift-Z Shift-Z → save and quit. Minimalist vim exit.
-    // Ex-command line (`:w`, `:q`) is a follow-up milestone.
+    normal.bind_str("g d", LSP_GOTO_DEFINITION).unwrap();
+    normal.bind_str("C-t", LSP_POP_BACK).unwrap();
+    // Tree-sitter navigation.
+    normal.bind_str("] f", TREESITTER_NEXT_FUNCTION).unwrap();
+    normal.bind_str("[ f", TREESITTER_PREV_FUNCTION).unwrap();
+    // Visual block mode (column selection).
+    normal.bind_str("C-v", MODE_ENTER_VISUAL_BLOCK).unwrap();
 
     Profile {
         global: Arc::new(global),

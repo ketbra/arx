@@ -1,0 +1,25 @@
+[package]
+name = "arx-tree-sitter-perl"
+description = "Vendored Perl tree-sitter grammar for the Arx editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+build = "build.rs"
+
+# Distinguish the native lib name from upstream tree-sitter-perl so
+# both can coexist if a downstream crate happens to pull both in.
+links = "arx-tree-sitter-perl"
+
+[lints]
+workspace = true
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tree-sitter = "0.25"

@@ -87,10 +87,34 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
         }
     });
     if let Some(layout) = palette_layout.as_ref() {
-        // Shrink the text area to make room for the overlay. `prompt_row`
-        // being `None` would mean the terminal is too short for a useful
-        // overlay — in that case we leave text_rows alone and skip
-        // painting the palette below.
+        if let Some(prompt) = layout.prompt_row {
+            text_rows = prompt;
+        }
+    }
+
+    // Search overlay — same bottom-overlay geometry as the palette.
+    // Search and palette are mutually exclusive; the search overlay
+    // only paints if no palette is open.
+    let search_layout = if palette_layout.is_none() {
+        state.global.search.as_ref().map(|s| {
+            let matches_rows = s.max_rows.min(text_rows);
+            let prompt_row = if matches_rows < text_rows {
+                Some(text_rows - matches_rows - 1)
+            } else {
+                None
+            };
+            let matches_top = prompt_row.map(|r| r + 1);
+            SearchLayout {
+                view: s,
+                prompt_row,
+                matches_top,
+                matches_rows,
+            }
+        })
+    } else {
+        None
+    };
+    if let Some(ref layout) = search_layout {
         if let Some(prompt) = layout.prompt_row {
             text_rows = prompt;
         }
@@ -120,6 +144,10 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
 
     if let Some(layout) = palette_layout {
         paint_palette(&layout, cols, &mut grid, &mut cursors);
+    }
+
+    if let Some(layout) = search_layout {
+        paint_search(&layout, cols, &mut grid, &mut cursors);
     }
 
     if let Some(ref completion) = state.global.completion {
@@ -350,10 +378,42 @@ fn render_window(
 /// leaving the final column blank as padding between the gutter and the
 /// text area.
 /// Paint a selection highlight over the cells that fall within the
-/// byte range `sel`. Walks each visible row, converts byte positions
-/// to screen columns, and applies a highlight face (blue background,
-/// white foreground) to the affected cells.
+/// selection region. Dispatches to linear or rectangle painting.
 fn paint_selection(
+    window: &WindowState,
+    sel: &crate::view_state::Selection,
+    rect: Rect,
+    gutter_width: u16,
+    text_width: u16,
+    grid: &mut CellGrid,
+) {
+    match sel {
+        crate::view_state::Selection::Linear(range) => {
+            paint_linear_selection(window, range, rect, gutter_width, text_width, grid);
+        }
+        crate::view_state::Selection::Rectangle {
+            start_line,
+            end_line,
+            left_col,
+            right_col,
+        } => {
+            paint_rect_selection(
+                window,
+                *start_line,
+                *end_line,
+                *left_col,
+                *right_col,
+                rect,
+                gutter_width,
+                text_width,
+                grid,
+            );
+        }
+    }
+}
+
+/// Paint a linear (contiguous) selection highlight.
+fn paint_linear_selection(
     window: &WindowState,
     sel: &std::ops::Range<usize>,
     rect: Rect,
@@ -383,15 +443,12 @@ fn paint_selection(
         } else {
             rope.len_bytes()
         };
-        // Does this line overlap the selection?
         if line_end <= sel.start || line_start >= sel.end {
             continue;
         }
-        // Compute the column range within this line that's selected.
         let sel_start_in_line = sel.start.max(line_start) - line_start;
         let sel_end_in_line = sel.end.min(line_end) - line_start;
 
-        // Walk characters to convert byte offsets to display columns.
         let line_text = rope.slice_to_string(line_start..line_end);
         let mut byte_in_line: usize = 0;
         let mut display_col: u16 = 0;
@@ -402,18 +459,16 @@ fn paint_selection(
             if gi >= sel_end_in_line {
                 break;
             }
-            if g_end > sel_start_in_line && gi < sel_end_in_line {
-                // This grapheme overlaps the selection. Compute its
-                // screen column (accounting for horizontal scroll).
-                if display_col >= window.scroll.left_col
-                    && display_col - window.scroll.left_col < text_width
-                {
-                    let screen_col = text_x + (display_col - window.scroll.left_col);
-                    let y = rect.y + row_idx;
-                    for dx in 0..w {
-                        if let Some(cell) = grid.get_mut(screen_col + dx, y) {
-                            cell.face = sel_face;
-                        }
+            if g_end > sel_start_in_line
+                && gi < sel_end_in_line
+                && display_col >= window.scroll.left_col
+                && display_col - window.scroll.left_col < text_width
+            {
+                let screen_col = text_x + (display_col - window.scroll.left_col);
+                let y = rect.y + row_idx;
+                for dx in 0..w {
+                    if let Some(cell) = grid.get_mut(screen_col + dx, y) {
+                        cell.face = sel_face;
                     }
                 }
             }
@@ -421,6 +476,53 @@ fn paint_selection(
             byte_in_line = g_end;
         }
         let _ = byte_in_line;
+    }
+}
+
+/// Paint a rectangular (column block) selection highlight.
+#[allow(clippy::too_many_arguments)]
+fn paint_rect_selection(
+    window: &WindowState,
+    start_line: usize,
+    end_line: usize,
+    left_col: u16,
+    right_col: u16,
+    rect: Rect,
+    gutter_width: u16,
+    text_width: u16,
+    grid: &mut CellGrid,
+) {
+    if left_col == right_col || rect.is_empty() || text_width == 0 {
+        return;
+    }
+    let rope = window.buffer.rope();
+    let sel_face = ResolvedFace {
+        fg: Color::WHITE,
+        bg: Color::rgb(0x26, 0x4F, 0x78),
+        ..ResolvedFace::DEFAULT
+    };
+    let text_x = rect.x + gutter_width;
+
+    for row_idx in 0..rect.height {
+        let line_idx = window.scroll.top_line + row_idx as usize;
+        if line_idx >= rope.len_lines() {
+            break;
+        }
+        if line_idx < start_line || line_idx > end_line {
+            continue;
+        }
+        // Highlight the column range on this line.
+        for col in left_col..right_col {
+            if col >= window.scroll.left_col
+                && col - window.scroll.left_col < text_width
+            {
+                let screen_col = text_x + (col - window.scroll.left_col);
+                let y = rect.y + row_idx;
+                if let Some(cell) = grid.get_mut(screen_col, y) {
+                    cell.face = sel_face;
+                }
+            }
+        }
     }
 }
 
@@ -890,6 +992,153 @@ fn paint_palette_text(
     col
 }
 
+// ---------------------------------------------------------------------------
+// Search overlay
+// ---------------------------------------------------------------------------
+
+/// Pre-computed search overlay geometry for the current frame.
+struct SearchLayout<'a> {
+    view: &'a crate::view_state::SearchView,
+    prompt_row: Option<u16>,
+    matches_top: Option<u16>,
+    matches_rows: u16,
+}
+
+fn paint_search(
+    layout: &SearchLayout<'_>,
+    cols: u16,
+    grid: &mut CellGrid,
+    cursors: &mut SmallVec<[CursorRender; 1]>,
+) {
+    let Some(prompt_row) = layout.prompt_row else {
+        return;
+    };
+    let prompt_face = ResolvedFace {
+        fg: Color::WHITE,
+        bg: Color::rgb(0x1a, 0x20, 0x30),
+        ..ResolvedFace::DEFAULT
+    };
+    let selected_face = ResolvedFace {
+        fg: Color::BLACK,
+        bg: Color::rgb(0xd0, 0xd0, 0xe0),
+        bold: true,
+        ..ResolvedFace::DEFAULT
+    };
+
+    // Paint the prompt row: "Search (fuzzy): <query>  [N matches]"
+    clear_row(grid, prompt_row, cols, prompt_face);
+    let mut x: u16 = 0;
+    // Paint prompt text.
+    x = paint_palette_text(&layout.view.prompt, x, prompt_row, cols, prompt_face, grid);
+    // Paint query text.
+    let cursor_col = {
+        let before = x;
+        for g in layout.view.query.graphemes(true) {
+            if x >= cols {
+                break;
+            }
+            let w = UnicodeWidthStr::width(g).clamp(1, 2) as u16;
+            grid.set(
+                x,
+                prompt_row,
+                Cell {
+                    grapheme: CompactString::new(g),
+                    face: prompt_face,
+                    flags: CellFlags::empty(),
+                },
+            );
+            if w == 2 && x + 1 < cols {
+                grid.set(x + 1, prompt_row, Cell::wide_continuation(prompt_face));
+            }
+            x = x.saturating_add(w);
+        }
+        if x == before { before } else { x }
+    };
+    // Paint match count on the right side.
+    let count_str = format!("  [{} matches]", layout.view.total_matches);
+    if x + count_str.len() as u16 + 2 < cols {
+        let count_face = ResolvedFace {
+            fg: Color::rgb(0x80, 0x80, 0x90),
+            ..prompt_face
+        };
+        paint_palette_text(&count_str, x, prompt_row, cols, count_face, grid);
+    }
+
+    // Cursor at the end of the query.
+    cursors.clear();
+    cursors.push(CursorRender {
+        col: cursor_col.min(cols.saturating_sub(1)),
+        row: prompt_row,
+        style: CursorStyle::Bar,
+    });
+
+    // Paint match rows.
+    if let Some(matches_top) = layout.matches_top {
+        paint_search_matches(
+            layout.view,
+            matches_top,
+            layout.matches_rows,
+            cols,
+            prompt_face,
+            selected_face,
+            grid,
+        );
+    }
+}
+
+fn paint_search_matches(
+    view: &crate::view_state::SearchView,
+    matches_top: u16,
+    matches_rows: u16,
+    cols: u16,
+    face: ResolvedFace,
+    selected_face: ResolvedFace,
+    grid: &mut CellGrid,
+) {
+    if matches_rows == 0 {
+        return;
+    }
+    let total = view.matches.len();
+    let selected = view.selected.min(total.saturating_sub(1));
+    let rows_cap = matches_rows as usize;
+    let scroll_top = if total <= rows_cap || selected < rows_cap / 2 {
+        0
+    } else if selected + rows_cap / 2 >= total {
+        total - rows_cap
+    } else {
+        selected - rows_cap / 2
+    };
+
+    let line_num_face = ResolvedFace {
+        fg: Color::rgb(0x80, 0x80, 0x90),
+        ..face
+    };
+
+    for row_idx in 0..matches_rows {
+        let y = matches_top + row_idx;
+        let match_idx = scroll_top + row_idx as usize;
+        let Some(entry) = view.matches.get(match_idx) else {
+            clear_row(grid, y, cols, face);
+            continue;
+        };
+        let row_face = if match_idx == selected {
+            selected_face
+        } else {
+            face
+        };
+        let num_face = if match_idx == selected {
+            selected_face
+        } else {
+            line_num_face
+        };
+        clear_row(grid, y, cols, row_face);
+        // Paint "  NNN: line text"
+        let num_str = format!("{:>5}: ", entry.line_number + 1);
+        let col = paint_palette_text(&num_str, 0, y, cols, num_face, grid);
+        paint_palette_text(&entry.line_text, col, y, cols, row_face, grid);
+    }
+}
+
 /// Fill every cell in `row` with a space of `face`.
 fn clear_row(grid: &mut CellGrid, row: u16, cols: u16, face: ResolvedFace) {
     for x in 0..cols {
@@ -1258,6 +1507,7 @@ mod tests {
                 palette: None,
                 completion: None,
                 which_key: None,
+                search: None,
             },
         }
     }
@@ -1462,6 +1712,7 @@ mod tests {
                 palette: Some(palette),
                 completion: None,
                 which_key: None,
+                search: None,
             },
         }
     }

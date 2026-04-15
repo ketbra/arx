@@ -52,6 +52,7 @@ pub mod lsp;
 pub mod remote_backend;
 pub mod render;
 pub mod state;
+pub mod suspend;
 
 pub use daemon::{DaemonClient, DaemonError, DaemonServer};
 pub use driver::{Driver, DriverError};

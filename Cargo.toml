@@ -12,6 +12,7 @@ members = [
     "crates/arx-protocol",
     "crates/arx-render",
     "crates/arx-sdk",
+    "crates/arx-tree-sitter-perl",
     "examples/ext-hello",
 ]
 
@@ -42,6 +43,7 @@ arx-keymap = { path = "crates/arx-keymap" }
 arx-protocol = { path = "crates/arx-protocol" }
 arx-sdk = { path = "crates/arx-sdk" }
 libloading = "0.8"
+regex = "1"
 notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
 
 [workspace.package]

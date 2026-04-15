@@ -23,6 +23,7 @@ use crate::window::SplitAxis;
 use crate::WindowId;
 
 /// Register every stock command into `reg`. Call once at editor start.
+#[allow(clippy::too_many_lines)]
 pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CursorLeft);
     reg.register(CursorRight);
@@ -34,12 +35,29 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CursorWordBackward);
     reg.register(CursorBufferStart);
     reg.register(CursorBufferEnd);
+    reg.register(CursorEndOfWord);
+    reg.register(CursorParagraphForward);
+    reg.register(CursorParagraphBackward);
+    reg.register(CursorMatchingBracket);
+    reg.register(CursorScreenTop);
+    reg.register(CursorScreenMiddle);
+    reg.register(CursorScreenBottom);
+    reg.register(CursorFindCharForward);
+    reg.register(CursorFindCharBackward);
+    reg.register(CursorTillCharForward);
+    reg.register(CursorTillCharBackward);
+    reg.register(CursorRepeatFind);
+    reg.register(CursorRepeatFindReverse);
     reg.register(BufferNewline);
     reg.register(BufferDeleteBackward);
     reg.register(BufferDeleteForward);
     reg.register(ScrollPageUp);
     reg.register(ScrollPageDown);
     reg.register(ScrollRecenter);
+    reg.register(ScrollHalfPageDown);
+    reg.register(ScrollHalfPageUp);
+    reg.register(ScrollCursorTop);
+    reg.register(ScrollCursorBottom);
     reg.register(BufferKillLine);
     reg.register(BufferKillWord);
     reg.register(BufferKillWordBackward);
@@ -52,8 +70,27 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(BufferSwitch);
     reg.register(BufferOpenLine);
     reg.register(BufferTransposeChars);
+    reg.register(BufferTransposeWords);
+    reg.register(BufferJoinLines);
+    reg.register(BufferDuplicateLine);
+    reg.register(BufferMoveLineUp);
+    reg.register(BufferMoveLineDown);
+    reg.register(BufferIndentLine);
+    reg.register(BufferDedentLine);
+    reg.register(BufferCommentToggle);
+    reg.register(BufferMarkWhole);
+    reg.register(BufferExchangePointMark);
+    reg.register(BufferYankPop);
+    reg.register(BufferDeleteLine);
+    reg.register(BufferYankLine);
+    reg.register(BufferChangeLine);
+    reg.register(BufferDeleteToEol);
+    reg.register(BufferChangeToEol);
+    reg.register(BufferYankToEol);
+    reg.register(GotoLine);
     reg.register(BufferSave);
     reg.register(EditorQuit);
+    reg.register(EditorSuspend);
     reg.register(EditorCancel);
     reg.register(EditorDescribeKey);
     reg.register(ModeEnterInsert);
@@ -64,9 +101,12 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CommandPaletteNext);
     reg.register(CommandPalettePrev);
     reg.register(CommandPaletteBackspace);
+    reg.register(CommandPaletteHistoryPrev);
+    reg.register(CommandPaletteHistoryNext);
     reg.register(WindowSplitHorizontal);
     reg.register(WindowSplitVertical);
     reg.register(WindowClose);
+    reg.register(WindowDeleteOther);
     reg.register(WindowFocusNext);
     reg.register(WindowFocusPrev);
     reg.register(BufferUndo);
@@ -76,12 +116,61 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(LspHover);
     reg.register(LspNextDiagnostic);
     reg.register(LspPrevDiagnostic);
+    reg.register(LspGotoDefinition);
+    reg.register(LspPopBack);
+    reg.register(TreesitterNextFunction);
+    reg.register(TreesitterPrevFunction);
+    reg.register(TreesitterParentNode);
     reg.register(CompletionTrigger);
     reg.register(TerminalOpen);
+    reg.register(SearchOpen);
+    reg.register(SearchClose);
+    reg.register(SearchExecute);
+    reg.register(SearchNext);
+    reg.register(SearchPrev);
+    reg.register(SearchPageDown);
+    reg.register(SearchPageUp);
+    reg.register(SearchToggleMode);
+    reg.register(SearchBackspace);
+    reg.register(SearchHistoryPrev);
+    reg.register(SearchHistoryNext);
+    reg.register(RectKill);
+    reg.register(RectCopy);
+    reg.register(RectYank);
+    reg.register(RectOpen);
+    reg.register(ModeEnterVisualBlock);
+    reg.register(ModeLeaveVisualBlock);
+    reg.register(OperatorDelete);
+    reg.register(OperatorChange);
+    reg.register(OperatorYank);
+    reg.register(OperatorIndent);
+    reg.register(OperatorDedent);
+    reg.register(OperatorCancel);
+    reg.register(OperatorLineApply);
+    reg.register(TextObjectInnerWord);
+    reg.register(TextObjectAWord);
+    reg.register(TextObjectInnerParagraph);
+    reg.register(TextObjectAParagraph);
+    reg.register(TextObjectInnerDoubleQuote);
+    reg.register(TextObjectADoubleQuote);
+    reg.register(TextObjectInnerSingleQuote);
+    reg.register(TextObjectASingleQuote);
+    reg.register(TextObjectInnerParen);
+    reg.register(TextObjectAParen);
+    reg.register(TextObjectInnerBrace);
+    reg.register(TextObjectABrace);
+    reg.register(TextObjectInnerBracket);
+    reg.register(TextObjectABracket);
+    reg.register(TextObjectInnerAngle);
+    reg.register(TextObjectAAngle);
+    reg.register(TextObjectInnerBacktick);
+    reg.register(TextObjectABacktick);
     reg.register(CompletionAccept);
     reg.register(CompletionDismiss);
     reg.register(CompletionNext);
     reg.register(CompletionPrev);
+    reg.register(CompletionPageDown);
+    reg.register(CompletionPageUp);
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +204,9 @@ macro_rules! stock_cmd {
 stock_cmd!(CursorLeft, CURSOR_LEFT, "Move the cursor one grapheme left");
 impl CursorLeft {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[D") {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
@@ -142,6 +234,9 @@ impl CursorLeft {
 stock_cmd!(CursorRight, CURSOR_RIGHT, "Move the cursor one grapheme right");
 impl CursorRight {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[C") {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
@@ -170,6 +265,9 @@ impl CursorRight {
 stock_cmd!(CursorUp, CURSOR_UP, "Move the cursor up one line");
 impl CursorUp {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[A") {
+            return;
+        }
         let delta = -(cx.count.max(1) as i32);
         move_cursor_vertical_by(cx.editor, delta);
         cx.editor.mark_dirty();
@@ -179,6 +277,9 @@ impl CursorUp {
 stock_cmd!(CursorDown, CURSOR_DOWN, "Move the cursor down one line");
 impl CursorDown {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[B") {
+            return;
+        }
         let delta = cx.count.max(1) as i32;
         move_cursor_vertical_by(cx.editor, delta);
         cx.editor.mark_dirty();
@@ -231,6 +332,9 @@ stock_cmd!(
 );
 impl CursorLineStart {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[H") {
+            return;
+        }
         let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
             return;
         };
@@ -253,6 +357,9 @@ stock_cmd!(
 );
 impl CursorLineEnd {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        if forward_to_terminal(cx.editor, b"\x1b[F") {
+            return;
+        }
         let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
             return;
         };
@@ -266,6 +373,9 @@ impl CursorLineEnd {
         } else {
             rope.len_bytes()
         };
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, end, false) {
+            return;
+        }
         if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
             window.cursor_byte = end;
         }
@@ -341,18 +451,16 @@ stock_cmd!(
 impl CursorWordForward {
     fn run_impl(cx: &mut CommandContext<'_>) {
         let n = cx.count.max(1);
-        for _ in 0..n {
-            let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
-                return;
-            };
-            let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
-                return;
-            };
-            let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
-            let next = next_word_boundary(&text, cursor);
-            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
-                window.cursor_byte = next;
-            }
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+        let mut pos = cursor;
+        for _ in 0..n { pos = next_word_boundary(&text, pos); }
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, pos, false) {
+            return;
+        }
+        if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+            window.cursor_byte = pos;
         }
         cx.editor.mark_dirty();
     }
@@ -366,6 +474,15 @@ stock_cmd!(
 impl CursorWordBackward {
     fn run_impl(cx: &mut CommandContext<'_>) {
         let n = cx.count.max(1);
+        let Some((window_id, buffer_id, start_cursor)) = active(cx.editor) else { return };
+        // Check for operator before the loop.
+        if cx.editor.operator_state().operator.is_some() {
+            let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+            let text = buffer.rope().slice_to_string(0..buffer.len_bytes());
+            let mut pos = start_cursor;
+            for _ in 0..n { pos = prev_word_boundary(&text, pos); }
+            if try_apply_operator_motion(cx.editor, window_id, buffer_id, start_cursor, pos, false) { return; }
+        }
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
                 return;
@@ -421,6 +538,286 @@ impl CursorBufferEnd {
     }
 }
 
+stock_cmd!(CursorEndOfWord, CURSOR_END_OF_WORD, "Move to end of current/next word");
+impl CursorEndOfWord {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let text = buffer.text();
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        if cursor >= len { return; }
+        let mut pos = cursor + 1;
+        while pos < len && !bytes[pos].is_ascii_alphanumeric() && bytes[pos] != b'_' { pos += 1; }
+        while pos < len && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') { pos += 1; }
+        let target = pos.saturating_sub(1).min(len.saturating_sub(1));
+        // For operators, include the end-of-word character.
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, target + 1, false) {
+            return;
+        }
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(CursorParagraphForward, CURSOR_PARAGRAPH_FORWARD, "Move to next blank-line boundary");
+impl CursorParagraphForward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let cur_line = rope.byte_to_line(cursor);
+        let total = rope.len_lines();
+        let mut line = cur_line + 1;
+        while line < total {
+            let start = rope.line_to_byte(line);
+            let end = if line + 1 < total { rope.line_to_byte(line + 1) } else { rope.len_bytes() };
+            let text = rope.slice_to_string(start..end);
+            if text.trim().is_empty() { break; }
+            line += 1;
+        }
+        let target = rope.line_to_byte(line.min(total.saturating_sub(1)));
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, target, true) { return; }
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
+        cx.editor.mark_dirty();
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+stock_cmd!(CursorParagraphBackward, CURSOR_PARAGRAPH_BACKWARD, "Move to previous blank-line boundary");
+impl CursorParagraphBackward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let cur_line = rope.byte_to_line(cursor);
+        let mut line = cur_line.saturating_sub(1);
+        loop {
+            let start = rope.line_to_byte(line);
+            let end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) } else { rope.len_bytes() };
+            let text = rope.slice_to_string(start..end);
+            if text.trim().is_empty() || line == 0 { break; }
+            line -= 1;
+        }
+        let target = rope.line_to_byte(line);
+        if try_apply_operator_motion(cx.editor, window_id, buffer_id, cursor, target, true) { return; }
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
+        cx.editor.mark_dirty();
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+stock_cmd!(CursorMatchingBracket, CURSOR_MATCHING_BRACKET, "Jump to matching bracket");
+impl CursorMatchingBracket {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let text = buffer.text();
+        let bytes = text.as_bytes();
+        if cursor >= bytes.len() { return; }
+        let ch = bytes[cursor] as char;
+        let (target_ch, forward) = match ch {
+            '(' => (')', true), ')' => ('(', false),
+            '[' => (']', true), ']' => ('[', false),
+            '{' => ('}', true), '}' => ('{', false),
+            '<' => ('>', true), '>' => ('<', false),
+            _ => return,
+        };
+        let mut depth = 1i32;
+        let iter: Box<dyn Iterator<Item = usize>> = if forward {
+            Box::new((cursor + 1)..bytes.len())
+        } else {
+            Box::new((0..cursor).rev())
+        };
+        for pos in iter {
+            let bc = bytes[pos] as char;
+            if bc == target_ch { depth -= 1; }
+            else if bc == ch { depth += 1; }
+            if depth == 0 {
+                if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = pos; }
+                cx.editor.mark_dirty();
+                cx.editor.ensure_active_cursor_visible();
+                return;
+            }
+        }
+    }
+}
+
+stock_cmd!(CursorScreenTop, CURSOR_SCREEN_TOP, "Move cursor to top of visible screen");
+impl CursorScreenTop {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let scroll_top = cx.editor.windows().get(window_id).map_or(0, |d| d.scroll_top_line);
+        let target = buffer.rope().line_to_byte(scroll_top);
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(CursorScreenMiddle, CURSOR_SCREEN_MIDDLE, "Move cursor to middle of visible screen");
+impl CursorScreenMiddle {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else { return };
+        let data = cx.editor.windows().get(window_id).cloned();
+        let Some(data) = data else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let mid = data.scroll_top_line + (data.visible_rows / 2) as usize;
+        let target = buffer.rope().line_to_byte(mid.min(buffer.rope().len_lines().saturating_sub(1)));
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(CursorScreenBottom, CURSOR_SCREEN_BOTTOM, "Move cursor to bottom of visible screen");
+impl CursorScreenBottom {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else { return };
+        let data = cx.editor.windows().get(window_id).cloned();
+        let Some(data) = data else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let bot = data.scroll_top_line + data.visible_rows.saturating_sub(1) as usize;
+        let target = buffer.rope().line_to_byte(bot.min(buffer.rope().len_lines().saturating_sub(1)));
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
+        cx.editor.mark_dirty();
+    }
+}
+
+// Find-char commands use the editor's `enter_describe_key_mode`-like pattern:
+// The command itself doesn't move the cursor — it sets a flag and waits for
+// the next printable character. For simplicity in this first implementation,
+// we use the palette to prompt for a single char. However, a simpler approach
+// is to just scan from the cursor position. Since the keymap layer intercepts
+// the next key, we'll implement these as stub commands that set status and
+// use `handle_printable_fallback` to capture the char. For now, use a
+// direct scan approach: the command reads the char from the query or we
+// implement a simple "next char" mode.
+//
+// Simplest approach: these are no-ops that get wired up when we add a
+// "read next char" mechanism. For now, register them so the bindings
+// resolve but show a status message.
+
+stock_cmd!(CursorFindCharForward, CURSOR_FIND_CHAR_FORWARD, "Find char forward on line (f)");
+impl CursorFindCharForward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.operator_state_mut().char_read = Some(crate::editor::CharReadMode::FindForwardTo);
+    }
+}
+
+stock_cmd!(CursorFindCharBackward, CURSOR_FIND_CHAR_BACKWARD, "Find char backward on line (F)");
+impl CursorFindCharBackward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.operator_state_mut().char_read = Some(crate::editor::CharReadMode::FindBackwardTo);
+    }
+}
+
+stock_cmd!(CursorTillCharForward, CURSOR_TILL_CHAR_FORWARD, "Move to before char forward (t)");
+impl CursorTillCharForward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.operator_state_mut().char_read = Some(crate::editor::CharReadMode::FindForwardTill);
+    }
+}
+
+stock_cmd!(CursorTillCharBackward, CURSOR_TILL_CHAR_BACKWARD, "Move to after char backward (T)");
+impl CursorTillCharBackward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.operator_state_mut().char_read = Some(crate::editor::CharReadMode::FindBackwardTill);
+    }
+}
+
+stock_cmd!(CursorRepeatFind, CURSOR_REPEAT_FIND, "Repeat last find-char motion");
+impl CursorRepeatFind {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some(state) = cx.editor.last_find_char() else {
+            cx.editor.set_status("No previous find to repeat");
+            return;
+        };
+        let mode = match state.kind {
+            crate::editor::FindCharKind::ForwardTo => crate::editor::CharReadMode::FindForwardTo,
+            crate::editor::FindCharKind::ForwardTill => crate::editor::CharReadMode::FindForwardTill,
+            crate::editor::FindCharKind::BackwardTo => crate::editor::CharReadMode::FindBackwardTo,
+            crate::editor::FindCharKind::BackwardTill => crate::editor::CharReadMode::FindBackwardTill,
+        };
+        handle_char_read(cx.editor, state.ch, mode);
+    }
+}
+
+stock_cmd!(CursorRepeatFindReverse, CURSOR_REPEAT_FIND_REVERSE, "Repeat last find-char reversed");
+impl CursorRepeatFindReverse {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some(state) = cx.editor.last_find_char() else {
+            cx.editor.set_status("No previous find to repeat");
+            return;
+        };
+        let mode = match state.kind {
+            crate::editor::FindCharKind::ForwardTo => crate::editor::CharReadMode::FindBackwardTo,
+            crate::editor::FindCharKind::ForwardTill => crate::editor::CharReadMode::FindBackwardTill,
+            crate::editor::FindCharKind::BackwardTo => crate::editor::CharReadMode::FindForwardTo,
+            crate::editor::FindCharKind::BackwardTill => crate::editor::CharReadMode::FindForwardTill,
+        };
+        handle_char_read(cx.editor, state.ch, mode);
+    }
+}
+
+stock_cmd!(ScrollHalfPageDown, SCROLL_HALF_PAGE_DOWN, "Scroll down half a page");
+impl ScrollHalfPageDown {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let data = cx.editor.windows().get(window_id).cloned();
+        let Some(data) = data else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let half = (data.visible_rows / 2).max(1) as usize;
+        let cur_line = buffer.rope().byte_to_line(cursor);
+        let target_line = (cur_line + half).min(buffer.rope().len_lines().saturating_sub(1));
+        let target = buffer.rope().line_to_byte(target_line);
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
+        cx.editor.mark_dirty();
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+stock_cmd!(ScrollHalfPageUp, SCROLL_HALF_PAGE_UP, "Scroll up half a page");
+impl ScrollHalfPageUp {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let data = cx.editor.windows().get(window_id).cloned();
+        let Some(data) = data else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let half = (data.visible_rows / 2).max(1) as usize;
+        let cur_line = buffer.rope().byte_to_line(cursor);
+        let target_line = cur_line.saturating_sub(half);
+        let target = buffer.rope().line_to_byte(target_line);
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = target; }
+        cx.editor.mark_dirty();
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+stock_cmd!(ScrollCursorTop, SCROLL_CURSOR_TOP, "Scroll so cursor is at top of window");
+impl ScrollCursorTop {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let line = buffer.rope().byte_to_line(cursor);
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.scroll_top_line = line; }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(ScrollCursorBottom, SCROLL_CURSOR_BOTTOM, "Scroll so cursor is at bottom of window");
+impl ScrollCursorBottom {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let data = cx.editor.windows().get(window_id).cloned();
+        let Some(data) = data else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let line = buffer.rope().byte_to_line(cursor);
+        let top = line.saturating_sub(data.visible_rows.saturating_sub(1) as usize);
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.scroll_top_line = top; }
+        cx.editor.mark_dirty();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Editing
 // ---------------------------------------------------------------------------
@@ -436,7 +833,7 @@ impl CursorBufferEnd {
 /// itself, agent merges) go directly through
 /// [`crate::BufferManager::edit`] and deliberately *do not* show up
 /// in the undo tree — the user didn't type them.
-fn user_edit(
+pub(crate) fn user_edit(
     editor: &mut Editor,
     window_id: WindowId,
     buffer_id: BufferId,
@@ -494,6 +891,15 @@ fn user_edit(
 /// registry for literal text input without a dedicated command
 /// binding.
 pub fn insert_at_cursor(editor: &mut Editor, text: &str) {
+    // If the active pane is a terminal, forward the text to the PTY
+    // rather than attempting to edit a buffer.
+    if let Some(active) = editor.windows().active() {
+        if let Some(term) = editor.terminal(active) {
+            term.write(text.as_bytes().to_vec());
+            editor.mark_dirty();
+            return;
+        }
+    }
     let Some((window_id, buffer_id, cursor)) = active(editor) else {
         return;
     };
@@ -509,6 +915,17 @@ pub fn insert_at_cursor(editor: &mut Editor, text: &str) {
     );
 }
 
+/// Forward a key to the active pane's terminal PTY if one is focused.
+/// Returns `true` if forwarded, `false` if the active pane is a buffer
+/// (in which case the caller should do the normal buffer action).
+fn forward_to_terminal(editor: &mut Editor, bytes: &[u8]) -> bool {
+    let Some(active) = editor.windows().active() else { return false };
+    let Some(term) = editor.terminal(active) else { return false };
+    term.write(bytes.to_vec());
+    editor.mark_dirty();
+    true
+}
+
 stock_cmd!(
     BufferNewline,
     BUFFER_NEWLINE,
@@ -516,6 +933,10 @@ stock_cmd!(
 );
 impl BufferNewline {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        // Terminal panes expect a carriage return for Enter, not LF.
+        if forward_to_terminal(cx.editor, b"\r") {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             insert_at_cursor(cx.editor, "\n");
@@ -530,6 +951,10 @@ stock_cmd!(
 );
 impl BufferDeleteBackward {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        // Terminal panes: forward backspace (0x7f) to the PTY.
+        if forward_to_terminal(cx.editor, &[0x7f]) {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
@@ -561,6 +986,10 @@ stock_cmd!(
 );
 impl BufferDeleteForward {
     fn run_impl(cx: &mut CommandContext<'_>) {
+        // Terminal panes: forward Delete (ESC [ 3 ~) to the PTY.
+        if forward_to_terminal(cx.editor, b"\x1b[3~") {
+            return;
+        }
         let n = cx.count.max(1);
         for _ in 0..n {
             let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
@@ -704,7 +1133,7 @@ impl BufferKillLine {
         let killed = rope.slice_to_string(cursor..end);
         let range: ByteRange = cursor..end;
         user_edit(cx.editor, window_id, buffer_id, range, "", cursor, cursor);
-        cx.editor.kill_ring_push(killed);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
     }
 }
 
@@ -729,7 +1158,7 @@ impl BufferKillWord {
         let killed = text[cursor..end].to_owned();
         let range: ByteRange = cursor..end;
         user_edit(cx.editor, window_id, buffer_id, range, "", cursor, cursor);
-        cx.editor.kill_ring_push(killed);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
     }
 }
 
@@ -754,7 +1183,7 @@ impl BufferKillWordBackward {
         let killed = text[start..cursor].to_owned();
         let range: ByteRange = start..cursor;
         user_edit(cx.editor, window_id, buffer_id, range, "", cursor, start);
-        cx.editor.kill_ring_push(killed);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
     }
 }
 
@@ -798,7 +1227,7 @@ impl BufferKillRegion {
         let killed = buffer.rope().slice_to_string(start..end);
         let range: ByteRange = start..end;
         user_edit(cx.editor, window_id, buffer_id, range, "", cursor, start);
-        cx.editor.kill_ring_push(killed);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
         cx.editor.clear_mark(window_id);
     }
 }
@@ -826,7 +1255,7 @@ impl BufferCopyRegion {
             return;
         };
         let copied = buffer.rope().slice_to_string(start..end);
-        cx.editor.kill_ring_push(copied);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(copied));
         cx.editor.clear_mark(window_id);
         cx.editor.set_status("Region copied");
     }
@@ -838,20 +1267,27 @@ impl BufferYank {
         let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
             return;
         };
-        let Some(text) = cx.editor.kill_ring_top().map(str::to_owned) else {
+        let Some(entry) = cx.editor.kill_ring_top().cloned() else {
             cx.editor.set_status("Kill ring empty");
             return;
         };
-        let len = text.len();
-        user_edit(
-            cx.editor,
-            window_id,
-            buffer_id,
-            cursor..cursor,
-            &text,
-            cursor,
-            cursor + len,
-        );
+        match entry {
+            crate::editor::KilledText::Linear(text) => {
+                let len = text.len();
+                user_edit(
+                    cx.editor,
+                    window_id,
+                    buffer_id,
+                    cursor..cursor,
+                    &text,
+                    cursor,
+                    cursor + len,
+                );
+            }
+            crate::editor::KilledText::Rectangular(lines) => {
+                crate::column::yank_rectangle(cx.editor, window_id, buffer_id, &lines);
+            }
+        }
     }
 }
 
@@ -1008,6 +1444,331 @@ impl BufferTransposeChars {
     }
 }
 
+stock_cmd!(BufferTransposeWords, BUFFER_TRANSPOSE_WORDS, "Swap the two words around the cursor");
+impl BufferTransposeWords {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let text = buffer.text();
+        let bytes = text.as_bytes();
+        // Find end of word after cursor.
+        let mut end2 = cursor;
+        while end2 < bytes.len() && !(bytes[end2].is_ascii_alphanumeric() || bytes[end2] == b'_') { end2 += 1; }
+        while end2 < bytes.len() && (bytes[end2].is_ascii_alphanumeric() || bytes[end2] == b'_') { end2 += 1; }
+        // Find start of that word.
+        let mut start2 = end2;
+        while start2 > 0 && (bytes[start2 - 1].is_ascii_alphanumeric() || bytes[start2 - 1] == b'_') { start2 -= 1; }
+        // Find word before cursor.
+        let mut end1 = cursor;
+        while end1 > 0 && !(bytes[end1 - 1].is_ascii_alphanumeric() || bytes[end1 - 1] == b'_') { end1 -= 1; }
+        let mut start1 = end1;
+        while start1 > 0 && (bytes[start1 - 1].is_ascii_alphanumeric() || bytes[start1 - 1] == b'_') { start1 -= 1; }
+        if start1 == end1 || start2 == end2 || end1 > start2 { return; }
+        let w1 = text[start1..end1].to_owned();
+        let w2 = text[start2..end2].to_owned();
+        let mid = text[end1..start2].to_owned();
+        let replacement = format!("{w2}{mid}{w1}");
+        let range: ByteRange = start1..end2;
+        user_edit(cx.editor, window_id, buffer_id, range, &replacement, cursor, end2);
+    }
+}
+
+stock_cmd!(BufferJoinLines, BUFFER_JOIN_LINES, "Join current line with the next, collapsing whitespace");
+impl BufferJoinLines {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        if line + 1 >= rope.len_lines() { return; }
+        let line_end = rope.line_to_byte(line + 1) - 1; // before newline
+        let next_start = rope.line_to_byte(line + 1);
+        let next_text = rope.slice_to_string(next_start..rope.len_bytes().min(next_start + 200));
+        let leading_ws = next_text.len() - next_text.trim_start().len();
+        let range: ByteRange = line_end..(next_start + leading_ws);
+        user_edit(cx.editor, window_id, buffer_id, range, " ", cursor, line_end + 1);
+    }
+}
+
+stock_cmd!(BufferDuplicateLine, BUFFER_DUPLICATE_LINE, "Duplicate the current line below");
+impl BufferDuplicateLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let start = rope.line_to_byte(line);
+        let end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) } else { rope.len_bytes() };
+        let line_text = rope.slice_to_string(start..end);
+        let has_newline = line_text.ends_with('\n');
+        let insert = if has_newline {
+            line_text
+        } else {
+            format!("\n{line_text}")
+        };
+        let insert_at = end;
+        let extra = usize::from(!has_newline);
+        let new_cursor = insert_at + (cursor - start) + extra;
+        user_edit(cx.editor, window_id, buffer_id, insert_at..insert_at, &insert, cursor, new_cursor);
+    }
+}
+
+stock_cmd!(BufferMoveLineUp, BUFFER_MOVE_LINE_UP, "Move the current line up one position");
+impl BufferMoveLineUp {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        if line == 0 { return; }
+        let cur_start = rope.line_to_byte(line);
+        let cur_end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) } else { rope.len_bytes() };
+        let prev_start = rope.line_to_byte(line - 1);
+        let cur_text = rope.slice_to_string(cur_start..cur_end);
+        let prev_text = rope.slice_to_string(prev_start..cur_start);
+        let new_text = format!("{cur_text}{prev_text}");
+        let new_cursor = prev_start + (cursor - cur_start);
+        let range: ByteRange = prev_start..cur_end;
+        user_edit(cx.editor, window_id, buffer_id, range, &new_text, cursor, new_cursor);
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+stock_cmd!(BufferMoveLineDown, BUFFER_MOVE_LINE_DOWN, "Move the current line down one position");
+impl BufferMoveLineDown {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let total = rope.len_lines();
+        if line + 1 >= total { return; }
+        let cur_start = rope.line_to_byte(line);
+        let next_start = rope.line_to_byte(line + 1);
+        let next_end = if line + 2 < total { rope.line_to_byte(line + 2) } else { rope.len_bytes() };
+        let cur_text = rope.slice_to_string(cur_start..next_start);
+        let next_text = rope.slice_to_string(next_start..next_end);
+        let new_text = format!("{next_text}{cur_text}");
+        let new_cursor = cur_start + next_text.len() + (cursor - cur_start);
+        let range: ByteRange = cur_start..next_end;
+        user_edit(cx.editor, window_id, buffer_id, range, &new_text, cursor, new_cursor);
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+stock_cmd!(BufferIndentLine, BUFFER_INDENT_LINE, "Indent the current line by one level");
+impl BufferIndentLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let line = buffer.rope().byte_to_line(cursor);
+        let line_start = buffer.rope().line_to_byte(line);
+        user_edit(cx.editor, window_id, buffer_id, line_start..line_start, "    ", cursor, cursor + 4);
+    }
+}
+
+stock_cmd!(BufferDedentLine, BUFFER_DEDENT_LINE, "Dedent the current line by one level");
+impl BufferDedentLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let line_start = rope.line_to_byte(line);
+        let text = buffer.text();
+        let line_text = &text[line_start..];
+        let spaces = line_text.chars().take_while(|c| *c == ' ').count().min(4);
+        if spaces == 0 { return; }
+        let range: ByteRange = line_start..(line_start + spaces);
+        let new_cursor = cursor.saturating_sub(spaces);
+        user_edit(cx.editor, window_id, buffer_id, range, "", cursor, new_cursor);
+    }
+}
+
+stock_cmd!(BufferCommentToggle, BUFFER_COMMENT_TOGGLE, "Toggle line comment");
+impl BufferCommentToggle {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        // Determine comment prefix from file extension.
+        let comment = cx.editor.buffers().path(buffer_id)
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .map_or("// ", |ext| match ext {
+                "py" | "rb" | "sh" | "bash" | "zsh" | "toml" | "yaml" | "yml" => "# ",
+                "lua" | "hs" => "-- ",
+                "lisp" | "el" | "scm" | "clj" => ";; ",
+                // rs, c, cpp, h, java, js, ts, go, swift, and everything else.
+                _ => "// ",
+            });
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let line_start = rope.line_to_byte(line);
+        let line_end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) - 1 } else { rope.len_bytes() };
+        let line_text = rope.slice_to_string(line_start..line_end);
+        let trimmed = line_text.trim_start();
+        let indent = line_text.len() - trimmed.len();
+        if trimmed.starts_with(comment) {
+            // Uncomment: remove the comment prefix.
+            let prefix_start = line_start + indent;
+            let prefix_end = prefix_start + comment.len();
+            let range: ByteRange = prefix_start..prefix_end;
+            let new_cursor = if cursor >= prefix_end { cursor - comment.len() } else { cursor };
+            user_edit(cx.editor, window_id, buffer_id, range, "", cursor, new_cursor);
+        } else {
+            // Comment: insert the prefix after the indentation.
+            let insert_at = line_start + indent;
+            user_edit(cx.editor, window_id, buffer_id, insert_at..insert_at, comment, cursor, cursor + comment.len());
+        }
+    }
+}
+
+stock_cmd!(BufferMarkWhole, BUFFER_MARK_WHOLE, "Select the entire buffer");
+impl BufferMarkWhole {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let end = buffer.len_bytes();
+        cx.editor.set_mark(window_id, 0);
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = end; }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BufferExchangePointMark, BUFFER_EXCHANGE_POINT_MARK, "Exchange cursor and mark positions");
+impl BufferExchangePointMark {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, cursor)) = active(cx.editor) else { return };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        cx.editor.set_mark(window_id, cursor);
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = mark; }
+        cx.editor.mark_dirty();
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+stock_cmd!(BufferYankPop, BUFFER_YANK_POP, "Cycle kill ring after yank");
+impl BufferYankPop {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Simplified: just show the kill ring size.
+        cx.editor.set_status("M-y: yank-pop (not yet implemented)");
+    }
+}
+
+stock_cmd!(GotoLine, GOTO_LINE, "Go to a specific line number");
+impl GotoLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Open the palette in a pseudo goto-line mode.
+        // For now, set status prompting the user to use M-x goto.line.
+        cx.editor.set_status("M-g g: goto-line (use M-x goto.line N)");
+    }
+}
+
+// Vim line operations.
+
+stock_cmd!(BufferDeleteLine, BUFFER_DELETE_LINE, "Delete the current line (dd)");
+impl BufferDeleteLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let start = rope.line_to_byte(line);
+        let end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) } else { rope.len_bytes() };
+        let killed = rope.slice_to_string(start..end);
+        let new_cursor = if start > 0 && end >= rope.len_bytes() { start.saturating_sub(1) } else { start };
+        user_edit(cx.editor, window_id, buffer_id, start..end, "", cursor, new_cursor);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
+    }
+}
+
+stock_cmd!(BufferYankLine, BUFFER_YANK_LINE, "Yank (copy) the current line (yy)");
+impl BufferYankLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let start = rope.line_to_byte(line);
+        let end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) } else { rope.len_bytes() };
+        let text = rope.slice_to_string(start..end);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(text));
+        cx.editor.set_status("Line yanked");
+    }
+}
+
+stock_cmd!(BufferChangeLine, BUFFER_CHANGE_LINE, "Delete line content and enter insert mode (cc)");
+impl BufferChangeLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let start = rope.line_to_byte(line);
+        let end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) - 1 } else { rope.len_bytes() };
+        let line_text = rope.slice_to_string(start..end);
+        let indent = line_text.len() - line_text.trim_start().len();
+        let kill_start = start + indent;
+        let killed = rope.slice_to_string(kill_start..end);
+        user_edit(cx.editor, window_id, buffer_id, kill_start..end, "", cursor, kill_start);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
+        // Enter insert mode if the vim.normal layer is active.
+        if cx.editor.keymap().has_layer("vim.normal") {
+            if let Some(cmd) = cx.editor.commands().get(names::MODE_ENTER_INSERT) {
+                let mut inner = CommandContext { editor: cx.editor, bus: cx.bus.clone(), count: 1 };
+                cmd.run(&mut inner);
+            }
+        }
+    }
+}
+
+stock_cmd!(BufferDeleteToEol, BUFFER_DELETE_TO_EOL, "Delete from cursor to end of line (D)");
+impl BufferDeleteToEol {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) - 1 } else { rope.len_bytes() };
+        if cursor >= end { return; }
+        let killed = rope.slice_to_string(cursor..end);
+        user_edit(cx.editor, window_id, buffer_id, cursor..end, "", cursor, cursor);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
+    }
+}
+
+stock_cmd!(BufferChangeToEol, BUFFER_CHANGE_TO_EOL, "Change from cursor to end of line (C)");
+impl BufferChangeToEol {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Same as D but enters insert mode.
+        BufferDeleteToEol::run_impl(cx);
+        if cx.editor.keymap().has_layer("vim.normal") {
+            if let Some(cmd) = cx.editor.commands().get(names::MODE_ENTER_INSERT) {
+                let mut inner = CommandContext { editor: cx.editor, bus: cx.bus.clone(), count: 1 };
+                cmd.run(&mut inner);
+            }
+        }
+    }
+}
+
+stock_cmd!(BufferYankToEol, BUFFER_YANK_TO_EOL, "Yank from cursor to end of line (Y)");
+impl BufferYankToEol {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) - 1 } else { rope.len_bytes() };
+        if cursor >= end { return; }
+        let text = rope.slice_to_string(cursor..end);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Linear(text));
+        cx.editor.set_status("Yanked to end of line");
+    }
+}
+
 stock_cmd!(
     EditorCancel,
     EDITOR_CANCEL,
@@ -1075,6 +1836,17 @@ impl EditorQuit {
     }
 }
 
+stock_cmd!(
+    EditorSuspend,
+    EDITOR_SUSPEND,
+    "Suspend the editor (SIGTSTP) — use `fg` to resume"
+);
+impl EditorSuspend {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.request_suspend();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mode switches
 // ---------------------------------------------------------------------------
@@ -1114,7 +1886,11 @@ impl ModeLeaveInsert {
                 .keymap_mut()
                 .set_count_mode(arx_keymap::CountMode::Accept);
             cx.editor.mark_dirty();
+            return;
         }
+        // No insert layer to leave — if a terminal pane is focused,
+        // forward Esc to the PTY so programs like vim/less work.
+        forward_to_terminal(cx.editor, b"\x1b");
     }
 }
 
@@ -1143,7 +1919,7 @@ fn ensure_palette_layer(editor: &mut Editor) {
     if editor.keymap().has_layer("palette") {
         return;
     }
-    editor.keymap_mut().push_layer(Layer::new(
+    editor.keymap_mut().push_layer(Layer::absorbing(
         LayerId::from("palette"),
         Arc::new(arx_keymap::profiles::palette_layer()),
     ));
@@ -1214,6 +1990,7 @@ stock_cmd!(
     "Execute the selected command in the palette"
 );
 impl CommandPaletteExecute {
+    #[allow(clippy::too_many_lines)]
     fn run_impl(cx: &mut CommandContext<'_>) {
         let mode = cx.editor.palette().mode();
         match mode {
@@ -1241,6 +2018,10 @@ impl CommandPaletteExecute {
                     cx.editor.mark_dirty();
                     return;
                 }
+                cx.editor.palette_mut().push_history(
+                    path.clone(),
+                    crate::palette::PaletteMode::FindFile,
+                );
                 cx.editor.palette_mut().close();
                 leave_palette_layer(cx.editor);
                 cx.editor.mark_dirty();
@@ -1304,6 +2085,12 @@ impl CommandPaletteExecute {
                     .palette()
                     .selected_match()
                     .map(|m| m.name.clone());
+                if let Some(ref name) = selected_name {
+                    cx.editor.palette_mut().push_history(
+                        name.clone(),
+                        crate::palette::PaletteMode::Command,
+                    );
+                }
                 cx.editor.palette_mut().close();
                 leave_palette_layer(cx.editor);
                 cx.editor.mark_dirty();
@@ -1358,6 +2145,30 @@ stock_cmd!(
 impl CommandPaletteBackspace {
     fn run_impl(cx: &mut CommandContext<'_>) {
         cx.editor.palette_mut().backspace();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CommandPaletteHistoryPrev,
+    COMMAND_PALETTE_HISTORY_PREV,
+    "Navigate to the previous palette history entry"
+);
+impl CommandPaletteHistoryPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().history_prev();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CommandPaletteHistoryNext,
+    COMMAND_PALETTE_HISTORY_NEXT,
+    "Navigate to the next palette history entry"
+);
+impl CommandPaletteHistoryNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.palette_mut().history_next();
         cx.editor.mark_dirty();
     }
 }
@@ -1434,6 +2245,20 @@ impl WindowClose {
             return;
         }
         if cx.editor.windows_mut().close(active) {
+            cx.editor.mark_dirty();
+            cx.editor.ensure_active_cursor_visible();
+        }
+    }
+}
+
+stock_cmd!(
+    WindowDeleteOther,
+    WINDOW_DELETE_OTHER,
+    "Close all windows except the active one"
+);
+impl WindowDeleteOther {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.windows_mut().delete_other() {
             cx.editor.mark_dirty();
             cx.editor.ensure_active_cursor_visible();
         }
@@ -1522,7 +2347,7 @@ fn apply_undo_record(
     // Inverting the edit means: at `offset`, replace the `inserted`
     // span with the `removed` bytes.
     let invert_range = record.offset..record.offset + record.inserted.len();
-    editor.buffers_mut().edit(
+    editor.edit_with_highlight(
         buffer_id,
         invert_range,
         &record.removed,
@@ -1543,7 +2368,7 @@ fn apply_redo_record(
     record: &EditRecord,
 ) {
     let redo_range = record.offset..record.offset + record.removed.len();
-    editor.buffers_mut().edit(
+    editor.edit_with_highlight(
         buffer_id,
         redo_range,
         &record.inserted,
@@ -1759,6 +2584,139 @@ impl LspPrevDiagnostic {
 }
 
 // ---------------------------------------------------------------------------
+// LSP navigation
+// ---------------------------------------------------------------------------
+
+stock_cmd!(LspGotoDefinition, LSP_GOTO_DEFINITION, "Jump to symbol definition");
+impl LspGotoDefinition {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Push current location to nav stack, then request definition.
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        cx.editor.nav_stack_push(buffer_id, cursor);
+        // TODO: wire up async LSP textDocument/definition request.
+        // For now, show a status message.
+        cx.editor.set_status("goto-definition: LSP request not yet wired (nav stack pushed)");
+        let _ = window_id;
+    }
+}
+
+stock_cmd!(LspPopBack, LSP_POP_BACK, "Return to previous location");
+impl LspPopBack {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((buffer_id, byte)) = cx.editor.nav_stack_pop() else {
+            cx.editor.set_status("Navigation stack empty");
+            return;
+        };
+        // Switch to the buffer and set cursor.
+        let Some(window_id) = cx.editor.windows().active() else { return };
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) {
+            w.buffer_id = buffer_id;
+            w.cursor_byte = byte;
+        }
+        cx.editor.mark_dirty();
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tree-sitter navigation
+// ---------------------------------------------------------------------------
+
+stock_cmd!(TreesitterNextFunction, TREESITTER_NEXT_FUNCTION, "Jump to next function definition");
+impl TreesitterNextFunction {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let text = buffer.text();
+        // Heuristic: find next line starting with `fn `, `def `, `func `,
+        // `function `, or `pub fn ` after the current line.
+        let rope = buffer.rope();
+        let cur_line = rope.byte_to_line(cursor);
+        for line_idx in (cur_line + 1)..rope.len_lines() {
+            let start = rope.line_to_byte(line_idx);
+            let end = if line_idx + 1 < rope.len_lines() { rope.line_to_byte(line_idx + 1) } else { text.len() };
+            let line_text = &text[start..end];
+            let trimmed = line_text.trim_start();
+            if trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("pub(crate) fn ")
+                || trimmed.starts_with("async fn ")
+                || trimmed.starts_with("pub async fn ")
+                || trimmed.starts_with("def ")
+                || trimmed.starts_with("func ")
+                || trimmed.starts_with("function ")
+            {
+                if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = start; }
+                cx.editor.mark_dirty();
+                cx.editor.ensure_active_cursor_visible();
+                return;
+            }
+        }
+        cx.editor.set_status("No more functions below");
+    }
+}
+
+stock_cmd!(TreesitterPrevFunction, TREESITTER_PREV_FUNCTION, "Jump to previous function definition");
+impl TreesitterPrevFunction {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let text = buffer.text();
+        let rope = buffer.rope();
+        let cur_line = rope.byte_to_line(cursor);
+        for line_idx in (0..cur_line).rev() {
+            let start = rope.line_to_byte(line_idx);
+            let end = if line_idx + 1 < rope.len_lines() { rope.line_to_byte(line_idx + 1) } else { text.len() };
+            let line_text = &text[start..end];
+            let trimmed = line_text.trim_start();
+            if trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("pub(crate) fn ")
+                || trimmed.starts_with("async fn ")
+                || trimmed.starts_with("pub async fn ")
+                || trimmed.starts_with("def ")
+                || trimmed.starts_with("func ")
+                || trimmed.starts_with("function ")
+            {
+                if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = start; }
+                cx.editor.mark_dirty();
+                cx.editor.ensure_active_cursor_visible();
+                return;
+            }
+        }
+        cx.editor.set_status("No more functions above");
+    }
+}
+
+stock_cmd!(TreesitterParentNode, TREESITTER_PARENT_NODE, "Jump to enclosing syntax scope");
+impl TreesitterParentNode {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Heuristic: find the nearest line with less indentation than current.
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else { return };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
+        let rope = buffer.rope();
+        let cur_line = rope.byte_to_line(cursor);
+        let cur_start = rope.line_to_byte(cur_line);
+        let cur_text = rope.slice_to_string(cur_start..cursor.max(cur_start));
+        let cur_indent = cur_text.len() - cur_text.trim_start().len();
+        // Go backward until we find a line with strictly less indentation.
+        for line_idx in (0..cur_line).rev() {
+            let start = rope.line_to_byte(line_idx);
+            let end = if line_idx + 1 < rope.len_lines() { rope.line_to_byte(line_idx + 1).saturating_sub(1) } else { rope.len_bytes() };
+            let text = rope.slice_to_string(start..end);
+            if text.trim().is_empty() { continue; }
+            let indent = text.len() - text.trim_start().len();
+            if indent < cur_indent {
+                if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = start; }
+                cx.editor.mark_dirty();
+                cx.editor.ensure_active_cursor_visible();
+                return;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Embedded terminal
 // ---------------------------------------------------------------------------
 
@@ -1771,6 +2729,1025 @@ impl TerminalOpen {
     fn run_impl(cx: &mut CommandContext<'_>) {
         cx.editor.open_terminal(SplitAxis::Horizontal);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive buffer search
+// ---------------------------------------------------------------------------
+//
+// Swiper / telescope-style line search. The user types a query, sees
+// matching lines in a bottom overlay, and navigates between them with
+// the buffer scrolling in real time. Enter accepts (cursor stays at
+// the match); Escape cancels (cursor returns to original position).
+
+fn ensure_search_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("search") {
+        return;
+    }
+    editor.keymap_mut().push_layer(Layer::absorbing(
+        LayerId::from("search"),
+        Arc::new(arx_keymap::profiles::search_layer()),
+    ));
+    editor
+        .keymap_mut()
+        .set_count_mode(arx_keymap::CountMode::Reject);
+}
+
+fn leave_search_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("search") {
+        editor.keymap_mut().pop_layer();
+        editor
+            .keymap_mut()
+            .set_count_mode(arx_keymap::CountMode::Accept);
+    }
+}
+
+/// Jump the active window's cursor to the currently selected search
+/// match. Called after every navigation action so the buffer scrolls
+/// in real time.
+fn apply_search_preview(editor: &mut Editor) {
+    let Some(m) = editor.search().selected_match().cloned() else {
+        return;
+    };
+    let Some(window_id) = editor.windows().active() else {
+        return;
+    };
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = m.byte_start + m.match_offset;
+    }
+    editor.ensure_active_cursor_visible();
+}
+
+/// Write search-match highlights into the buffer's `"search"` property
+/// layer so the render pipeline paints them. Clears previous highlights
+/// first. The selected match gets a brighter face; other matches get a
+/// dimmer one.
+fn apply_search_highlights(editor: &mut Editor) {
+    use arx_buffer::{AdjustmentPolicy, Face, Interval, PropertyValue, StickyBehavior};
+
+    let Some(window_id) = editor.windows().active() else {
+        return;
+    };
+    let Some(buffer_id) = editor.windows().get(window_id).map(|d| d.buffer_id) else {
+        return;
+    };
+    let selected_idx = editor.search().selected_index();
+    let matches: Vec<(usize, usize, bool)> = editor
+        .search()
+        .matches()
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.match_len > 0)
+        .map(|(i, m)| {
+            let start = m.byte_start + m.match_offset;
+            let end = start + m.match_len;
+            (start, end, i == selected_idx)
+        })
+        .collect();
+
+    let Some(buf) = editor.buffers_mut().get_mut(buffer_id) else {
+        return;
+    };
+    let layer = buf
+        .properties_mut()
+        .ensure_layer("search", AdjustmentPolicy::Static);
+    layer.clear();
+
+    // Dim yellow background for non-selected matches.
+    let other_face = Face {
+        bg: Some(0x50_50_00),
+        priority: 50,
+        ..Face::default()
+    };
+    // Bright yellow background + black text for the selected match.
+    let selected_face = Face {
+        fg: Some(0x00_00_00),
+        bg: Some(0xE6_C8_3C),
+        bold: Some(true),
+        priority: 60,
+        ..Face::default()
+    };
+
+    for (start, end, is_selected) in &matches {
+        if start >= end {
+            continue;
+        }
+        let face = if *is_selected {
+            selected_face.clone()
+        } else {
+            other_face.clone()
+        };
+        layer.insert(Interval::new(
+            *start..*end,
+            PropertyValue::Decoration(face),
+            StickyBehavior::Shrink,
+        ));
+    }
+}
+
+/// Clear search highlights from the buffer's property map.
+fn clear_search_highlights(editor: &mut Editor) {
+    let Some(window_id) = editor.windows().active() else {
+        return;
+    };
+    let Some(buffer_id) = editor.windows().get(window_id).map(|d| d.buffer_id) else {
+        return;
+    };
+    if let Some(buf) = editor.buffers_mut().get_mut(buffer_id) {
+        buf.properties_mut().remove_layer("search");
+    }
+}
+
+stock_cmd!(SearchOpen, SEARCH_OPEN, "Open interactive buffer search");
+impl SearchOpen {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.search().is_open() {
+            return;
+        }
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let scroll = cx
+            .editor
+            .windows()
+            .get(window_id)
+            .map_or(0, |d| d.scroll_top_line);
+        let text = cx
+            .editor
+            .buffers()
+            .get(buffer_id)
+            .map_or_else(String::new, arx_buffer::Buffer::text);
+        cx.editor.search_mut().open(&text, cursor, scroll);
+        ensure_search_layer(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchClose,
+    SEARCH_CLOSE,
+    "Close search and restore cursor to original position"
+);
+impl SearchClose {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Restore saved position.
+        let saved_cursor = cx.editor.search().saved_cursor();
+        let saved_scroll = cx.editor.search().saved_scroll();
+        if let Some(window_id) = cx.editor.windows().active() {
+            if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
+                window.cursor_byte = saved_cursor;
+                window.scroll_top_line = saved_scroll;
+            }
+        }
+        clear_search_highlights(cx.editor);
+        cx.editor.search_mut().close();
+        leave_search_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchExecute,
+    SEARCH_EXECUTE,
+    "Accept the selected search match and jump to it"
+);
+impl SearchExecute {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Record history before closing.
+        let query = cx.editor.search().query().to_owned();
+        if !query.is_empty() {
+            cx.editor.search_mut().push_history(query);
+        }
+        // Jump cursor to the match (already there from preview,
+        // but make sure).
+        apply_search_preview(cx.editor);
+        clear_search_highlights(cx.editor);
+        cx.editor.search_mut().close();
+        leave_search_layer(cx.editor);
+        cx.editor.mark_dirty();
+        cx.editor.ensure_active_cursor_visible();
+    }
+}
+
+stock_cmd!(
+    SearchNext,
+    SEARCH_NEXT,
+    "Move the search selection down one row"
+);
+impl SearchNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().select_next();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchPrev,
+    SEARCH_PREV,
+    "Move the search selection up one row"
+);
+impl SearchPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().select_prev();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+const SEARCH_PAGE_SIZE: usize = 8;
+
+stock_cmd!(
+    SearchPageDown,
+    SEARCH_PAGE_DOWN,
+    "Move the search selection down one page"
+);
+impl SearchPageDown {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().select_next_n(SEARCH_PAGE_SIZE);
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchPageUp,
+    SEARCH_PAGE_UP,
+    "Move the search selection up one page"
+);
+impl SearchPageUp {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().select_prev_n(SEARCH_PAGE_SIZE);
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchToggleMode,
+    SEARCH_TOGGLE_MODE,
+    "Cycle search mode: fuzzy / literal / regex"
+);
+impl SearchToggleMode {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().toggle_mode();
+        let label = cx.editor.search().mode().label();
+        cx.editor.set_status(format!("Search mode: {label}"));
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchBackspace,
+    SEARCH_BACKSPACE,
+    "Delete the last character from the search query"
+);
+impl SearchBackspace {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().backspace();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchHistoryPrev,
+    SEARCH_HISTORY_PREV,
+    "Navigate to the previous search history entry"
+);
+impl SearchHistoryPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().history_prev();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    SearchHistoryNext,
+    SEARCH_HISTORY_NEXT,
+    "Navigate to the next search history entry"
+);
+impl SearchHistoryNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.search_mut().history_next();
+        apply_search_preview(cx.editor);
+        apply_search_highlights(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rectangle (column block) operations
+// ---------------------------------------------------------------------------
+
+stock_cmd!(RectKill, RECT_KILL, "Kill (delete) the rectangular region between mark and cursor");
+impl RectKill {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+            cx.editor, buffer_id, mark, cursor,
+        ) else {
+            return;
+        };
+        let killed = crate::column::kill_rectangle(cx.editor, window_id, buffer_id, &rect);
+        cx.editor.kill_ring_push(crate::editor::KilledText::Rectangular(killed));
+        cx.editor.clear_mark(window_id);
+        // Leave visual-block mode if active.
+        leave_visual_block_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(RectCopy, RECT_COPY, "Copy the rectangular region between mark and cursor");
+impl RectCopy {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+            cx.editor, buffer_id, mark, cursor,
+        ) else {
+            return;
+        };
+        // Extract text without deleting.
+        let mut copied_lines = Vec::new();
+        for line_idx in rect.start_line..=rect.end_line {
+            let text = cx.editor.buffers().get(buffer_id)
+                .map(|b| {
+                    let rope = b.rope();
+                    let start = rope.line_to_byte(line_idx);
+                    let end = if line_idx + 1 >= rope.len_lines() {
+                        rope.len_bytes()
+                    } else {
+                        rope.line_to_byte(line_idx + 1).saturating_sub(1)
+                    };
+                    rope.slice_to_string(start..end)
+                })
+                .unwrap_or_default();
+            let byte_start = crate::column::display_col_to_byte(&text, rect.left_col);
+            let byte_end = crate::column::display_col_to_byte(&text, rect.right_col);
+            copied_lines.push(text[byte_start..byte_end].to_owned());
+        }
+        cx.editor.kill_ring_push(crate::editor::KilledText::Rectangular(copied_lines));
+        cx.editor.clear_mark(window_id);
+        leave_visual_block_layer(cx.editor);
+        cx.editor.set_status("Rectangle copied");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(RectYank, RECT_YANK, "Yank (paste) the most recent rectangular kill");
+impl RectYank {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, _cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(entry) = cx.editor.kill_ring_top().cloned() else {
+            cx.editor.set_status("Kill ring empty");
+            return;
+        };
+        match entry {
+            crate::editor::KilledText::Rectangular(lines) => {
+                crate::column::yank_rectangle(cx.editor, window_id, buffer_id, &lines);
+            }
+            crate::editor::KilledText::Linear(text) => {
+                // Fall back to normal yank for linear text.
+                let cursor = cx.editor.windows().get(window_id)
+                    .map_or(0, |d| d.cursor_byte);
+                let len = text.len();
+                user_edit(
+                    cx.editor, window_id, buffer_id,
+                    cursor..cursor, &text, cursor, cursor + len,
+                );
+            }
+        }
+    }
+}
+
+stock_cmd!(RectOpen, RECT_OPEN, "Insert blank space into the rectangular region");
+impl RectOpen {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No mark set");
+            return;
+        };
+        let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+            cx.editor, buffer_id, mark, cursor,
+        ) else {
+            return;
+        };
+        crate::column::open_rectangle(cx.editor, window_id, buffer_id, &rect);
+        cx.editor.clear_mark(window_id);
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vim visual-block mode
+// ---------------------------------------------------------------------------
+
+fn leave_visual_block_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("vim.visual-block") {
+        editor.keymap_mut().pop_layer();
+    }
+}
+
+stock_cmd!(
+    ModeEnterVisualBlock,
+    MODE_ENTER_VISUAL_BLOCK,
+    "Enter Vim visual-block selection mode"
+);
+impl ModeEnterVisualBlock {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor.set_mark_with_mode(
+            window_id,
+            cursor,
+            crate::editor::SelectionMode::Rectangle,
+        );
+        if !cx.editor.keymap().has_layer("vim.visual-block") {
+            cx.editor.keymap_mut().push_layer(Layer::new(
+                LayerId::from("vim.visual-block"),
+                Arc::new(arx_keymap::profiles::visual_block_layer()),
+            ));
+        }
+        cx.editor.set_status("-- VISUAL BLOCK --");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    ModeLeaveVisualBlock,
+    MODE_LEAVE_VISUAL_BLOCK,
+    "Leave Vim visual-block selection mode"
+);
+impl ModeLeaveVisualBlock {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let window_id = cx.editor.windows().active();
+        if let Some(wid) = window_id {
+            cx.editor.clear_mark(wid);
+        }
+        leave_visual_block_layer(cx.editor);
+        cx.editor.clear_status();
+        cx.editor.mark_dirty();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vim operator-pending mode
+// ---------------------------------------------------------------------------
+//
+// When the user presses `d`, `c`, `y`, `>`, or `<` in normal mode, the
+// editor enters operator-pending mode. The operator command:
+// 1. Stores which operator is pending in `Editor::operator_state`.
+// 2. Pushes the `vim.operator-pending` keymap layer.
+//
+// Motions (w, e, $, {, etc.) fall through to the normal layer. Text
+// objects (iw, ip, i", etc.) are handled by the operator-pending layer.
+// When a motion or text object executes, it checks `operator_state`:
+// - If an operator is pending, compute the range and apply it.
+// - If no operator, just move the cursor (normal motion).
+//
+// After applying the operator, the layer is popped and the state cleared.
+
+fn push_operator(cx: &mut CommandContext<'_>, op: crate::editor::PendingOperator) {
+    cx.editor.operator_state_mut().operator = Some(op);
+    cx.editor.operator_state_mut().count = cx.count;
+    if !cx.editor.keymap().has_layer("vim.operator-pending") {
+        cx.editor.keymap_mut().push_layer(Layer::new(
+            LayerId::from("vim.operator-pending"),
+            Arc::new(arx_keymap::profiles::operator_pending_layer()),
+        ));
+    }
+}
+
+fn pop_operator(editor: &mut Editor) {
+    editor.operator_state_mut().clear();
+    if editor.keymap().has_layer("vim.operator-pending") {
+        editor.keymap_mut().pop_layer();
+    }
+}
+
+/// Apply the pending operator to a byte range. Handles delete, change,
+/// yank, indent, and dedent.
+fn apply_operator_to_range(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    start: usize,
+    end: usize,
+    linewise: bool,
+) {
+    use crate::editor::PendingOperator;
+
+    let op = editor.operator_state().operator;
+    let Some(op) = op else { return };
+
+    // For linewise operations, extend to full lines.
+    let (start, end) = if linewise {
+        let buf = editor.buffers().get(buffer_id);
+        if let Some(buf) = buf {
+            let rope = buf.rope();
+            let start_line = rope.byte_to_line(start);
+            let end_line = rope.byte_to_line(end.saturating_sub(1).max(start));
+            let ls = rope.line_to_byte(start_line);
+            let le = if end_line + 1 < rope.len_lines() {
+                rope.line_to_byte(end_line + 1)
+            } else {
+                rope.len_bytes()
+            };
+            (ls, le)
+        } else {
+            (start, end)
+        }
+    } else {
+        (start, end)
+    };
+
+    if start >= end {
+        pop_operator(editor);
+        return;
+    }
+
+    match op {
+        PendingOperator::Delete => {
+            let killed = editor.buffers().get(buffer_id)
+                .map(|b| b.rope().slice_to_string(start..end))
+                .unwrap_or_default();
+            user_edit(editor, window_id, buffer_id, start..end, "", start, start);
+            editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
+        }
+        PendingOperator::Change => {
+            let killed = editor.buffers().get(buffer_id)
+                .map(|b| b.rope().slice_to_string(start..end))
+                .unwrap_or_default();
+            user_edit(editor, window_id, buffer_id, start..end, "", start, start);
+            editor.kill_ring_push(crate::editor::KilledText::Linear(killed));
+            // Enter insert mode by directly pushing the insert layer.
+            editor.keymap_mut().push_layer(Layer::new(
+                LayerId::from("insert"),
+                Arc::new(arx_keymap::Keymap::named("vim.insert")),
+            ));
+        }
+        PendingOperator::Yank => {
+            let text = editor.buffers().get(buffer_id)
+                .map(|b| b.rope().slice_to_string(start..end))
+                .unwrap_or_default();
+            editor.kill_ring_push(crate::editor::KilledText::Linear(text));
+            editor.set_status("Yanked");
+        }
+        PendingOperator::Indent => {
+            let Some(buf) = editor.buffers().get(buffer_id) else { pop_operator(editor); return };
+            let start_line = buf.rope().byte_to_line(start);
+            let end_line = buf.rope().byte_to_line(end.saturating_sub(1).max(start));
+            for line_idx in (start_line..=end_line).rev() {
+                let Some(b) = editor.buffers().get(buffer_id) else { break };
+                let ls = b.rope().line_to_byte(line_idx);
+                user_edit(editor, window_id, buffer_id, ls..ls, "    ", ls, ls + 4);
+            }
+        }
+        PendingOperator::Dedent => {
+            let Some(buf) = editor.buffers().get(buffer_id) else { pop_operator(editor); return };
+            let start_line = buf.rope().byte_to_line(start);
+            let end_line = buf.rope().byte_to_line(end.saturating_sub(1).max(start));
+            for line_idx in (start_line..=end_line).rev() {
+                let Some(b) = editor.buffers().get(buffer_id) else { break };
+                let ls = b.rope().line_to_byte(line_idx);
+                let line_text = b.text();
+                let spaces = line_text[ls..].chars().take_while(|c| *c == ' ').count().min(4);
+                if spaces > 0 {
+                    user_edit(editor, window_id, buffer_id, ls..(ls + spaces), "", ls, ls);
+                }
+            }
+        }
+    }
+    pop_operator(editor);
+    editor.mark_dirty();
+}
+
+/// Check if an operator is pending and apply it to a motion range.
+/// Returns `true` if an operator was applied, `false` if normal motion.
+fn try_apply_operator_motion(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    from: usize,
+    to: usize,
+    linewise: bool,
+) -> bool {
+    if editor.operator_state().operator.is_none() {
+        return false;
+    }
+    let (start, end) = if from <= to { (from, to) } else { (to, from) };
+    apply_operator_to_range(editor, window_id, buffer_id, start, end, linewise);
+    true
+}
+
+stock_cmd!(OperatorDelete, OPERATOR_DELETE, "Delete operator (d)");
+impl OperatorDelete {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Delete);
+    }
+}
+
+stock_cmd!(OperatorChange, OPERATOR_CHANGE, "Change operator (c)");
+impl OperatorChange {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Change);
+    }
+}
+
+stock_cmd!(OperatorYank, OPERATOR_YANK, "Yank operator (y)");
+impl OperatorYank {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Yank);
+    }
+}
+
+stock_cmd!(OperatorIndent, OPERATOR_INDENT, "Indent operator (>)");
+impl OperatorIndent {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Indent);
+    }
+}
+
+stock_cmd!(OperatorDedent, OPERATOR_DEDENT, "Dedent operator (<)");
+impl OperatorDedent {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        push_operator(cx, crate::editor::PendingOperator::Dedent);
+    }
+}
+
+stock_cmd!(OperatorCancel, OPERATOR_CANCEL, "Cancel the pending operator");
+impl OperatorCancel {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        pop_operator(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(OperatorLineApply, OPERATOR_LINE, "Apply operator to current line (dd/yy/cc/>>/<< )");
+impl OperatorLineApply {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor);
+            return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor);
+            return;
+        };
+        let rope = buffer.rope();
+        let line = rope.byte_to_line(cursor);
+        let start = rope.line_to_byte(line);
+        let end = if line + 1 < rope.len_lines() {
+            rope.line_to_byte(line + 1)
+        } else {
+            rope.len_bytes()
+        };
+        apply_operator_to_range(cx.editor, window_id, buffer_id, start, end, false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vim text objects
+// ---------------------------------------------------------------------------
+
+/// Find the byte range of the inner/outer delimited text (quotes, brackets).
+fn find_delimited(text: &str, cursor: usize, open: char, close: char, inner: bool) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    // Find the opening delimiter backward from cursor.
+    let mut open_pos = None;
+    if open == close {
+        // For quotes, find the nearest pair surrounding cursor.
+        let mut positions = Vec::new();
+        for (i, &b) in bytes.iter().enumerate() {
+            if b as char == open { positions.push(i); }
+        }
+        // Find the pair that surrounds cursor.
+        for pair in positions.windows(2) {
+            if pair[0] <= cursor && cursor <= pair[1] {
+                open_pos = Some(pair[0]);
+                let close_pos = pair[1];
+                return if inner {
+                    Some((open_pos? + 1, close_pos))
+                } else {
+                    Some((open_pos?, close_pos + 1))
+                };
+            }
+        }
+        return None;
+    }
+    // For brackets, handle nesting.
+    let mut depth = 0i32;
+    for i in (0..=cursor.min(bytes.len().saturating_sub(1))).rev() {
+        let bc = bytes[i] as char;
+        if bc == close { depth += 1; }
+        if bc == open {
+            if depth > 0 { depth -= 1; }
+            else { open_pos = Some(i); break; }
+        }
+    }
+    let open_pos = open_pos?;
+    // Find the closing delimiter forward.
+    depth = 0;
+    for (i, &byte) in bytes.iter().enumerate().skip(open_pos + 1) {
+        let bc = byte as char;
+        if bc == open { depth += 1; }
+        if bc == close {
+            if depth > 0 { depth -= 1; }
+            else {
+                return if inner {
+                    Some((open_pos + 1, i))
+                } else {
+                    Some((open_pos, i + 1))
+                };
+            }
+        }
+    }
+    None
+}
+
+/// Find inner/outer word range.
+fn find_word(text: &str, cursor: usize, include_surrounding: bool) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    if cursor >= bytes.len() { return None; }
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    // Find start of word.
+    let mut start = cursor;
+    if is_word(bytes[start]) {
+        while start > 0 && is_word(bytes[start - 1]) { start -= 1; }
+    }
+    // Find end of word.
+    let mut end = cursor;
+    if is_word(bytes[end]) {
+        while end + 1 < bytes.len() && is_word(bytes[end + 1]) { end += 1; }
+        end += 1;
+    } else {
+        // Cursor is on non-word char.
+        while end + 1 < bytes.len() && !is_word(bytes[end + 1]) { end += 1; }
+        end += 1;
+        while start > 0 && !is_word(bytes[start - 1]) { start -= 1; }
+    }
+    if include_surrounding {
+        // Include trailing whitespace.
+        while end < bytes.len() && bytes[end] == b' ' { end += 1; }
+    }
+    Some((start, end))
+}
+
+/// Find inner/outer paragraph range.
+#[allow(clippy::unnecessary_wraps)]
+fn find_paragraph(text: &str, cursor: usize, include_surrounding: bool) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut byte_offset = 0;
+    let mut cursor_line = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let next = byte_offset + line.len() + 1;
+        if cursor < next || i == lines.len() - 1 { cursor_line = i; break; }
+        byte_offset = next;
+    }
+    // Find paragraph boundaries (blank lines).
+    let mut start_line = cursor_line;
+    while start_line > 0 && !lines[start_line - 1].trim().is_empty() { start_line -= 1; }
+    let mut end_line = cursor_line;
+    while end_line + 1 < lines.len() && !lines[end_line + 1].trim().is_empty() { end_line += 1; }
+
+    let start_byte: usize = lines[..start_line].iter().map(|l| l.len() + 1).sum();
+    let mut end_byte: usize = lines[..=end_line].iter().map(|l| l.len() + 1).sum();
+    if end_byte > text.len() { end_byte = text.len(); }
+
+    if include_surrounding {
+        // Include trailing blank lines.
+        let mut extra = end_line + 1;
+        while extra < lines.len() && lines[extra].trim().is_empty() { extra += 1; }
+        end_byte = lines[..extra].iter().map(|l| l.len() + 1).sum::<usize>().min(text.len());
+    }
+    Some((start_byte, end_byte))
+}
+
+/// Apply a text object: compute range, then apply pending operator.
+fn apply_text_object(cx: &mut CommandContext<'_>, start: usize, end: usize) {
+    let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+        pop_operator(cx.editor);
+        return;
+    };
+    if cx.editor.operator_state().operator.is_some() {
+        apply_operator_to_range(cx.editor, window_id, buffer_id, start, end, false);
+    } else {
+        // No operator: select the range (set mark + move cursor).
+        cx.editor.set_mark(window_id, start);
+        if let Some(w) = cx.editor.windows_mut().get_mut(window_id) { w.cursor_byte = end; }
+        cx.editor.mark_dirty();
+    }
+}
+
+macro_rules! text_object_delimited {
+    ($name:ident, $const_name:ident, $desc:literal, $open:expr, $close:expr, $inner:expr) => {
+        stock_cmd!($name, $const_name, $desc);
+        impl $name {
+            fn run_impl(cx: &mut CommandContext<'_>) {
+                let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+                    pop_operator(cx.editor); return;
+                };
+                let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                    pop_operator(cx.editor); return;
+                };
+                let text = buffer.text();
+                if let Some((s, e)) = find_delimited(&text, cursor, $open, $close, $inner) {
+                    apply_text_object(cx, s, e);
+                } else {
+                    pop_operator(cx.editor);
+                }
+            }
+        }
+    };
+}
+
+text_object_delimited!(TextObjectInnerDoubleQuote, TEXT_OBJECT_INNER_DOUBLE_QUOTE, "Inner double-quoted string", '"', '"', true);
+text_object_delimited!(TextObjectADoubleQuote, TEXT_OBJECT_A_DOUBLE_QUOTE, "A double-quoted string", '"', '"', false);
+text_object_delimited!(TextObjectInnerSingleQuote, TEXT_OBJECT_INNER_SINGLE_QUOTE, "Inner single-quoted string", '\'', '\'', true);
+text_object_delimited!(TextObjectASingleQuote, TEXT_OBJECT_A_SINGLE_QUOTE, "A single-quoted string", '\'', '\'', false);
+text_object_delimited!(TextObjectInnerParen, TEXT_OBJECT_INNER_PAREN, "Inner parentheses", '(', ')', true);
+text_object_delimited!(TextObjectAParen, TEXT_OBJECT_A_PAREN, "Including parentheses", '(', ')', false);
+text_object_delimited!(TextObjectInnerBrace, TEXT_OBJECT_INNER_BRACE, "Inner curly braces", '{', '}', true);
+text_object_delimited!(TextObjectABrace, TEXT_OBJECT_A_BRACE, "Including curly braces", '{', '}', false);
+text_object_delimited!(TextObjectInnerBracket, TEXT_OBJECT_INNER_BRACKET, "Inner square brackets", '[', ']', true);
+text_object_delimited!(TextObjectABracket, TEXT_OBJECT_A_BRACKET, "Including square brackets", '[', ']', false);
+text_object_delimited!(TextObjectInnerAngle, TEXT_OBJECT_INNER_ANGLE, "Inner angle brackets", '<', '>', true);
+text_object_delimited!(TextObjectAAngle, TEXT_OBJECT_A_ANGLE, "Including angle brackets", '<', '>', false);
+text_object_delimited!(TextObjectInnerBacktick, TEXT_OBJECT_INNER_BACKTICK, "Inner backtick string", '`', '`', true);
+text_object_delimited!(TextObjectABacktick, TEXT_OBJECT_A_BACKTICK, "Including backtick string", '`', '`', false);
+
+stock_cmd!(TextObjectInnerWord, TEXT_OBJECT_INNER_WORD, "Inner word");
+impl TextObjectInnerWord {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor); return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor); return;
+        };
+        let text = buffer.text();
+        if let Some((s, e)) = find_word(&text, cursor, false) {
+            apply_text_object(cx, s, e);
+        } else {
+            pop_operator(cx.editor);
+        }
+    }
+}
+
+stock_cmd!(TextObjectAWord, TEXT_OBJECT_A_WORD, "A word (including whitespace)");
+impl TextObjectAWord {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor); return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor); return;
+        };
+        let text = buffer.text();
+        if let Some((s, e)) = find_word(&text, cursor, true) {
+            apply_text_object(cx, s, e);
+        } else {
+            pop_operator(cx.editor);
+        }
+    }
+}
+
+stock_cmd!(TextObjectInnerParagraph, TEXT_OBJECT_INNER_PARAGRAPH, "Inner paragraph");
+impl TextObjectInnerParagraph {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor); return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor); return;
+        };
+        let text = buffer.text();
+        if let Some((s, e)) = find_paragraph(&text, cursor, false) {
+            apply_text_object(cx, s, e);
+        } else {
+            pop_operator(cx.editor);
+        }
+    }
+}
+
+stock_cmd!(TextObjectAParagraph, TEXT_OBJECT_A_PARAGRAPH, "A paragraph (including blank lines)");
+impl TextObjectAParagraph {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((_, buffer_id, cursor)) = active(cx.editor) else {
+            pop_operator(cx.editor); return;
+        };
+        let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+            pop_operator(cx.editor); return;
+        };
+        let text = buffer.text();
+        if let Some((s, e)) = find_paragraph(&text, cursor, true) {
+            apply_text_object(cx, s, e);
+        } else {
+            pop_operator(cx.editor);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// f/F/t/T char-read mode
+// ---------------------------------------------------------------------------
+
+/// Called from `handle_printable_fallback` when the editor is in
+/// char-read mode (the user pressed `f`, `F`, `t`, or `T` and we're
+/// waiting for the target character).
+pub fn handle_char_read(editor: &mut Editor, ch: char, mode: crate::editor::CharReadMode) {
+    use crate::editor::{CharReadMode, FindCharKind, FindCharState};
+
+    let Some(window_id) = editor.windows().active() else {
+        pop_operator(editor);
+        return;
+    };
+    let Some(data) = editor.windows().get(window_id) else {
+        pop_operator(editor);
+        return;
+    };
+    let buffer_id = data.buffer_id;
+    let cursor = data.cursor_byte;
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        pop_operator(editor);
+        return;
+    };
+    let text = buffer.text();
+    let rope = buffer.rope();
+    let line = rope.byte_to_line(cursor);
+    let line_start = rope.line_to_byte(line);
+    let line_end = if line + 1 < rope.len_lines() {
+        rope.line_to_byte(line + 1).saturating_sub(1)
+    } else {
+        rope.len_bytes()
+    };
+
+    let target = match mode {
+        CharReadMode::FindForwardTo => {
+            text[(cursor + 1)..line_end].find(ch).map(|i| cursor + 1 + i)
+        }
+        CharReadMode::FindForwardTill => {
+            text[(cursor + 1)..line_end].find(ch).map(|i| cursor + i)
+        }
+        CharReadMode::FindBackwardTo => {
+            text[line_start..cursor].rfind(ch).map(|i| line_start + i)
+        }
+        CharReadMode::FindBackwardTill => {
+            text[line_start..cursor].rfind(ch).map(|i| line_start + i + 1)
+        }
+    };
+
+    let kind = match mode {
+        CharReadMode::FindForwardTo => FindCharKind::ForwardTo,
+        CharReadMode::FindForwardTill => FindCharKind::ForwardTill,
+        CharReadMode::FindBackwardTo => FindCharKind::BackwardTo,
+        CharReadMode::FindBackwardTill => FindCharKind::BackwardTill,
+    };
+    editor.set_last_find_char(FindCharState { ch, kind });
+
+    if let Some(target) = target {
+        if editor.operator_state().operator.is_some() {
+            // Apply operator to the range.
+            let (start, end) = if target > cursor { (cursor, target + 1) } else { (target, cursor) };
+            apply_operator_to_range(editor, window_id, buffer_id, start, end, false);
+        } else {
+            if let Some(w) = editor.windows_mut().get_mut(window_id) {
+                w.cursor_byte = target;
+            }
+            pop_operator(editor);
+        }
+    } else {
+        pop_operator(editor);
+    }
+    editor.mark_dirty();
 }
 
 // ---------------------------------------------------------------------------
@@ -1853,7 +3830,7 @@ impl CompletionTrigger {
 
         // Push the completion keymap layer.
         if !cx.editor.keymap().has_layer("completion") {
-            cx.editor.keymap_mut().push_layer(Layer::new(
+            cx.editor.keymap_mut().push_layer(Layer::absorbing(
                 LayerId::from("completion"),
                 Arc::new(arx_keymap::profiles::completion_layer()),
             ));
@@ -1929,6 +3906,38 @@ stock_cmd!(
 impl CompletionPrev {
     fn run_impl(cx: &mut CommandContext<'_>) {
         cx.editor.completion_mut().select_prev();
+        cx.editor.mark_dirty();
+    }
+}
+
+/// Page size for the completion popup — matches the max visible rows
+/// the renderer shows (8).
+const COMPLETION_PAGE_SIZE: usize = 8;
+
+stock_cmd!(
+    CompletionPageDown,
+    COMPLETION_PAGE_DOWN,
+    "Move the completion selection down one page"
+);
+impl CompletionPageDown {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor
+            .completion_mut()
+            .select_next_n(COMPLETION_PAGE_SIZE);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    CompletionPageUp,
+    COMPLETION_PAGE_UP,
+    "Move the completion selection up one page"
+);
+impl CompletionPageUp {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor
+            .completion_mut()
+            .select_prev_n(COMPLETION_PAGE_SIZE);
         cx.editor.mark_dirty();
     }
 }

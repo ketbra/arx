@@ -19,7 +19,10 @@ use std::io::{self, Stdout, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crossterm::event::Event;
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::{ExecutableCommand, cursor, terminal};
 use futures_util::Stream;
 use tokio::sync::Notify;
@@ -65,6 +68,7 @@ pub enum DriverError {
 pub struct Driver {
     seed: Box<dyn FnOnce(&mut Editor) + Send>,
     async_hook: Option<AsyncHook>,
+    profile: Option<arx_keymap::profiles::Profile>,
 }
 
 impl std::fmt::Debug for Driver {
@@ -86,7 +90,15 @@ impl Driver {
         Self {
             seed: Box::new(seed),
             async_hook: None,
+            profile: None,
         }
+    }
+
+    /// Use a specific keymap profile instead of the default (Emacs).
+    #[must_use]
+    pub fn with_profile(mut self, profile: arx_keymap::profiles::Profile) -> Self {
+        self.profile = Some(profile);
+        self
     }
 
     /// Attach a post-spawn async hook. The hook runs once after the
@@ -153,7 +165,10 @@ impl Driver {
         // event loop starts. Going through the bus here would deadlock,
         // because `invoke` awaits a reply from a loop that hasn't been
         // spawned yet. Using `with_editor` sidesteps that entirely.
-        let mut editor = Editor::new();
+        let mut editor = match self.profile {
+            Some(p) => Editor::with_profile(p),
+            None => Editor::new(),
+        };
         let seed = self.seed;
         seed(&mut editor);
         let (event_loop, bus) = EventLoop::with_editor(editor, DEFAULT_BUS_CAPACITY);
@@ -233,6 +248,7 @@ impl Driver {
 /// input task can't leave the user's terminal in a wedged state.
 struct TerminalGuard {
     enabled: bool,
+    keyboard_enhancements_pushed: bool,
 }
 
 impl TerminalGuard {
@@ -240,8 +256,24 @@ impl TerminalGuard {
         terminal::enable_raw_mode()?;
         out.execute(terminal::EnterAlternateScreen)?;
         out.execute(cursor::Hide)?;
+        // Enable mouse reporting so the user can click to move the
+        // cursor, drag to select, and scroll with the wheel.
+        out.execute(EnableMouseCapture)?;
+        // Try to enable the Kitty keyboard protocol so modifier keys
+        // like Ctrl+/, Ctrl+_, and Ctrl+Shift+<char> are reported
+        // unambiguously. The terminal may refuse (e.g. plain xterm);
+        // that's fine — we fall back to legacy reporting.
+        let keyboard_enhancements_pushed = out
+            .execute(PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+            ))
+            .is_ok();
         out.flush()?;
-        Ok(Self { enabled: true })
+        Ok(Self {
+            enabled: true,
+            keyboard_enhancements_pushed,
+        })
     }
 }
 
@@ -251,6 +283,14 @@ impl Drop for TerminalGuard {
             return;
         }
         let mut out = io::stdout();
+        if self.keyboard_enhancements_pushed {
+            if let Err(err) = out.execute(PopKeyboardEnhancementFlags) {
+                warn!(%err, "failed to pop keyboard enhancement flags");
+            }
+        }
+        if let Err(err) = out.execute(DisableMouseCapture) {
+            warn!(%err, "failed to disable mouse capture");
+        }
         if let Err(err) = out.execute(cursor::Show) {
             warn!(%err, "failed to restore cursor visibility");
         }

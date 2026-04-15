@@ -415,6 +415,29 @@ impl WindowManager {
         Some(new_id)
     }
 
+    /// Close every window except the active one, collapsing the layout
+    /// to a single leaf. Windows that are no longer in the layout are
+    /// removed from the map. Returns `true` if any windows were closed.
+    pub fn delete_other(&mut self) -> bool {
+        let Some(active) = self.active else {
+            return false;
+        };
+        let other_ids: Vec<WindowId> = self
+            .windows
+            .keys()
+            .copied()
+            .filter(|id| *id != active)
+            .collect();
+        if other_ids.is_empty() {
+            return false;
+        }
+        for id in &other_ids {
+            self.windows.remove(id);
+        }
+        self.layout = Some(Layout::Leaf(active));
+        true
+    }
+
     /// Move focus to the next leaf in the layout's depth-first order,
     /// wrapping at the end. Returns the new active window id, or `None`
     /// if the layout is empty.

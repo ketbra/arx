@@ -65,7 +65,7 @@ pub use render_tree::{CursorRender, CursorStyle, RenderTree};
 pub use view::render;
 pub use view_state::{
     CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree, PaletteEntry,
-    WhichKeyEntry,
+    SearchEntry, SearchView, Selection, WhichKeyEntry,
     PaletteView, Rect, ScrollPosition, SplitDirection, TerminalSize, TerminalViewCell,
     TerminalViewState, ViewState, WindowId, WindowState,
 };

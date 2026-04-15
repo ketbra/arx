@@ -23,6 +23,12 @@ pub type LayerId = Arc<str>;
 pub struct Layer {
     pub id: LayerId,
     pub map: Arc<Keymap>,
+    /// When true, single-key sequences that don't match in this layer
+    /// are treated as `Unbound` rather than falling through to lower
+    /// layers. This is used by overlay layers (palette, search,
+    /// completion) to capture printable keys as text input instead of
+    /// letting them resolve to editor commands in the base keymap.
+    pub absorb_fallthrough: bool,
 }
 
 impl Layer {
@@ -30,6 +36,16 @@ impl Layer {
         Self {
             id: id.into(),
             map,
+            absorb_fallthrough: false,
+        }
+    }
+
+    /// Create a layer that absorbs unmatched single-key sequences.
+    pub fn absorbing(id: impl Into<LayerId>, map: Arc<Keymap>) -> Self {
+        Self {
+            id: id.into(),
+            map,
+            absorb_fallthrough: true,
         }
     }
 }
@@ -217,6 +233,12 @@ impl KeymapEngine {
     fn resolve(&mut self) -> FeedOutcome {
         // Walk the stack top to bottom until we either find a Command or
         // determine there's no match anywhere.
+        //
+        // Priority: an upper layer's Pending (prefix match) takes
+        // precedence over a lower layer's Command. This ensures that
+        // when an overlay layer (operator-pending, palette) has a
+        // multi-chord prefix like `i "`, a single `i` stays pending
+        // rather than resolving to a lower layer's `i` → enter-insert.
         let mut any_pending = false;
         // Collect into a local to release the borrow before mutating self.
         let mut found: Option<CommandRef> = None;
@@ -227,14 +249,25 @@ impl KeymapEngine {
                     break;
                 }
                 Lookup::Pending => {
+                    // An upper layer has a prefix match — stop looking
+                    // at lower layers. The user needs to type more keys.
                     any_pending = true;
+                    break;
                 }
                 Lookup::Unbound => {
                     // An explicit unbind in an upper layer blocks
                     // fallthrough — act as if definitively unbound.
                     return self.finish_unbound();
                 }
-                Lookup::NoMatch => {}
+                Lookup::NoMatch => {
+                    // If this layer absorbs fallthrough, treat
+                    // single-key misses as unbound so printable keys
+                    // go to text-input handlers (palette, search)
+                    // instead of falling through to vim.normal.
+                    if layer.absorb_fallthrough && self.pending.len() == 1 {
+                        return self.finish_unbound();
+                    }
+                }
             }
         }
 

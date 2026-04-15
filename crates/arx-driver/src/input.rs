@@ -15,15 +15,52 @@
 //! stream drains.
 
 use std::ops::ControlFlow;
+use std::time::{Duration as StdDuration, Instant};
 
 use crossterm::event::Event;
 use futures_util::StreamExt;
 use tracing::{debug, trace};
 
-use arx_core::{CommandBus, KeyHandled};
+use arx_core::{CommandBus, Editor, KeyHandled};
 use arx_keymap::KeyChord;
 
 use crate::state::{SharedTerminalSize, Shutdown};
+
+/// Maximum time between consecutive clicks to count as a multi-click.
+const MULTI_CLICK_INTERVAL: StdDuration = StdDuration::from_millis(400);
+
+/// State for tracking double/triple clicks.
+#[derive(Debug, Clone, Copy, Default)]
+struct ClickState {
+    /// When the last left-mouse-down occurred.
+    last_time: Option<Instant>,
+    /// Screen (x, y) of the last click.
+    last_pos: (u16, u16),
+    /// How many consecutive clicks have landed at roughly the same
+    /// position within `MULTI_CLICK_INTERVAL`. `1` = single click,
+    /// `2` = double click, `3` = triple click. Caps at 3.
+    count: u8,
+}
+
+impl ClickState {
+    /// Record a new left-click at `(x, y)`. Returns the click count
+    /// (1, 2, or 3) after this click.
+    fn record(&mut self, x: u16, y: u16) -> u8 {
+        let now = Instant::now();
+        let is_continuation = self.last_time.is_some_and(|t| {
+            now.duration_since(t) <= MULTI_CLICK_INTERVAL
+                && self.last_pos == (x, y)
+        });
+        if is_continuation {
+            self.count = (self.count + 1).min(3);
+        } else {
+            self.count = 1;
+        }
+        self.last_time = Some(now);
+        self.last_pos = (x, y);
+        self.count
+    }
+}
 
 /// Everything the input task needs to run.
 pub struct InputTask<S>
@@ -64,6 +101,7 @@ where
             shutdown,
         } = self;
         let mut pending_prefix = false;
+        let mut click_state = ClickState::default();
         let which_key_delay = Duration::from_millis(500);
 
         loop {
@@ -76,7 +114,7 @@ where
                     event = events.next() => {
                         match event {
                             Some(Ok(ev)) => {
-                                let (flow, is_pending) = handle_with_pending(ev, &bus, &size).await;
+                                let (flow, is_pending) = handle_with_pending(ev, &bus, &size, &mut click_state).await;
                                 pending_prefix = is_pending;
                                 if flow.is_break() {
                                     debug!("shutdown requested from input");
@@ -103,7 +141,7 @@ where
                 match events.next().await {
                     Some(Ok(ev)) => {
                         trace!(?ev, "input event");
-                        let (flow, is_pending) = handle_with_pending(ev, &bus, &size).await;
+                        let (flow, is_pending) = handle_with_pending(ev, &bus, &size, &mut click_state).await;
                         pending_prefix = is_pending;
                         if flow.is_break() {
                             debug!("shutdown requested from input");
@@ -128,14 +166,87 @@ async fn handle_with_pending(
     event: Event,
     bus: &CommandBus,
     size: &SharedTerminalSize,
+    click_state: &mut ClickState,
 ) -> (ControlFlow<()>, bool) {
     match event {
         Event::Key(key) => handle_key(key, bus).await,
         Event::Resize(cols, rows) => {
             size.set(cols, rows);
+            let _ = bus.dispatch(Editor::mark_dirty).await;
+            (ControlFlow::Continue(()), false)
+        }
+        Event::Mouse(mev) => {
+            handle_mouse(mev, bus, size, click_state).await;
             (ControlFlow::Continue(()), false)
         }
         _ => (ControlFlow::Continue(()), false),
+    }
+}
+
+/// Handle a mouse event.
+///
+/// - Left-click (count=1): moves the cursor, clears selection. If
+///   Shift is held, extends the selection instead (keeps the mark).
+/// - Left-click (count=2): selects the word at the click.
+/// - Left-click (count=3): selects the entire line.
+/// - Left-drag: updates the cursor with the mark anchored at the
+///   click position, creating a selection.
+/// - Wheel up/down: scrolls the pane under the cursor.
+async fn handle_mouse(
+    mev: crossterm::event::MouseEvent,
+    bus: &CommandBus,
+    size: &SharedTerminalSize,
+    click_state: &mut ClickState,
+) {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+    let (cols, rows) = size.get();
+    let x = mev.column;
+    let y = mev.row;
+    let shift = mev.modifiers.contains(KeyModifiers::SHIFT);
+    match mev.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let count = click_state.record(x, y);
+            let kind = match count {
+                2 => crate::render::ClickKind::DoubleClick,
+                3 => crate::render::ClickKind::TripleClick,
+                _ if shift => crate::render::ClickKind::ShiftClick,
+                _ => crate::render::ClickKind::Single,
+            };
+            let _ = bus
+                .dispatch(move |editor| {
+                    crate::render::hit_test_and_click(editor, cols, rows, x, y, kind);
+                })
+                .await;
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let _ = bus
+                .dispatch(move |editor| {
+                    crate::render::hit_test_and_click(
+                        editor,
+                        cols,
+                        rows,
+                        x,
+                        y,
+                        crate::render::ClickKind::Drag,
+                    );
+                })
+                .await;
+        }
+        MouseEventKind::ScrollUp => {
+            let _ = bus
+                .dispatch(move |editor| {
+                    crate::render::mouse_scroll(editor, cols, rows, x, y, -3);
+                })
+                .await;
+        }
+        MouseEventKind::ScrollDown => {
+            let _ = bus
+                .dispatch(move |editor| {
+                    crate::render::mouse_scroll(editor, cols, rows, x, y, 3);
+                })
+                .await;
+        }
+        _ => {}
     }
 }
 
@@ -143,47 +254,34 @@ async fn handle_key(
     key: crossterm::event::KeyEvent,
     bus: &CommandBus,
 ) -> (ControlFlow<()>, bool) {
-    use crossterm::event::{KeyCode, KeyModifiers};
-
-    let chord = KeyChord::from(&key);
-
-    // Check if the active pane is a terminal. If so, forward the
-    // raw keystroke to the PTY — unless it's the terminal-escape
-    // key (`C-\`), which breaks out to the normal keymap so the
-    // user can switch panes, close the terminal, etc.
-    let is_terminal_escape = key.modifiers.contains(KeyModifiers::CONTROL)
-        && key.code == KeyCode::Char('\\');
-    if !is_terminal_escape {
-        let forwarded = bus
-            .invoke(move |editor| {
-                let Some(active) = editor.windows().active() else {
-                    return false;
-                };
-                if let Some(term) = editor.terminal(active) {
-                    // Convert the key event to bytes the PTY understands.
-                    if let Some(bytes) = key_to_pty_bytes(&key) {
-                        term.write(bytes);
-                    }
-                    editor.mark_dirty();
-                    return true;
-                }
-                false
-            })
-            .await;
-        if let Ok(true) = forwarded {
-            return (ControlFlow::Continue(()), false);
-        }
+    use crossterm::event::KeyEventKind;
+    // With the Kitty keyboard protocol enabled some terminals report
+    // both press and release events. We only want to act on press/repeat —
+    // releases would double-trigger bindings.
+    if matches!(key.kind, KeyEventKind::Release) {
+        return (ControlFlow::Continue(()), false);
     }
 
-    // Normal keymap path (buffer panes, or terminal-escape key).
+    let chord = KeyChord::from(&key);
+    // Log the raw event and the derived chord. Users debugging
+    // key-binding issues (especially around Ctrl+/ / Ctrl+_ / M-<
+    // that terminals report inconsistently) can run with
+    // `RUST_LOG=arx_driver::input=debug` to see exactly what the
+    // terminal is sending.
+    debug!(?key, %chord, "key event");
+
+    // Always route through the editor keymap first. Editor-level
+    // bindings (window management, palette, search, etc.) take
+    // priority even when a terminal pane is focused. Only truly
+    // unbound keys are forwarded to the PTY.
     let bus_clone = bus.clone();
     let result = bus
         .invoke(move |editor| {
             let outcome = editor.handle_key(&bus_clone, chord);
-            (outcome, editor.quit_requested())
+            (outcome, editor.quit_requested(), editor.suspend_requested())
         })
         .await;
-    let Ok((outcome, quit)) = result else {
+    let Ok((outcome, quit, suspend)) = result else {
         return (ControlFlow::Break(()), false);
     };
 
@@ -191,19 +289,47 @@ async fn handle_key(
         return (ControlFlow::Break(()), false);
     }
 
+    if suspend {
+        crate::suspend::suspend_and_resume(bus).await;
+    }
+
     let is_pending = outcome == KeyHandled::Pending;
 
-    if let KeyHandled::Unbound {
-        printable_fallback: Some(ch),
-    } = outcome
-    {
-        if bus
-            .dispatch(move |editor| editor.handle_printable_fallback(ch))
-            .await
-            .is_err()
-        {
-            return (ControlFlow::Break(()), false);
+    match outcome {
+        KeyHandled::Unbound {
+            printable_fallback: Some(ch),
+        } => {
+            // Printable unbound key: self-insert, or forward to the
+            // terminal PTY if the active pane is a terminal.
+            if bus
+                .dispatch(move |editor| editor.handle_printable_fallback(ch))
+                .await
+                .is_err()
+            {
+                return (ControlFlow::Break(()), false);
+            }
         }
+        KeyHandled::Unbound {
+            printable_fallback: None,
+        } => {
+            // Non-printable unbound key (arrows, Enter, Backspace,
+            // etc.): forward to the PTY if the active pane is a
+            // terminal; otherwise silently drop.
+            let _ = bus
+                .dispatch(move |editor| {
+                    let Some(active) = editor.windows().active() else {
+                        return;
+                    };
+                    if let Some(term) = editor.terminal(active) {
+                        if let Some(bytes) = key_to_pty_bytes(&key) {
+                            term.write(bytes);
+                        }
+                        editor.mark_dirty();
+                    }
+                })
+                .await;
+        }
+        _ => {}
     }
     (ControlFlow::Continue(()), is_pending)
 }

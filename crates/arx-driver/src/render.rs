@@ -22,7 +22,8 @@ use tracing::{debug, trace, warn};
 use arx_core::{CommandBus, Layout as CoreLayout, SplitAxis, WindowId as CoreWindowId};
 use arx_render::{
     Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree,
-    PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SplitDirection, TerminalSize,
+    PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SearchEntry, SearchView,
+    Selection, SplitDirection, TerminalSize,
     TerminalViewCell, TerminalViewState, ViewState, WhichKeyEntry, WindowId as ViewWindowId,
     WindowState, diff,
     initial_paint, render,
@@ -179,6 +180,284 @@ async fn build_view_state(bus: &CommandBus, cols: u16, rows: u16) -> Option<View
         .flatten()
 }
 
+/// Result of hit-testing a screen position against the layout.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HitTest {
+    /// The window (buffer pane or terminal pane) containing (x, y).
+    pub window_id: CoreWindowId,
+    /// Whether the hit is in a terminal pane.
+    pub is_terminal: bool,
+    /// Column relative to the pane's text area (0-based; 0 = first
+    /// text column after the gutter). Clamped to `[0, text_width)`.
+    pub text_col: u16,
+    /// Row relative to the pane (0-based). Clamped to `[0, pane_height)`.
+    pub row: u16,
+}
+
+/// How a left-mouse-down event was produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClickKind {
+    /// First click: move cursor, clear selection.
+    Single,
+    /// Shift+click: move cursor, keep the current mark (extend
+    /// selection). If no mark exists, plants one at the previous
+    /// cursor position so the click produces a selection.
+    ShiftClick,
+    /// Second quick click at the same position: select the word at
+    /// the click.
+    DoubleClick,
+    /// Third quick click at the same position: select the entire
+    /// line at the click.
+    TripleClick,
+    /// Mouse drag: move the cursor while the mark stays where it was
+    /// (or was anchored on mouse-down), creating a selection.
+    Drag,
+}
+
+/// Handle a left-click or drag at screen position `(x, y)`.
+/// See [`ClickKind`] for the semantics of each variant.
+pub(crate) fn hit_test_and_click(
+    editor: &mut arx_core::Editor,
+    cols: u16,
+    rows: u16,
+    x: u16,
+    y: u16,
+    kind: ClickKind,
+) {
+    let Some(hit) = hit_test_at(editor, cols, rows, x, y) else {
+        return;
+    };
+
+    // For terminal panes: focus on a fresh click but don't try to
+    // place a "cursor" — the terminal handles its own cursor.
+    if hit.is_terminal {
+        if !matches!(kind, ClickKind::Drag) {
+            editor.windows_mut().set_active(hit.window_id);
+            editor.mark_dirty();
+        }
+        return;
+    }
+
+    // Buffer pane: focus on a fresh click.
+    if !matches!(kind, ClickKind::Drag) {
+        editor.windows_mut().set_active(hit.window_id);
+    }
+
+    let Some(data) = editor.windows().get(hit.window_id).cloned() else {
+        return;
+    };
+    let Some(buffer) = editor.buffers().get(data.buffer_id) else {
+        return;
+    };
+    let rope = buffer.rope();
+    let target_line = data
+        .scroll_top_line
+        .saturating_add(hit.row as usize)
+        .min(rope.len_lines().saturating_sub(1));
+    let line_start = rope.line_to_byte(target_line);
+    let line_end = if target_line + 1 < rope.len_lines() {
+        rope.line_to_byte(target_line + 1).saturating_sub(1)
+    } else {
+        rope.len_bytes()
+    };
+    let line_text = rope.slice_to_string(line_start..line_end);
+    let target_col = (hit.text_col as usize).saturating_add(data.scroll_left_col as usize);
+    let byte_in_line =
+        arx_core::column::display_col_to_byte(&line_text, target_col as u16);
+    let target_byte = line_start + byte_in_line.min(line_end - line_start);
+
+    match kind {
+        ClickKind::Single => {
+            editor.clear_mark(hit.window_id);
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = target_byte;
+            }
+        }
+        ClickKind::ShiftClick => {
+            // Extend selection: if no mark, anchor at old cursor so
+            // the click produces a visible selection.
+            if editor.mark(hit.window_id).is_none() {
+                editor.set_mark(hit.window_id, data.cursor_byte);
+            }
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = target_byte;
+            }
+        }
+        ClickKind::Drag => {
+            // Continue dragging: if no mark, anchor at the previous
+            // cursor so the drag creates a selection from where it
+            // started.
+            if editor.mark(hit.window_id).is_none() {
+                editor.set_mark(hit.window_id, data.cursor_byte);
+            }
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = target_byte;
+            }
+        }
+        ClickKind::DoubleClick => {
+            // Select the word at target_byte.
+            let (word_start, word_end) = word_range_at(&line_text, byte_in_line);
+            let sel_start = line_start + word_start;
+            let sel_end = line_start + word_end;
+            editor.set_mark(hit.window_id, sel_start);
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = sel_end;
+            }
+        }
+        ClickKind::TripleClick => {
+            // Select the entire line (including trailing newline if
+            // one exists, so "delete selection" removes the line
+            // cleanly).
+            let sel_end = if target_line + 1 < rope.len_lines() {
+                rope.line_to_byte(target_line + 1)
+            } else {
+                rope.len_bytes()
+            };
+            editor.set_mark(hit.window_id, line_start);
+            if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+                w.cursor_byte = sel_end;
+            }
+        }
+    }
+    editor.mark_dirty();
+}
+
+/// Find the start and end byte offsets of the word containing
+/// `byte_in_line` within `line_text`. If the position is on a
+/// non-word character, returns the range of the contiguous run of
+/// non-word non-whitespace characters (so e.g. double-clicking on a
+/// `->` selects the operator). Whitespace runs are preserved as-is.
+fn word_range_at(line_text: &str, byte_in_line: usize) -> (usize, usize) {
+    let bytes = line_text.as_bytes();
+    let len = bytes.len();
+    if len == 0 {
+        return (0, 0);
+    }
+    let pos = byte_in_line.min(len.saturating_sub(1));
+    let is_word_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let is_space = |b: u8| b == b' ' || b == b'\t';
+
+    let classify = |b: u8| -> u8 {
+        if is_word_char(b) {
+            0
+        } else if is_space(b) {
+            1
+        } else {
+            2
+        }
+    };
+    let target_class = classify(bytes[pos]);
+    let mut start = pos;
+    while start > 0 && classify(bytes[start - 1]) == target_class {
+        start -= 1;
+    }
+    let mut end = pos;
+    while end < len && classify(bytes[end]) == target_class {
+        end += 1;
+    }
+    (start, end)
+}
+
+/// Scroll the pane under `(x, y)` by `delta` lines (positive = down,
+/// negative = up).
+pub(crate) fn mouse_scroll(
+    editor: &mut arx_core::Editor,
+    cols: u16,
+    rows: u16,
+    x: u16,
+    y: u16,
+    delta: i32,
+) {
+    let Some(hit) = hit_test_at(editor, cols, rows, x, y) else {
+        return;
+    };
+    if hit.is_terminal {
+        return;
+    }
+    let Some(data) = editor.windows().get(hit.window_id).cloned() else {
+        return;
+    };
+    let Some(buffer) = editor.buffers().get(data.buffer_id) else {
+        return;
+    };
+    let max_line = buffer.rope().len_lines().saturating_sub(1);
+    let new_top = if delta < 0 {
+        data.scroll_top_line.saturating_sub(delta.unsigned_abs() as usize)
+    } else {
+        (data.scroll_top_line + delta as usize).min(max_line)
+    };
+    if let Some(w) = editor.windows_mut().get_mut(hit.window_id) {
+        w.scroll_top_line = new_top;
+    }
+    editor.mark_dirty();
+}
+
+/// Hit-test a screen position against the current layout. Returns the
+/// pane under `(x, y)` along with pane-local coordinates, or `None`
+/// if the position is outside any pane (e.g. in the modeline).
+pub(crate) fn hit_test_at(
+    editor: &arx_core::Editor,
+    cols: u16,
+    rows: u16,
+    x: u16,
+    y: u16,
+) -> Option<HitTest> {
+    let layout = editor.windows().layout()?;
+    // Same geometry as build_view_state_sync: reserve 1 row for modeline.
+    let text_rows = rows.saturating_sub(1);
+    let root_rect = Rect::new(0, 0, cols, text_rows);
+
+    let mut visible_ids: Vec<CoreWindowId> = Vec::new();
+    let view_layout = build_view_layout(layout, &mut visible_ids);
+
+    let mut hit: Option<HitTest> = None;
+    view_layout.walk_pane_rects(root_rect, &mut |vid, rect| {
+        if hit.is_some() || rect.is_empty() {
+            return;
+        }
+        if x < rect.x
+            || x >= rect.x + rect.width
+            || y < rect.y
+            || y >= rect.y + rect.height
+        {
+            return;
+        }
+        let window_id = CoreWindowId(vid.0);
+        let is_terminal = editor.terminal(window_id).is_some();
+
+        // Compute gutter width for buffer panes so we can return a
+        // text-area-relative column. Terminal panes have no gutter.
+        let gutter_width = if is_terminal {
+            0
+        } else if let Some(data) = editor.windows().get(window_id) {
+            let len_lines = editor
+                .buffers()
+                .get(data.buffer_id)
+                .map_or(1, |b| b.rope().len_lines().max(1));
+            let digits = digit_count(len_lines);
+            let gc = GutterConfig::default();
+            if gc.line_numbers {
+                (digits.max(gc.min_width as usize) as u16) + 1
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let pane_col = x.saturating_sub(rect.x);
+        let row = y.saturating_sub(rect.y);
+        let text_col = pane_col.saturating_sub(gutter_width);
+        hit = Some(HitTest {
+            window_id,
+            is_terminal,
+            text_col,
+            row,
+        });
+    });
+    hit
+}
+
 fn build_view_state_sync(
     editor: &mut arx_core::Editor,
     cols: u16,
@@ -246,11 +525,26 @@ fn build_view_state_sync(
         } else {
             let data = editor.windows().get(id)?.clone();
             let snapshot = editor.buffers().snapshot(data.buffer_id)?;
-            let selection = editor.mark(id).map(|mark| {
+            let selection = editor.mark_state(id).and_then(|ms| {
                 let cursor = data.cursor_byte;
-                let start = mark.min(cursor);
-                let end = mark.max(cursor);
-                start..end
+                match ms.mode {
+                    arx_core::SelectionMode::Linear => {
+                        let start = ms.byte.min(cursor);
+                        let end = ms.byte.max(cursor);
+                        Some(Selection::Linear(start..end))
+                    }
+                    arx_core::SelectionMode::Rectangle => {
+                        let rect = arx_core::column::RectRegion::from_mark_cursor(
+                            editor, data.buffer_id, ms.byte, cursor,
+                        )?;
+                        Some(Selection::Rectangle {
+                            start_line: rect.start_line,
+                            end_line: rect.end_line,
+                            left_col: rect.left_col,
+                            right_col: rect.right_col,
+                        })
+                    }
+                }
             });
             windows.push(WindowState {
                 id: ViewWindowId(id.0),
@@ -437,12 +731,37 @@ fn build_global_state(
             .collect()
     });
 
+    let search_view = if editor.search().is_open() {
+        const MAX_SEARCH_ROWS: u16 = 10;
+        let total = editor.search().matches().len();
+        let entries = editor
+            .search()
+            .matches()
+            .iter()
+            .map(|m| SearchEntry {
+                line_number: m.line_number,
+                line_text: m.line_text.clone(),
+            })
+            .collect::<Vec<_>>();
+        Some(SearchView {
+            prompt: format!("Search ({}): ", editor.search().mode().label()),
+            query: editor.search().query().to_owned(),
+            matches: entries,
+            selected: editor.search().selected_index(),
+            max_rows: MAX_SEARCH_ROWS,
+            total_matches: total,
+        })
+    } else {
+        None
+    };
+
     Some(GlobalState {
         modeline_left: left,
         modeline_right: format!("{} bytes", text.len()),
         palette: palette_view,
         completion: completion_view,
         which_key,
+        search: search_view,
     })
 }
 
@@ -494,6 +813,41 @@ mod tests {
     use super::*;
     use arx_core::EventLoop;
     use arx_render::TestBackend;
+
+    #[test]
+    fn word_range_selects_alphanumeric_run() {
+        assert_eq!(word_range_at("hello world", 0), (0, 5));
+        assert_eq!(word_range_at("hello world", 2), (0, 5));
+        assert_eq!(word_range_at("hello world", 4), (0, 5));
+        assert_eq!(word_range_at("hello world", 6), (6, 11));
+        assert_eq!(word_range_at("hello world", 10), (6, 11));
+    }
+
+    #[test]
+    fn word_range_selects_whitespace_run() {
+        assert_eq!(word_range_at("a   b", 1), (1, 4));
+        assert_eq!(word_range_at("a   b", 2), (1, 4));
+        assert_eq!(word_range_at("a   b", 3), (1, 4));
+    }
+
+    #[test]
+    fn word_range_selects_punctuation_run() {
+        assert_eq!(word_range_at("foo->bar", 3), (3, 5));
+        assert_eq!(word_range_at("foo->bar", 4), (3, 5));
+        assert_eq!(word_range_at("a == b", 2), (2, 4));
+    }
+
+    #[test]
+    fn word_range_handles_underscore_as_word_char() {
+        assert_eq!(word_range_at("my_var = 1", 0), (0, 6));
+        assert_eq!(word_range_at("my_var = 1", 3), (0, 6));
+    }
+
+    #[test]
+    fn word_range_handles_empty_and_past_end() {
+        assert_eq!(word_range_at("", 0), (0, 0));
+        assert_eq!(word_range_at("abc", 100), (0, 3));
+    }
 
     #[tokio::test]
     async fn draws_the_current_buffer_into_the_backend() {

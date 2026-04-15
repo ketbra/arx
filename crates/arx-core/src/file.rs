@@ -90,10 +90,24 @@ pub async fn open_file(
         let window_id = {
             let bid = existing_id;
             bus.invoke(move |editor| {
-                let window_id = editor.windows_mut().open(bid);
-                editor.windows_mut().set_active(window_id);
-                editor.mark_dirty();
-                window_id
+                // Reuse the active window if one exists (preserves the
+                // current layout / splits). Only fall back to creating
+                // a brand-new window when there is no active window.
+                if let Some(win_id) = editor.windows().active() {
+                    if let Some(window) = editor.windows_mut().get_mut(win_id) {
+                        window.buffer_id = bid;
+                        window.cursor_byte = 0;
+                        window.scroll_top_line = 0;
+                        window.scroll_left_col = 0;
+                    }
+                    editor.mark_dirty();
+                    win_id
+                } else {
+                    let window_id = editor.windows_mut().open(bid);
+                    editor.windows_mut().set_active(window_id);
+                    editor.mark_dirty();
+                    window_id
+                }
             })
             .await
             .map_err(|_| OpenFileError::BusClosed)?
@@ -140,8 +154,20 @@ pub async fn open_file(
                     text: contents.clone(),
                 });
             }
-            let window_id = editor.windows_mut().open(buffer_id);
-            editor.windows_mut().set_active(window_id);
+            // Reuse the active window so splits aren't destroyed.
+            let window_id = if let Some(win_id) = editor.windows().active() {
+                if let Some(window) = editor.windows_mut().get_mut(win_id) {
+                    window.buffer_id = buffer_id;
+                    window.cursor_byte = 0;
+                    window.scroll_top_line = 0;
+                    window.scroll_left_col = 0;
+                }
+                win_id
+            } else {
+                let wid = editor.windows_mut().open(buffer_id);
+                editor.windows_mut().set_active(wid);
+                wid
+            };
             editor.mark_dirty();
             (buffer_id, window_id)
         })

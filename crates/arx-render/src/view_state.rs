@@ -276,9 +276,8 @@ pub struct WindowState {
     pub cursors: SmallVec<[Cursor; 1]>,
     pub scroll: ScrollPosition,
     pub gutter: GutterConfig,
-    /// Selection region (mark..cursor or cursor..mark) as a byte
-    /// range in the buffer. `None` when no mark is set.
-    pub selection: Option<std::ops::Range<usize>>,
+    /// Selection region. `None` when no mark is set.
+    pub selection: Option<Selection>,
 }
 
 impl WindowState {
@@ -286,6 +285,21 @@ impl WindowState {
     pub fn primary_cursor(&self) -> &Cursor {
         &self.cursors[0]
     }
+}
+
+/// A selection region — either a contiguous byte range or a
+/// rectangular column block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Selection {
+    /// Linear (contiguous) selection between two byte offsets.
+    Linear(std::ops::Range<usize>),
+    /// Rectangular (column block) selection.
+    Rectangle {
+        start_line: usize,
+        end_line: usize,
+        left_col: u16,
+        right_col: u16,
+    },
 }
 
 /// A cursor in a buffer. `byte_offset` is the anchor; the optional
@@ -359,6 +373,10 @@ pub struct GlobalState {
     /// key prefix. `None` when no prefix is pending or the timeout
     /// hasn't fired yet.
     pub which_key: Option<Vec<WhichKeyEntry>>,
+    /// Interactive buffer search overlay. `None` when search is not
+    /// active; `Some(...)` means the view layer should paint a bottom
+    /// overlay similar to the palette.
+    pub search: Option<SearchView>,
 }
 
 /// One entry in the which-key overlay.
@@ -421,6 +439,34 @@ pub struct PaletteView {
     /// supplies the cap so it can reserve the matching number of
     /// viewport rows for the overlay.
     pub max_rows: u16,
+}
+
+/// What the view layer needs to draw the interactive buffer search
+/// overlay. Similar to [`PaletteView`] but with line-number metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchView {
+    /// Prompt text: e.g. `"Search (fuzzy): "`.
+    pub prompt: String,
+    /// Current query text.
+    pub query: String,
+    /// Matching lines from the buffer.
+    pub matches: Vec<SearchEntry>,
+    /// Index into `matches` for the highlighted row.
+    pub selected: usize,
+    /// Maximum number of match rows to draw.
+    pub max_rows: u16,
+    /// Total number of matches (may be larger than `matches.len()`
+    /// if capped). Displayed as "N matches" in the prompt area.
+    pub total_matches: usize,
+}
+
+/// One entry in the search overlay's match list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchEntry {
+    /// 0-based line number in the buffer.
+    pub line_number: usize,
+    /// The line text (may be truncated for display).
+    pub line_text: String,
 }
 
 // ---------------------------------------------------------------------------
