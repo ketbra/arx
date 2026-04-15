@@ -21,12 +21,10 @@ use tracing::{debug, trace, warn};
 
 use arx_core::{CommandBus, Layout as CoreLayout, SplitAxis, WindowId as CoreWindowId};
 use arx_render::{
-    Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree,
-    PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SearchEntry, SearchView,
-    Selection, SplitDirection, TerminalSize,
-    TerminalViewCell, TerminalViewState, ViewState, WhichKeyEntry, WindowId as ViewWindowId,
-    WindowState, diff,
-    initial_paint, render,
+    Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, KeditLineView,
+    LayoutTree, PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SearchEntry,
+    SearchView, Selection, SplitDirection, TerminalSize, TerminalViewCell, TerminalViewState,
+    ViewState, WhichKeyEntry, WindowId as ViewWindowId, WindowState, diff, initial_paint, render,
 };
 
 use crate::state::{SharedTerminalSize, Shutdown};
@@ -755,6 +753,18 @@ fn build_global_state(
         None
     };
 
+    let kedit_line = if editor.kedit().is_enabled() {
+        Some(KeditLineView {
+            prompt: "====> ".to_owned(),
+            query: editor.kedit().query().to_owned(),
+            cursor: editor.kedit().cursor(),
+            focused: editor.kedit().is_focused(),
+            message: editor.kedit().message().map(str::to_owned),
+        })
+    } else {
+        None
+    };
+
     Some(GlobalState {
         modeline_left: left,
         modeline_right: format!("{} bytes", text.len()),
@@ -762,6 +772,7 @@ fn build_global_state(
         completion: completion_view,
         which_key,
         search: search_view,
+        kedit_line,
     })
 }
 

@@ -23,6 +23,7 @@ use arx_highlight::HighlightManager;
 
 use crate::command::CommandBus;
 use crate::completion::CompletionPopup;
+use crate::kedit::{BlockKind, KeditState};
 use crate::palette::CommandPalette;
 use crate::registry::{CommandContext, CommandRegistry};
 use crate::window::WindowManager;
@@ -177,6 +178,14 @@ pub struct Editor {
     kill_ring: Vec<KilledText>,
     /// Per-window mark (selection anchor) with selection mode.
     marks: HashMap<crate::WindowId, MarkState>,
+    /// Per-window block kind tag (line / box / char). Tracks which
+    /// kedit-flavoured block-marking command set the mark so the
+    /// block.copy/move/delete commands know how to interpret it.
+    /// Windows without an entry default to `BlockKind::Char`.
+    block_kinds: HashMap<crate::WindowId, BlockKind>,
+    /// KEDIT-style persistent command line state. Disabled by default;
+    /// the `kedit` profile enables it at editor startup.
+    kedit: KeditState,
     /// Transient message shown in the modeline (e.g. hover info, LSP
     /// status). Cleared on the next user keystroke.
     status_message: Option<String>,
@@ -213,6 +222,7 @@ impl Editor {
     /// Create an empty editor with a specific keymap profile already
     /// installed.
     pub fn with_profile(profile: Profile) -> Self {
+        let enables_kedit_cmdline = profile.enables_kedit_cmdline;
         let mut keymap = KeymapEngine::new(profile.global);
         if let Some((id, map)) = profile.startup_layer {
             keymap.push_layer(Layer::new(id, map));
@@ -220,6 +230,10 @@ impl Editor {
         keymap.set_count_mode(profile.count_mode);
         let mut commands = CommandRegistry::new();
         crate::stock::register_stock(&mut commands);
+        let mut kedit = KeditState::new();
+        if enables_kedit_cmdline {
+            kedit.enable();
+        }
         Self {
             buffers: BufferManager::default(),
             windows: WindowManager::default(),
@@ -241,6 +255,8 @@ impl Editor {
             describe_key_mode: false,
             kill_ring: Vec::new(),
             marks: HashMap::new(),
+            block_kinds: HashMap::new(),
+            kedit,
             status_message: None,
             dirty: false,
             quit_requested: false,
@@ -474,6 +490,14 @@ impl Editor {
             self.mark_dirty();
             return;
         }
+        // When the kedit cmd line has keyboard focus, printable keys
+        // extend the query rather than self-inserting into the buffer.
+        if self.kedit.is_focused() {
+            self.kedit.clear_message();
+            self.kedit.append_char(ch);
+            self.mark_dirty();
+            return;
+        }
         // Char-read mode: f/F/t/T waiting for a character.
         if let Some(mode) = self.operator_state.char_read.take() {
             crate::stock::handle_char_read(self, ch, mode);
@@ -531,6 +555,39 @@ impl Editor {
     /// Peek at the top of the kill ring (most recently killed text).
     pub fn kill_ring_top(&self) -> Option<&KilledText> {
         self.kill_ring.last()
+    }
+
+    /// Borrow the kedit command-line state.
+    pub fn kedit(&self) -> &KeditState {
+        &self.kedit
+    }
+
+    /// Mutably borrow the kedit command-line state.
+    pub fn kedit_mut(&mut self) -> &mut KeditState {
+        &mut self.kedit
+    }
+
+    /// Record the [`BlockKind`] of the block currently marked in
+    /// `window_id`. Paired with [`Self::set_mark_with_mode`] so the
+    /// block-operation commands can reproduce the right kedit
+    /// flavour (line / box / char).
+    pub fn set_block_kind(&mut self, window_id: crate::WindowId, kind: BlockKind) {
+        self.block_kinds.insert(window_id, kind);
+    }
+
+    /// The block kind tagged on the current mark for `window_id`, or
+    /// `BlockKind::Char` if none has been set.
+    pub fn block_kind(&self, window_id: crate::WindowId) -> BlockKind {
+        self.block_kinds
+            .get(&window_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Clear the block-kind tag for `window_id`. Paired with
+    /// [`Self::clear_mark`] so the next mark starts from the default.
+    pub fn clear_block_kind(&mut self, window_id: crate::WindowId) {
+        self.block_kinds.remove(&window_id);
     }
 
     /// Set the mark (selection anchor) for `window_id` with linear

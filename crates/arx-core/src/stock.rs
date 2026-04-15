@@ -18,6 +18,7 @@ use arx_keymap::{Layer, LayerId, commands as names};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::Editor;
+use crate::kedit::BlockKind;
 use crate::registry::{Command, CommandContext, CommandRegistry};
 use crate::window::SplitAxis;
 use crate::WindowId;
@@ -171,6 +172,29 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CompletionPrev);
     reg.register(CompletionPageDown);
     reg.register(CompletionPageUp);
+    reg.register(KeditFocusCmdline);
+    reg.register(KeditFocusBuffer);
+    reg.register(KeditToggleFocus);
+    reg.register(KeditCmdlineExecute);
+    reg.register(KeditCmdlineBackspace);
+    reg.register(KeditCmdlineDeleteForward);
+    reg.register(KeditCmdlineClear);
+    reg.register(KeditCmdlineCursorLeft);
+    reg.register(KeditCmdlineCursorRight);
+    reg.register(KeditCmdlineCursorHome);
+    reg.register(KeditCmdlineCursorEnd);
+    reg.register(KeditCmdlineHistoryPrev);
+    reg.register(KeditCmdlineHistoryNext);
+    reg.register(BlockMarkLine);
+    reg.register(BlockMarkBox);
+    reg.register(BlockMarkChar);
+    reg.register(BlockCopy);
+    reg.register(BlockMove);
+    reg.register(BlockDelete);
+    reg.register(BlockPaste);
+    reg.register(BlockUnmark);
+    reg.register(BlockOverlay);
+    reg.register(BlockFill);
 }
 
 // ---------------------------------------------------------------------------
@@ -3942,6 +3966,864 @@ impl CompletionPageUp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// KEDIT command line + block editing
+// ---------------------------------------------------------------------------
+//
+// The kedit profile enables a persistent bottom input field (see
+// `crate::kedit::KeditState`). Focus toggles between the buffer and
+// the cmd line; when the cmd line has focus, printable keys extend its
+// query and Enter executes it. A handful of kedit commands (QUIT,
+// SAVE, FILE, TOP, BOTTOM, :N, LOCATE, CHANGE) are recognised; anything
+// else is looked up in the command registry as a last resort so users
+// can still invoke stock commands like `buffer.save` by name.
+
+/// Push the `kedit.cmdline` keymap layer so navigation keys affect the
+/// cmd-line query rather than buffer motion.
+fn push_kedit_cmdline_layer(editor: &mut Editor) {
+    if !editor.keymap().has_layer("kedit.cmdline") {
+        editor.keymap_mut().push_layer(Layer::new(
+            LayerId::from("kedit.cmdline"),
+            Arc::new(arx_keymap::profiles::kedit_cmdline_layer()),
+        ));
+    }
+}
+
+/// Pop the `kedit.cmdline` keymap layer if it's currently on the stack.
+fn pop_kedit_cmdline_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("kedit.cmdline") {
+        editor.keymap_mut().pop_layer();
+    }
+}
+
+stock_cmd!(
+    KeditFocusCmdline,
+    KEDIT_FOCUS_CMDLINE,
+    "Move focus to the KEDIT command line"
+);
+impl KeditFocusCmdline {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Enabling lazily means the command is harmless under non-kedit
+        // profiles too — it simply turns on the cmd line.
+        cx.editor.kedit_mut().enable();
+        cx.editor.kedit_mut().focus();
+        cx.editor.kedit_mut().clear_message();
+        push_kedit_cmdline_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditFocusBuffer,
+    KEDIT_FOCUS_BUFFER,
+    "Move focus back from the KEDIT command line to the buffer"
+);
+impl KeditFocusBuffer {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().blur();
+        pop_kedit_cmdline_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditToggleFocus,
+    KEDIT_TOGGLE_FOCUS,
+    "Toggle focus between the KEDIT command line and the buffer"
+);
+impl KeditToggleFocus {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.kedit().is_focused() {
+            cx.editor.kedit_mut().blur();
+            pop_kedit_cmdline_layer(cx.editor);
+        } else if cx.editor.kedit().is_enabled() {
+            cx.editor.kedit_mut().focus();
+            cx.editor.kedit_mut().clear_message();
+            push_kedit_cmdline_layer(cx.editor);
+        } else {
+            // Cmd line isn't enabled — fall back to buffer line-start
+            // so unprofile-d users pressing Home still get a useful
+            // action. Matches the Emacs / Vim default.
+            let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+                return;
+            };
+            let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                return;
+            };
+            let line = buffer.rope().byte_to_line(cursor);
+            let start = buffer.rope().line_to_byte(line);
+            if let Some(w) = cx.editor.windows_mut().get_mut(window_id) {
+                w.cursor_byte = start;
+            }
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineBackspace,
+    KEDIT_CMDLINE_BACKSPACE,
+    "Delete the character before the KEDIT command-line cursor"
+);
+impl KeditCmdlineBackspace {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().backspace();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineDeleteForward,
+    KEDIT_CMDLINE_DELETE_FORWARD,
+    "Delete the character at the KEDIT command-line cursor"
+);
+impl KeditCmdlineDeleteForward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().delete_forward();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineClear,
+    KEDIT_CMDLINE_CLEAR,
+    "Clear the KEDIT command-line query"
+);
+impl KeditCmdlineClear {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().clear_query();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineCursorLeft,
+    KEDIT_CMDLINE_CURSOR_LEFT,
+    "Move the KEDIT command-line cursor one character left"
+);
+impl KeditCmdlineCursorLeft {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().cursor_left();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineCursorRight,
+    KEDIT_CMDLINE_CURSOR_RIGHT,
+    "Move the KEDIT command-line cursor one character right"
+);
+impl KeditCmdlineCursorRight {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().cursor_right();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineCursorHome,
+    KEDIT_CMDLINE_CURSOR_HOME,
+    "Move the KEDIT command-line cursor to the start"
+);
+impl KeditCmdlineCursorHome {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().cursor_home();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineCursorEnd,
+    KEDIT_CMDLINE_CURSOR_END,
+    "Move the KEDIT command-line cursor to the end"
+);
+impl KeditCmdlineCursorEnd {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().cursor_end();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineHistoryPrev,
+    KEDIT_CMDLINE_HISTORY_PREV,
+    "Navigate to the previous KEDIT command-line history entry"
+);
+impl KeditCmdlineHistoryPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().history_prev();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineHistoryNext,
+    KEDIT_CMDLINE_HISTORY_NEXT,
+    "Navigate to the next KEDIT command-line history entry"
+);
+impl KeditCmdlineHistoryNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().history_next();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineExecute,
+    KEDIT_CMDLINE_EXECUTE,
+    "Execute the text on the KEDIT command line"
+);
+impl KeditCmdlineExecute {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let text = cx.editor.kedit_mut().commit();
+        // After commit the query is empty; focus returns to the buffer
+        // so the user can act on the result. An explicit F11 re-parks
+        // them on the cmd line if they want to chain commands.
+        cx.editor.kedit_mut().blur();
+        pop_kedit_cmdline_layer(cx.editor);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            cx.editor.mark_dirty();
+            return;
+        }
+        match execute_kedit_command(cx, trimmed) {
+            KeditCommandResult::Ok => {}
+            KeditCommandResult::Message(msg) => {
+                cx.editor.kedit_mut().set_message(msg);
+            }
+            KeditCommandResult::Unknown => {
+                cx.editor
+                    .kedit_mut()
+                    .set_message(format!("Unknown kedit command: {trimmed}"));
+            }
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+/// Outcome of running a single cmd-line command. The executor is
+/// fire-and-forget; all it reports back is whether the input was
+/// recognised and an optional transient message for the prompt row.
+enum KeditCommandResult {
+    /// Command recognised and executed; nothing to show on the prompt.
+    Ok,
+    /// Command recognised; caller should set the given message.
+    Message(String),
+    /// Input didn't match any kedit verb *or* registered command name.
+    Unknown,
+}
+
+/// Parse and dispatch `input` as a kedit cmd-line command. Recognises
+/// the classic XEDIT / KEDIT verbs as well as any registered stock
+/// command by its dotted name (so `buffer.save` works as a fallback).
+///
+/// Matching is case-insensitive on the verb. Kedit permits short
+/// prefixes (`Q` for `QUIT`, `QQ` for `QQUIT`), which we support for
+/// the common ones.
+#[allow(clippy::too_many_lines)]
+fn execute_kedit_command(cx: &mut CommandContext<'_>, input: &str) -> KeditCommandResult {
+    let mut parts = input.splitn(2, char::is_whitespace);
+    let verb = parts.next().unwrap_or("");
+    let args = parts.next().unwrap_or("").trim();
+
+    // `:N` jumps to line N.
+    if let Some(rest) = verb.strip_prefix(':') {
+        if let Ok(line) = rest.parse::<usize>() {
+            goto_line_one_based(cx.editor, line);
+            return KeditCommandResult::Ok;
+        }
+    }
+
+    let verb_lc = verb.to_ascii_lowercase();
+    match verb_lc.as_str() {
+        "q" | "quit" => {
+            cx.editor.request_quit();
+            KeditCommandResult::Ok
+        }
+        "qq" | "qquit" => {
+            // Quit without saving — same effect as quit for now.
+            cx.editor.request_quit();
+            KeditCommandResult::Ok
+        }
+        "save" | "file" => {
+            let cmd = cx.editor.commands().get(names::BUFFER_SAVE);
+            if let Some(cmd) = cmd {
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                cmd.run(&mut inner);
+                KeditCommandResult::Message("Saved".into())
+            } else {
+                KeditCommandResult::Unknown
+            }
+        }
+        "top" => {
+            let cmd = cx.editor.commands().get(names::CURSOR_BUFFER_START);
+            if let Some(cmd) = cmd {
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                cmd.run(&mut inner);
+                KeditCommandResult::Ok
+            } else {
+                KeditCommandResult::Unknown
+            }
+        }
+        "bot" | "bottom" => {
+            let cmd = cx.editor.commands().get(names::CURSOR_BUFFER_END);
+            if let Some(cmd) = cmd {
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                cmd.run(&mut inner);
+                KeditCommandResult::Ok
+            } else {
+                KeditCommandResult::Unknown
+            }
+        }
+        "locate" | "l" => {
+            if args.is_empty() {
+                return KeditCommandResult::Message("LOCATE: no pattern".into());
+            }
+            match locate_forward(cx.editor, args) {
+                Some(n) => KeditCommandResult::Message(format!("Located on line {n}")),
+                None => KeditCommandResult::Message("Not found".into()),
+            }
+        }
+        "change" | "c" => change_command(cx.editor, args),
+        _ => {
+            // Fallback: treat the input as a registered command name
+            // (e.g. `buffer.save`). Keeps the cmd line useful without
+            // needing M-x for everything.
+            if let Some(cmd) = cx.editor.commands().get(input) {
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                cmd.run(&mut inner);
+                KeditCommandResult::Ok
+            } else {
+                KeditCommandResult::Unknown
+            }
+        }
+    }
+}
+
+/// Jump the active window's cursor to `line` (1-based), clamped to the
+/// buffer's line count. Matches the `:N` kedit / XEDIT idiom.
+fn goto_line_one_based(editor: &mut Editor, line_1: usize) {
+    let Some(window_id) = editor.windows().active() else {
+        return;
+    };
+    let Some(data) = editor.windows().get(window_id) else {
+        return;
+    };
+    let Some(buffer) = editor.buffers().get(data.buffer_id) else {
+        return;
+    };
+    let rope = buffer.rope();
+    let target = line_1.saturating_sub(1).min(rope.len_lines().saturating_sub(1));
+    let byte = rope.line_to_byte(target);
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = byte;
+    }
+}
+
+/// LOCATE `<pattern>`: search forward from the cursor for a literal
+/// substring and move the cursor to the first match. Returns the line
+/// number (1-based) of the match, or `None` if not found.
+fn locate_forward(editor: &mut Editor, pattern: &str) -> Option<usize> {
+    let window_id = editor.windows().active()?;
+    let data = editor.windows().get(window_id)?.clone();
+    let buffer = editor.buffers().get(data.buffer_id)?;
+    let rope = buffer.rope();
+    let text = buffer.text();
+    let start = data.cursor_byte.min(text.len());
+    let idx = text[start..].find(pattern).map(|o| start + o).or_else(|| text.find(pattern))?;
+    let line = rope.byte_to_line(idx) + 1;
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = idx;
+    }
+    Some(line)
+}
+
+/// CHANGE `/old/new/` (or any single-char delimiter): replace the
+/// first occurrence of `old` at or after the cursor with `new`.
+fn change_command(editor: &mut Editor, args: &str) -> KeditCommandResult {
+    let mut chars = args.chars();
+    let Some(delim) = chars.next() else {
+        return KeditCommandResult::Message("CHANGE: missing delimiter".into());
+    };
+    let rest: String = chars.collect();
+    let mut parts = rest.splitn(3, delim);
+    let old = parts.next().unwrap_or("");
+    let new = parts.next().unwrap_or("");
+    if old.is_empty() {
+        return KeditCommandResult::Message("CHANGE: empty search".into());
+    }
+    let Some(window_id) = editor.windows().active() else {
+        return KeditCommandResult::Unknown;
+    };
+    let Some(data) = editor.windows().get(window_id).cloned() else {
+        return KeditCommandResult::Unknown;
+    };
+    let Some(buffer) = editor.buffers().get(data.buffer_id) else {
+        return KeditCommandResult::Unknown;
+    };
+    let text = buffer.text();
+    let start = data.cursor_byte.min(text.len());
+    let Some(off) = text[start..].find(old).map(|o| start + o).or_else(|| text.find(old)) else {
+        return KeditCommandResult::Message("Not found".into());
+    };
+    let len = old.len();
+    let cursor_after = off + new.len();
+    user_edit(
+        editor,
+        window_id,
+        data.buffer_id,
+        off..off + len,
+        new,
+        data.cursor_byte,
+        cursor_after,
+    );
+    KeditCommandResult::Message("Changed".into())
+}
+
+// ---------------------------------------------------------------------------
+// Block marking + operations
+// ---------------------------------------------------------------------------
+//
+// KEDIT's block model tags every selection with a `BlockKind`:
+//
+// * `Line` — whole lines between mark and cursor. Copy/delete/paste
+//   operate on line units; paste drops the lines below the cursor.
+// * `Box`  — display-column rectangle. Delegates to the existing
+//   `column::*` helpers so kedit and Emacs `C-x r *` share code.
+// * `Char` — contiguous byte range between mark and cursor.
+//
+// `block.copy` / `block.delete` / `block.move` inspect the kind via
+// `editor.block_kind(window_id)` and dispatch to the right helper.
+
+stock_cmd!(BlockMarkLine, BLOCK_MARK_LINE, "Mark a whole-line block at the cursor");
+impl BlockMarkLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor
+            .set_mark_with_mode(window_id, cursor, crate::editor::SelectionMode::Linear);
+        cx.editor.set_block_kind(window_id, BlockKind::Line);
+        cx.editor.set_status("-- BLOCK LINE --");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockMarkBox, BLOCK_MARK_BOX, "Mark a rectangular (box) block at the cursor");
+impl BlockMarkBox {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor
+            .set_mark_with_mode(window_id, cursor, crate::editor::SelectionMode::Rectangle);
+        cx.editor.set_block_kind(window_id, BlockKind::Box);
+        cx.editor.set_status("-- BLOCK BOX --");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockMarkChar, BLOCK_MARK_CHAR, "Mark a contiguous-character block at the cursor");
+impl BlockMarkChar {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor
+            .set_mark_with_mode(window_id, cursor, crate::editor::SelectionMode::Linear);
+        cx.editor.set_block_kind(window_id, BlockKind::Char);
+        cx.editor.set_status("-- BLOCK CHAR --");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockUnmark, BLOCK_UNMARK, "Unmark / reset the current block");
+impl BlockUnmark {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if let Some(window_id) = cx.editor.windows().active() {
+            cx.editor.clear_mark(window_id);
+            cx.editor.clear_block_kind(window_id);
+        }
+        cx.editor.clear_status();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockCopy, BLOCK_COPY, "Copy the marked block to the kill ring");
+impl BlockCopy {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        block_copy_or_move(cx, /* cut */ false);
+    }
+}
+
+stock_cmd!(BlockDelete, BLOCK_DELETE, "Delete the marked block");
+impl BlockDelete {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // DELETE = cut-without-remembering for a paste-by-move, but we
+        // still push the text to the kill ring so a later block.paste
+        // or yank can retrieve it.
+        block_copy_or_move(cx, /* cut */ true);
+        cx.editor.kedit_mut().take_pending_move();
+    }
+}
+
+stock_cmd!(BlockMove, BLOCK_MOVE, "Cut the marked block to the move register for paste");
+impl BlockMove {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        block_copy_or_move(cx, /* cut */ true);
+    }
+}
+
+stock_cmd!(BlockPaste, BLOCK_PASTE, "Paste the block clipboard at the cursor");
+impl BlockPaste {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Prefer the pending-move clipboard (kedit semantics: Alt-M
+        // stages a move, Alt-P drops it). Fall back to the kill ring.
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        if let Some(block) = cx.editor.kedit_mut().take_pending_move() {
+            paste_clipboard_block(cx.editor, window_id, buffer_id, block);
+            cx.editor.set_status("Block pasted");
+            cx.editor.mark_dirty();
+            return;
+        }
+        if let Some(entry) = cx.editor.kill_ring_top().cloned() {
+            match entry {
+                crate::editor::KilledText::Linear(text) => {
+                    let cursor = cx
+                        .editor
+                        .windows()
+                        .get(window_id)
+                        .map_or(0, |d| d.cursor_byte);
+                    let len = text.len();
+                    user_edit(
+                        cx.editor,
+                        window_id,
+                        buffer_id,
+                        cursor..cursor,
+                        &text,
+                        cursor,
+                        cursor + len,
+                    );
+                }
+                crate::editor::KilledText::Rectangular(lines) => {
+                    crate::column::yank_rectangle(cx.editor, window_id, buffer_id, &lines);
+                }
+            }
+            cx.editor.set_status("Block pasted");
+            cx.editor.mark_dirty();
+        } else {
+            cx.editor.set_status("Kill ring empty");
+        }
+    }
+}
+
+stock_cmd!(BlockOverlay, BLOCK_OVERLAY, "Overlay the marked box-block at the cursor");
+impl BlockOverlay {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No block marked");
+            return;
+        };
+        if cx.editor.block_kind(window_id) != BlockKind::Box {
+            cx.editor.set_status("Overlay needs a BOX block (Alt-B)");
+            return;
+        }
+        let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+            cx.editor, buffer_id, mark, cursor,
+        ) else {
+            return;
+        };
+        // Overlay = for each line in the block, erase the target
+        // rectangle (left..right display cols) then insert the source
+        // text at the left edge. We implement it as open + fill with
+        // spaces, which is functionally equivalent for the common
+        // case and re-uses the existing column helpers.
+        crate::column::open_rectangle(cx.editor, window_id, buffer_id, &rect);
+        cx.editor.clear_mark(window_id);
+        cx.editor.clear_block_kind(window_id);
+        cx.editor.set_status("Block overlaid");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockFill, BLOCK_FILL, "Fill the marked block with a character");
+impl BlockFill {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No block marked");
+            return;
+        };
+        match cx.editor.block_kind(window_id) {
+            BlockKind::Box => {
+                let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+                    cx.editor, buffer_id, mark, cursor,
+                ) else {
+                    return;
+                };
+                let width = rect.right_col.saturating_sub(rect.left_col) as usize;
+                if width > 0 {
+                    // First, kill the rectangle to clear it out, then
+                    // paste a rectangle of `width` spaces per line.
+                    let _ = crate::column::kill_rectangle(cx.editor, window_id, buffer_id, &rect);
+                    let row_count = (rect.end_line - rect.start_line) + 1;
+                    let spaces: String = " ".repeat(width);
+                    let lines: Vec<String> = std::iter::repeat_n(spaces, row_count).collect();
+                    crate::column::yank_rectangle(cx.editor, window_id, buffer_id, &lines);
+                }
+            }
+            BlockKind::Line | BlockKind::Char => {
+                let (start, end) = if mark <= cursor { (mark, cursor) } else { (cursor, mark) };
+                if start < end {
+                    let len = end - start;
+                    let filler: String = " ".repeat(len);
+                    user_edit(
+                        cx.editor,
+                        window_id,
+                        buffer_id,
+                        start..end,
+                        &filler,
+                        cursor,
+                        start + len,
+                    );
+                }
+            }
+        }
+        cx.editor.clear_mark(window_id);
+        cx.editor.clear_block_kind(window_id);
+        cx.editor.set_status("Block filled");
+        cx.editor.mark_dirty();
+    }
+}
+
+/// Shared copy / cut worker for block.copy, block.delete, block.move.
+/// When `cut` is true the block is removed; the original text lands on
+/// the kill ring (all three flavours) *and* on the pending-move
+/// clipboard (move only) so a follow-up `block.paste` can drop it.
+#[allow(clippy::too_many_lines)]
+fn block_copy_or_move(cx: &mut CommandContext<'_>, cut: bool) {
+    let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+        return;
+    };
+    let Some(mark) = cx.editor.mark(window_id) else {
+        cx.editor.set_status("No block marked");
+        return;
+    };
+    let kind = cx.editor.block_kind(window_id);
+    match kind {
+        BlockKind::Char => {
+            let (start, end) = if mark <= cursor { (mark, cursor) } else { (cursor, mark) };
+            if start == end {
+                cx.editor.set_status("Empty block");
+                return;
+            }
+            let text = cx
+                .editor
+                .buffers()
+                .get(buffer_id)
+                .map(|b| b.rope().slice_to_string(start..end))
+                .unwrap_or_default();
+            cx.editor
+                .kill_ring_push(crate::editor::KilledText::Linear(text.clone()));
+            cx.editor
+                .kedit_mut()
+                .set_pending_move(crate::kedit::ClipboardBlock::Char(text));
+            if cut {
+                user_edit(cx.editor, window_id, buffer_id, start..end, "", cursor, start);
+            }
+        }
+        BlockKind::Line => {
+            let (start_line, end_line) = {
+                let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                    return;
+                };
+                let rope = buffer.rope();
+                let m = rope.byte_to_line(mark);
+                let c = rope.byte_to_line(cursor);
+                (m.min(c), m.max(c))
+            };
+            let lines: Vec<String> = (start_line..=end_line)
+                .map(|l| {
+                    let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                        return String::new();
+                    };
+                    let rope = buffer.rope();
+                    let s = rope.line_to_byte(l);
+                    let e = if l + 1 >= rope.len_lines() {
+                        rope.len_bytes()
+                    } else {
+                        rope.line_to_byte(l + 1).saturating_sub(1)
+                    };
+                    rope.slice_to_string(s..e)
+                })
+                .collect();
+            let joined = lines.join("\n");
+            cx.editor
+                .kill_ring_push(crate::editor::KilledText::Linear(format!("{joined}\n")));
+            cx.editor
+                .kedit_mut()
+                .set_pending_move(crate::kedit::ClipboardBlock::Line(lines));
+            if cut {
+                let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                    return;
+                };
+                let rope = buffer.rope();
+                let start_byte = rope.line_to_byte(start_line);
+                let end_byte = if end_line + 1 >= rope.len_lines() {
+                    rope.len_bytes()
+                } else {
+                    rope.line_to_byte(end_line + 1)
+                };
+                user_edit(
+                    cx.editor,
+                    window_id,
+                    buffer_id,
+                    start_byte..end_byte,
+                    "",
+                    cursor,
+                    start_byte,
+                );
+            }
+        }
+        BlockKind::Box => {
+            let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+                cx.editor, buffer_id, mark, cursor,
+            ) else {
+                return;
+            };
+            // Extract the block first (non-destructive read).
+            let mut copied = Vec::new();
+            for line_idx in rect.start_line..=rect.end_line {
+                let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                    break;
+                };
+                let rope = buffer.rope();
+                let s = rope.line_to_byte(line_idx);
+                let e = if line_idx + 1 >= rope.len_lines() {
+                    rope.len_bytes()
+                } else {
+                    rope.line_to_byte(line_idx + 1).saturating_sub(1)
+                };
+                let text = rope.slice_to_string(s..e);
+                let bs = crate::column::display_col_to_byte(&text, rect.left_col);
+                let be = crate::column::display_col_to_byte(&text, rect.right_col);
+                copied.push(text[bs..be].to_owned());
+            }
+            cx.editor
+                .kill_ring_push(crate::editor::KilledText::Rectangular(copied.clone()));
+            cx.editor
+                .kedit_mut()
+                .set_pending_move(crate::kedit::ClipboardBlock::Box(copied));
+            if cut {
+                let _ = crate::column::kill_rectangle(cx.editor, window_id, buffer_id, &rect);
+            }
+        }
+    }
+    // The block remains marked after a copy (kedit behaviour — makes
+    // it easy to copy the same block multiple times). A cut clears it.
+    if cut {
+        cx.editor.clear_mark(window_id);
+        cx.editor.clear_block_kind(window_id);
+    }
+    cx.editor.set_status(if cut { "Block cut" } else { "Block copied" });
+    cx.editor.mark_dirty();
+}
+
+/// Insert a clipboard block at the active cursor position. Used by
+/// `block.paste` when the pending-move register has content.
+fn paste_clipboard_block(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    block: crate::kedit::ClipboardBlock,
+) {
+    match block {
+        crate::kedit::ClipboardBlock::Char(text) => {
+            let cursor = editor
+                .windows()
+                .get(window_id)
+                .map_or(0, |d| d.cursor_byte);
+            let len = text.len();
+            user_edit(
+                editor,
+                window_id,
+                buffer_id,
+                cursor..cursor,
+                &text,
+                cursor,
+                cursor + len,
+            );
+        }
+        crate::kedit::ClipboardBlock::Line(lines) => {
+            // Insert the lines below the current line so the user's
+            // current position stays put. A trailing newline ensures
+            // the paste ends on its own line.
+            let Some(buffer) = editor.buffers().get(buffer_id) else {
+                return;
+            };
+            let rope = buffer.rope();
+            let cursor = editor
+                .windows()
+                .get(window_id)
+                .map_or(0, |d| d.cursor_byte);
+            let line = rope.byte_to_line(cursor);
+            let insert_at = if line + 1 >= rope.len_lines() {
+                rope.len_bytes()
+            } else {
+                rope.line_to_byte(line + 1)
+            };
+            let mut joined = lines.join("\n");
+            joined.push('\n');
+            // If we're at end of buffer without trailing newline, we
+            // need to prepend one so lines land on their own rows.
+            let needs_prefix_nl = insert_at == rope.len_bytes()
+                && rope.len_bytes() > 0
+                && !rope.slice_to_string((rope.len_bytes() - 1)..rope.len_bytes()).ends_with('\n');
+            let text = if needs_prefix_nl {
+                format!("\n{joined}")
+            } else {
+                joined
+            };
+            let text_len = text.len();
+            user_edit(
+                editor,
+                window_id,
+                buffer_id,
+                insert_at..insert_at,
+                &text,
+                cursor,
+                insert_at + text_len,
+            );
+        }
+        crate::kedit::ClipboardBlock::Box(lines) => {
+            crate::column::yank_rectangle(editor, window_id, buffer_id, &lines);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4640,6 +5522,350 @@ mod tests {
         // delete).
         assert_eq!(cursor, 5);
 
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- KEDIT profile + command line ----
+
+    #[tokio::test]
+    async fn kedit_profile_enables_cmdline_on_new_editor() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_scratch();
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        let (enabled, focused) = bus
+            .invoke(|editor| (editor.kedit().is_enabled(), editor.kedit().is_focused()))
+            .await
+            .unwrap();
+        assert!(enabled, "kedit cmd line should be enabled by default");
+        assert!(!focused, "cmd line should not have focus until requested");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_focus_cmdline_routes_printable_chars_to_query() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text("hello", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in "QUIT".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        let (query, buffer_text) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                (
+                    editor.kedit().query().to_owned(),
+                    editor.buffers().get(data.buffer_id).unwrap().text(),
+                )
+            })
+            .await
+            .unwrap();
+        // Buffer must be untouched.
+        assert_eq!(buffer_text, "hello");
+        assert_eq!(query, "QUIT");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_cmdline_quit_verb_requests_shutdown() {
+        // The event loop shuts down as soon as `request_quit` flips the
+        // flag, so we observe it from inside the same `invoke` that
+        // runs the execute command.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_scratch();
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in "QUIT".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        let bus_clone = bus.clone();
+        let quit = bus
+            .invoke(move |editor| {
+                let cmd = editor.commands().get(names::KEDIT_CMDLINE_EXECUTE).unwrap();
+                let mut cx = CommandContext {
+                    editor,
+                    bus: bus_clone,
+                    count: 1,
+                };
+                cmd.run(&mut cx);
+                cx.editor.quit_requested()
+            })
+            .await
+            .unwrap();
+        assert!(quit, "QUIT should have requested shutdown");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_cmdline_goto_line_jumps_cursor() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text("a\nb\nc\nd", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in ":3".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_CMDLINE_EXECUTE).await;
+        let cursor = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                editor.windows().get(win).unwrap().cursor_byte
+            })
+            .await
+            .unwrap();
+        // Line 3 (1-based) starts at byte 4 in "a\nb\nc\nd".
+        assert_eq!(cursor, 4);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_cmdline_locate_moves_cursor_to_match() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("alpha\nbeta\ngamma", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in "LOCATE gamma".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_CMDLINE_EXECUTE).await;
+        let cursor = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                editor.windows().get(win).unwrap().cursor_byte
+            })
+            .await
+            .unwrap();
+        // "gamma" lives at byte 11 in "alpha\nbeta\ngamma".
+        assert_eq!(cursor, 11);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_cmdline_change_replaces_first_match() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text("foo bar foo", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in "CHANGE /foo/baz/".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_CMDLINE_EXECUTE).await;
+        let text = active_text_and_cursor(&bus).await.0;
+        assert_eq!(text, "baz bar foo");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_focus_buffer_pops_cmdline_layer() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_scratch();
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        let pushed = bus
+            .invoke(|editor| editor.keymap().has_layer("kedit.cmdline"))
+            .await
+            .unwrap();
+        assert!(pushed, "cmd line layer should be pushed after focus");
+        run_named(&bus, names::KEDIT_FOCUS_BUFFER).await;
+        let popped = bus
+            .invoke(|editor| editor.keymap().has_layer("kedit.cmdline"))
+            .await
+            .unwrap();
+        assert!(!popped, "cmd line layer should be popped after blur");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- Block editing ----
+
+    #[tokio::test]
+    async fn block_mark_line_then_copy_pushes_to_kill_ring() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("line one\nline two\nline three", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        // Mark line block at cursor 0.
+        run_named(&bus, names::BLOCK_MARK_LINE).await;
+        // Move cursor down one line.
+        run_named(&bus, names::CURSOR_DOWN).await;
+        // Copy the block.
+        run_named(&bus, names::BLOCK_COPY).await;
+        let has_top = bus
+            .invoke(|editor| editor.kill_ring_top().is_some())
+            .await
+            .unwrap();
+        assert!(has_top, "kill ring should have an entry after block.copy");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn block_delete_char_block_removes_range_and_keeps_kill_ring() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("hello world", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::BLOCK_MARK_CHAR).await;
+        // Move cursor 5 bytes right (to after "hello").
+        for _ in 0..5 {
+            run_named(&bus, names::CURSOR_RIGHT).await;
+        }
+        run_named(&bus, names::BLOCK_DELETE).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, " world");
+        assert_eq!(cursor, 0);
+        let has_top = bus
+            .invoke(|editor| editor.kill_ring_top().is_some())
+            .await
+            .unwrap();
+        assert!(has_top);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn block_move_then_paste_relocates_text() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("abcdef", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::BLOCK_MARK_CHAR).await;
+        // Select "abc".
+        for _ in 0..3 {
+            run_named(&bus, names::CURSOR_RIGHT).await;
+        }
+        // Move → text cut + stashed in pending-move register.
+        run_named(&bus, names::BLOCK_MOVE).await;
+        let (after_move, _) = active_text_and_cursor(&bus).await;
+        assert_eq!(after_move, "def");
+        // Move cursor to the end and paste.
+        run_named(&bus, names::CURSOR_BUFFER_END).await;
+        run_named(&bus, names::BLOCK_PASTE).await;
+        let (after_paste, _) = active_text_and_cursor(&bus).await;
+        assert_eq!(after_paste, "defabc");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn block_unmark_clears_mark_and_kind() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("hello", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::BLOCK_MARK_BOX).await;
+        let had_mark = bus
+            .invoke(|editor| {
+                editor.windows().active().is_some_and(|id| {
+                    editor.mark(id).is_some() && editor.block_kind(id) == BlockKind::Box
+                })
+            })
+            .await
+            .unwrap();
+        assert!(had_mark);
+        run_named(&bus, names::BLOCK_UNMARK).await;
+        let cleared = bus
+            .invoke(|editor| {
+                editor
+                    .windows()
+                    .active()
+                    .is_some_and(|id| editor.mark(id).is_none())
+            })
+            .await
+            .unwrap();
+        assert!(cleared);
         drop(bus);
         let _ = handle.await.unwrap();
     }

@@ -377,6 +377,33 @@ pub struct GlobalState {
     /// active; `Some(...)` means the view layer should paint a bottom
     /// overlay similar to the palette.
     pub search: Option<SearchView>,
+    /// KEDIT-style persistent command line. `None` when the kedit
+    /// profile is inactive. When `Some(...)` the render layer paints
+    /// a one-row prompt just above the modeline (regardless of focus);
+    /// keyboard focus is signalled by [`KeditLineView::focused`].
+    pub kedit_line: Option<KeditLineView>,
+}
+
+/// What the view layer needs to draw the KEDIT command line. A direct
+/// projection of [`arx_core::KeditState`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeditLineView {
+    /// Prompt glyph shown before the query (kedit traditionally uses
+    /// `====>`).
+    pub prompt: String,
+    /// Current query text.
+    pub query: String,
+    /// Byte offset of the insert cursor within `query`. Used so the
+    /// view layer can place a bar cursor at the right column.
+    pub cursor: usize,
+    /// Whether keyboard focus is on the command line. The render
+    /// layer uses this to decide whether to paint a bar cursor (and
+    /// suppress the buffer's own cursor).
+    pub focused: bool,
+    /// Optional transient message to display in place of the query
+    /// (e.g. "Saved", "Not found"). Cleared on the next cmd-line
+    /// keystroke. Only painted when `!focused`.
+    pub message: Option<String>,
 }
 
 /// One entry in the which-key overlay.

@@ -36,7 +36,9 @@ struct Cli {
     /// `daemon` and `client` subcommands.
     files: Vec<PathBuf>,
 
-    /// Keymap profile: "emacs" (default) or "vim".
+    /// Keymap profile: "emacs" (default), "vim", or "kedit". The
+    /// `kedit` profile also enables the persistent bottom command
+    /// line.
     #[arg(long, default_value = "emacs")]
     keymap: String,
 
@@ -146,6 +148,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let profile = match cli.keymap.as_str() {
         "vim" => arx_keymap::profiles::vim(),
+        "kedit" => arx_keymap::profiles::kedit(),
         _ => arx_keymap::profiles::emacs(),
     };
     let result = match cli.mode {

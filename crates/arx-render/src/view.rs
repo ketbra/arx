@@ -120,6 +120,22 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
         }
     }
 
+    // KEDIT persistent command line — one row above the modeline, but
+    // below any palette/search overlay. Unlike the palette this is
+    // *always* painted when enabled, whether or not it has focus, so
+    // the user can see the prompt as a reminder of the profile.
+    let kedit_row = if palette_layout.is_none()
+        && search_layout.is_none()
+        && state.global.kedit_line.is_some()
+        && text_rows > 0
+    {
+        let row = text_rows - 1;
+        text_rows = row;
+        Some(row)
+    } else {
+        None
+    };
+
     let root_rect = Rect::new(0, 0, cols, text_rows);
     let active = state.active_window;
 
@@ -148,6 +164,10 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
 
     if let Some(layout) = search_layout {
         paint_search(&layout, cols, &mut grid, &mut cursors);
+    }
+
+    if let (Some(row), Some(view)) = (kedit_row, state.global.kedit_line.as_ref()) {
+        paint_kedit_line(view, row, cols, &mut grid, &mut cursors);
     }
 
     if let Some(ref completion) = state.global.completion {
@@ -1139,6 +1159,79 @@ fn paint_search_matches(
     }
 }
 
+/// Paint the KEDIT persistent command line at `row`. Renders the
+/// prompt glyph, then the query (or the transient message when the
+/// cmd line isn't focused), and places a bar cursor at the end of
+/// the prompt when focused.
+fn paint_kedit_line(
+    view: &crate::view_state::KeditLineView,
+    row: u16,
+    cols: u16,
+    grid: &mut CellGrid,
+    cursors: &mut SmallVec<[CursorRender; 1]>,
+) {
+    // Two faces: focused (brighter prompt background) vs blurred
+    // (dimmer) so the user can tell at a glance where keystrokes go.
+    let face = if view.focused {
+        ResolvedFace {
+            fg: Color::WHITE,
+            bg: Color::rgb(0x20, 0x30, 0x20),
+            ..ResolvedFace::DEFAULT
+        }
+    } else {
+        ResolvedFace {
+            fg: Color::rgb(0xc0, 0xc0, 0xc0),
+            bg: Color::rgb(0x18, 0x20, 0x18),
+            ..ResolvedFace::DEFAULT
+        }
+    };
+    clear_row(grid, row, cols, face);
+    let mut x: u16 = 0;
+    x = paint_palette_text(&view.prompt, x, row, cols, face, grid);
+    if view.focused {
+        // Paint the query and put a bar cursor at `view.cursor`.
+        let mut cursor_col = x;
+        let mut byte: usize = 0;
+        for g in view.query.graphemes(true) {
+            if x >= cols {
+                break;
+            }
+            let w = UnicodeWidthStr::width(g).clamp(1, 2) as u16;
+            grid.set(
+                x,
+                row,
+                Cell {
+                    grapheme: CompactString::new(g),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+            if w == 2 && x + 1 < cols {
+                grid.set(x + 1, row, Cell::wide_continuation(face));
+            }
+            x = x.saturating_add(w);
+            byte += g.len();
+            if byte <= view.cursor {
+                cursor_col = x;
+            }
+        }
+        cursors.clear();
+        cursors.push(CursorRender {
+            col: cursor_col.min(cols.saturating_sub(1)),
+            row,
+            style: CursorStyle::Bar,
+        });
+    } else if let Some(msg) = view.message.as_deref() {
+        let msg_face = ResolvedFace {
+            fg: Color::rgb(0xff, 0xd0, 0x80),
+            ..face
+        };
+        paint_palette_text(msg, x, row, cols, msg_face, grid);
+    } else {
+        paint_palette_text(&view.query, x, row, cols, face, grid);
+    }
+}
+
 /// Fill every cell in `row` with a space of `face`.
 fn clear_row(grid: &mut CellGrid, row: u16, cols: u16, face: ResolvedFace) {
     for x in 0..cols {
@@ -1508,6 +1601,7 @@ mod tests {
                 completion: None,
                 which_key: None,
                 search: None,
+                kedit_line: None,
             },
         }
     }
@@ -1713,6 +1807,7 @@ mod tests {
                 completion: None,
                 which_key: None,
                 search: None,
+                kedit_line: None,
             },
         }
     }
@@ -1891,6 +1986,92 @@ mod tests {
             .position(|l| l.contains("botline"))
             .expect("botline not painted");
         assert!(bot_row > 0);
+    }
+
+    // ---- KEDIT command line ----
+
+    fn state_with_kedit(window: WindowState, cols: u16, rows: u16, view: crate::view_state::KeditLineView) -> ViewState {
+        let id = window.id;
+        ViewState {
+            size: TerminalSize::new(cols, rows),
+            layout: LayoutTree::Single(id),
+            windows: vec![window],
+            terminal_panes: vec![],
+            active_window: Some(id),
+            global: GlobalState {
+                modeline_left: String::new(),
+                modeline_right: String::new(),
+                palette: None,
+                completion: None,
+                which_key: None,
+                search: None,
+                kedit_line: Some(view),
+            },
+        }
+    }
+
+    #[test]
+    fn kedit_line_paints_prompt_above_modeline() {
+        let w = window_for("hello");
+        let view = crate::view_state::KeditLineView {
+            prompt: "====> ".into(),
+            query: "QUIT".into(),
+            cursor: 4,
+            focused: true,
+            message: None,
+        };
+        // 20 cols × 5 rows: text rows are 0..3, kedit at row 3, modeline at row 4.
+        let state = state_with_kedit(w, 20, 5, view);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines.len(), 5);
+        // Kedit row contains prompt + query.
+        assert!(lines[3].starts_with("====> QUIT"), "kedit row: {:?}", lines[3]);
+        // Cursor must live on the kedit row because it's focused.
+        assert_eq!(tree.cursors.len(), 1);
+        assert_eq!(tree.cursors[0].row, 3);
+    }
+
+    #[test]
+    fn kedit_line_shrinks_text_area() {
+        // A tall buffer should only paint as many rows as the text area minus the kedit row.
+        let w = window_for("l1\nl2\nl3\nl4\nl5");
+        let view = crate::view_state::KeditLineView {
+            prompt: "====> ".into(),
+            query: String::new(),
+            cursor: 0,
+            focused: false,
+            message: None,
+        };
+        // 20 cols × 5 rows: modeline=row4, kedit=row3, text rows 0..=2.
+        let state = state_with_kedit(w, 20, 5, view);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        // Row 3 is the kedit prompt, not buffer content.
+        assert!(!lines[3].contains("l4"), "row 3 should be kedit, got {:?}", lines[3]);
+        // And buffer rows should contain the first three lines.
+        assert!(lines[0].contains("l1"));
+        assert!(lines[1].contains("l2"));
+        assert!(lines[2].contains("l3"));
+    }
+
+    #[test]
+    fn kedit_line_paints_message_when_not_focused() {
+        let w = window_for("hello");
+        let view = crate::view_state::KeditLineView {
+            prompt: "====> ".into(),
+            query: String::new(),
+            cursor: 0,
+            focused: false,
+            message: Some("Saved".into()),
+        };
+        let state = state_with_kedit(w, 20, 5, view);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert!(lines[3].contains("Saved"), "kedit row: {:?}", lines[3]);
     }
 
     #[test]
