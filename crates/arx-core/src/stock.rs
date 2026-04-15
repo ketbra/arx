@@ -90,6 +90,7 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(GotoLine);
     reg.register(BufferSave);
     reg.register(EditorQuit);
+    reg.register(EditorSuspend);
     reg.register(EditorCancel);
     reg.register(EditorDescribeKey);
     reg.register(ModeEnterInsert);
@@ -1832,6 +1833,17 @@ stock_cmd!(EditorQuit, EDITOR_QUIT, "Request editor shutdown");
 impl EditorQuit {
     fn run_impl(cx: &mut CommandContext<'_>) {
         cx.editor.request_quit();
+    }
+}
+
+stock_cmd!(
+    EditorSuspend,
+    EDITOR_SUSPEND,
+    "Suspend the editor (SIGTSTP) — use `fg` to resume"
+);
+impl EditorSuspend {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.request_suspend();
     }
 }
 

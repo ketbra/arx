@@ -278,15 +278,19 @@ async fn handle_key(
     let result = bus
         .invoke(move |editor| {
             let outcome = editor.handle_key(&bus_clone, chord);
-            (outcome, editor.quit_requested())
+            (outcome, editor.quit_requested(), editor.suspend_requested())
         })
         .await;
-    let Ok((outcome, quit)) = result else {
+    let Ok((outcome, quit, suspend)) = result else {
         return (ControlFlow::Break(()), false);
     };
 
     if quit {
         return (ControlFlow::Break(()), false);
+    }
+
+    if suspend {
+        crate::suspend::suspend_and_resume(bus).await;
     }
 
     let is_pending = outcome == KeyHandled::Pending;

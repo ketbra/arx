@@ -30,13 +30,12 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 unicode-segmentation = { workspace = true }
 
+# `libc` is used on Unix by the Ctrl-Z suspend/resume handler in
+# `suspend.rs` (calls `libc::raise(libc::SIGTSTP)`) and, in tests,
+# by the extension hot-reload integration test.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 compact_str = { workspace = true }
-# `libc` is used only by the extension hot-reload integration test,
-# which registers an `atexit` handler that short-circuits glibc's
-# `_dl_fini` pass to avoid a known Rust-cdylib-plus-dlclose segfault
-# at process teardown. See `tests/ext_hot_reload.rs` for the gory
-# details.
-[target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"

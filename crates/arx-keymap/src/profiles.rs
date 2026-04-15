@@ -110,6 +110,10 @@ pub fn emacs() -> Profile {
     m.bind_str("C-x C-s", BUFFER_SAVE).unwrap();
     m.bind_str("C-x C-c", EDITOR_QUIT).unwrap();
     m.bind_str("C-x C-q", EDITOR_QUIT).unwrap();
+    // Ctrl-Z suspends the editor (SIGTSTP). Use `fg` in the shell
+    // to resume. No-op on Windows.
+    m.bind_str("C-z", EDITOR_SUSPEND).unwrap();
+    m.bind_str("C-x C-z", EDITOR_SUSPEND).unwrap();
     m.bind_str("C-x k", BUFFER_CLOSE).unwrap();
     m.bind_str("C-x b", BUFFER_SWITCH).unwrap();
 
@@ -366,6 +370,7 @@ pub fn vim() -> Profile {
     // Rescue save/quit bindings that work in every mode.
     global.bind_str("C-s", BUFFER_SAVE).unwrap();
     global.bind_str("C-q", EDITOR_QUIT).unwrap();
+    global.bind_str("C-z", EDITOR_SUSPEND).unwrap();
     // Window splits (Vim conventions — prefix is `C-w`).
     global.bind_str("C-w s", WINDOW_SPLIT_HORIZONTAL).unwrap();
     global.bind_str("C-w v", WINDOW_SPLIT_VERTICAL).unwrap();

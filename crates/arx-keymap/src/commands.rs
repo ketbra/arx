@@ -154,6 +154,9 @@ pub const GOTO_LINE: &str = "goto.line";
 
 /// Request editor shutdown.
 pub const EDITOR_QUIT: &str = "editor.quit";
+/// Suspend the editor (SIGTSTP). Returns to the shell so the user
+/// can use `fg` to bring the editor back. No-op on Windows.
+pub const EDITOR_SUSPEND: &str = "editor.suspend";
 /// Cancel the current operation (keyboard-quit).
 pub const EDITOR_CANCEL: &str = "editor.cancel";
 /// Recenter the view so the cursor is in the middle of the window.

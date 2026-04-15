@@ -141,6 +141,7 @@ impl OperatorState {
 /// task only — never shared across threads — so it doesn't need to be
 /// `Sync` (and isn't, deliberately, so we catch accidental cross-task use
 /// at compile time).
+#[allow(clippy::struct_excessive_bools)]
 pub struct Editor {
     buffers: BufferManager,
     windows: WindowManager,
@@ -181,6 +182,7 @@ pub struct Editor {
     status_message: Option<String>,
     dirty: bool,
     quit_requested: bool,
+    suspend_requested: bool,
 }
 
 impl std::fmt::Debug for Editor {
@@ -242,6 +244,7 @@ impl Editor {
             status_message: None,
             dirty: false,
             quit_requested: false,
+            suspend_requested: false,
         }
     }
 
@@ -651,6 +654,27 @@ impl Editor {
     /// each command and fires its shutdown signal when it flips.
     pub fn quit_requested(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Request that the driver suspend the editor (SIGTSTP). On Unix
+    /// the input task tears down terminal state, raises SIGTSTP, and
+    /// rebuilds the terminal when the process resumes via `fg`.
+    /// No-op on Windows.
+    pub fn request_suspend(&mut self) {
+        self.suspend_requested = true;
+        self.mark_dirty();
+    }
+
+    /// Whether a suspend has been requested. The input task polls this
+    /// after each command and suspends the process when it flips.
+    pub fn suspend_requested(&self) -> bool {
+        self.suspend_requested
+    }
+
+    /// Clear the suspend-requested flag. Called by the input task
+    /// after it finishes the suspend/resume dance.
+    pub fn clear_suspend_request(&mut self) {
+        self.suspend_requested = false;
     }
 
     /// Feed a key to the keymap engine. If it resolves to a command,
