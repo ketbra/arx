@@ -239,6 +239,43 @@ impl FilterState {
         // Entire buffer filtered out. Stay put.
         line
     }
+
+    /// Shift every excluded-line index strictly greater than
+    /// `edit_line` by `delta`. Called after an edit that changed the
+    /// buffer's total line count (inserting or removing newlines) so
+    /// the excluded set continues to point at the *same content* it
+    /// did before.
+    ///
+    /// Semantics match KEDIT's selection-level model: the filter
+    /// names specific source lines, and those lines' exclusions
+    /// travel with them as neighbouring edits shift their position.
+    /// New lines created by the edit (which land in the shift gap)
+    /// are visible by default — the filter is a snapshot, not a live
+    /// match.
+    ///
+    /// `delta` can be negative (edit removed newlines), zero (no
+    /// change — call is a no-op), or positive (edit inserted
+    /// newlines). The caller is responsible for having rejected any
+    /// edit that would touch an excluded line *through the edit
+    /// guard in `user_edit`*, so we can assume no excluded line is
+    /// "inside" the edited range.
+    pub fn shift_indices(&mut self, edit_line: usize, delta: i64) {
+        if delta == 0 {
+            return;
+        }
+        let old = std::mem::take(&mut self.excluded);
+        for idx in old {
+            if idx <= edit_line {
+                self.excluded.insert(idx);
+            } else {
+                // saturating_add_signed keeps us safe against any
+                // underflow if a malformed delta were somehow passed
+                // (shouldn't happen in practice given the guard).
+                let new_idx = (idx as i64 + delta).max(0) as usize;
+                self.excluded.insert(new_idx);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -378,5 +415,44 @@ mod tests {
         f.narrow("alpha", text).unwrap();
         f.broaden("beta", text).unwrap();
         assert_eq!(f.describe(), "ALL /foo/ MORE /alpha/ LESS /beta/");
+    }
+
+    #[test]
+    fn shift_indices_inserts_pass_through_earlier_lines() {
+        let mut f = FilterState::build("foo", "foo\nbar\nbaz").unwrap();
+        // excluded = {1, 2}. Insert a newline at edit_line 0 → delta +1.
+        f.shift_indices(0, 1);
+        let got: Vec<usize> = f.excluded.iter().copied().collect();
+        assert_eq!(got, vec![2, 3]);
+    }
+
+    #[test]
+    fn shift_indices_delete_pulls_later_lines_up() {
+        let mut f = FilterState::build("foo", "foo\nbar\nbaz").unwrap();
+        // excluded = {1, 2}. Edit at line 0 removes a newline → delta -1.
+        // Line 1 shifts to 0? No — shift only affects idx > edit_line, so
+        // {1, 2} → {0, 1}. That's correct if the caller deleted a newline
+        // belonging to line 0 (collapsing line 0+1 into a single line).
+        f.shift_indices(0, -1);
+        let got: Vec<usize> = f.excluded.iter().copied().collect();
+        assert_eq!(got, vec![0, 1]);
+    }
+
+    #[test]
+    fn shift_indices_leaves_earlier_excluded_lines_alone() {
+        // excluded = {0, 3} where 0 is before the edit and 3 is after.
+        let mut f = FilterState::build("foo", "bar\nfoo\nfoo\nbar\nfoo").unwrap();
+        f.shift_indices(1, 2); // edit inserted 2 newlines at line 1
+        // {0, 3} → {0, 5}
+        let got: Vec<usize> = f.excluded.iter().copied().collect();
+        assert_eq!(got, vec![0, 5]);
+    }
+
+    #[test]
+    fn shift_indices_zero_delta_is_a_noop() {
+        let mut f = FilterState::build("foo", "foo\nbar\nfoo").unwrap();
+        let before = f.excluded.clone();
+        f.shift_indices(0, 0);
+        assert_eq!(f.excluded, before);
     }
 }

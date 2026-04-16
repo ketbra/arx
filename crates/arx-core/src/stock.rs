@@ -991,6 +991,16 @@ pub(crate) fn user_edit(
     let offset = range.start;
     let inserted_text = text.to_owned();
 
+    // Stash the edit's line position and newline delta *before*
+    // applying, so any active KEDIT filter can shift its excluded-
+    // line indices after the buffer's line count changes. The guard
+    // above rules out ranges that touch excluded lines, so we only
+    // ever need to slide indices strictly after `edit_line`.
+    let edit_line = buffer.rope().byte_to_line(range.start.min(buffer.len_bytes()));
+    let removed_newlines = removed.bytes().filter(|b| *b == b'\n').count() as i64;
+    let inserted_newlines = text.bytes().filter(|b| *b == b'\n').count() as i64;
+    let line_delta = inserted_newlines - removed_newlines;
+
     // Apply the edit and update syntax highlights in one step.
     let applied = editor
         .edit_with_highlight(buffer_id, range, text, EditOrigin::User)
@@ -1012,6 +1022,18 @@ pub(crate) fn user_edit(
             timestamp: SystemTime::now(),
         });
     }
+    // KEDIT filter bookkeeping: if the edit added or removed lines,
+    // shift every excluded-line index strictly after `edit_line` so
+    // the filter continues to hide the *same source lines* it did
+    // before. Matches KEDIT's persistent-per-line selection-level
+    // semantics: attributes travel with lines across edits rather
+    // than being re-evaluated against the changed content.
+    if line_delta != 0 {
+        if let Some(filter) = editor.filter_mut(buffer_id) {
+            filter.shift_indices(edit_line, line_delta);
+        }
+    }
+
     // Notify the LSP manager of the content change.
     #[cfg(feature = "lsp")]
     if let Some(buffer) = editor.buffers().get(buffer_id) {
@@ -6728,6 +6750,117 @@ mod tests {
             .unwrap();
         // Next visible blank is line 3.
         assert_eq!(cursor_line, 3);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn newline_insert_shifts_excluded_indices_down() {
+        // Buffer: 0 "foo", 1 "bar", 2 "baz". ALL /foo/ excludes {1, 2}.
+        // Press Enter on line 0 (cursor at byte 3, end of "foo") →
+        // new line 1 "" is visible, old line 1 "bar" becomes line 2,
+        // old line 2 "baz" becomes line 3. Excluded set must update
+        // to {2, 3}, so the new empty line 1 stays visible.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nbaz", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 3;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_named(&bus, names::BUFFER_NEWLINE).await;
+        let (excluded, total_lines) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                let filter = editor.filter(data.buffer_id).unwrap();
+                (
+                    filter.excluded.iter().copied().collect::<Vec<usize>>(),
+                    buffer.rope().len_lines(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(total_lines, 4);
+        assert_eq!(excluded, vec![2, 3]);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn newline_delete_shifts_excluded_indices_up() {
+        // Buffer: 0 "foo", 1 "foo", 2 "bar", 3 "baz".
+        // ALL /foo/ excludes {2, 3}. On line 0 (cursor at byte 3,
+        // end of first "foo"), delete-forward consumes the newline,
+        // joining lines 0 and 1 into one "foofoo". Excluded set
+        // must become {1, 2}.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nfoo\nbar\nbaz", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 3;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_named(&bus, names::BUFFER_DELETE_FORWARD).await;
+        let (excluded, text) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                let filter = editor.filter(data.buffer_id).unwrap();
+                (
+                    filter.excluded.iter().copied().collect::<Vec<usize>>(),
+                    buffer.text(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(text, "foofoo\nbar\nbaz");
+        assert_eq!(excluded, vec![1, 2]);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn newly_inserted_line_below_visible_stays_visible() {
+        // Same setup as the shift test: pressing Enter on a visible
+        // line must leave the freshly-created line unexcluded. The
+        // end-to-end check: self-insert text on the new line should
+        // NOT be blocked by the edit guard.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nbaz", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 3;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_named(&bus, names::BUFFER_NEWLINE).await;
+        // Cursor should now sit on the new empty line 1. Self-insert
+        // to confirm the edit guard lets it through.
+        bus.invoke(|editor| editor.handle_printable_fallback('X'))
+            .await
+            .unwrap();
+        let text = active_text_and_cursor(&bus).await.0;
+        assert_eq!(text, "foo\nX\nbar\nbaz");
         drop(bus);
         let _ = handle.await.unwrap();
     }

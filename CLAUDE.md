@@ -144,7 +144,13 @@ and **completion framework** (item 5). The editor has:
   gutter keeps painting *original* 1-indexed line numbers so gaps
   are obvious.
 
-**446 tests green** (up from Phase 1's 274).
+  Excluded-line indices on `FilterState` shift to track line
+  inserts/deletes from `user_edit` — matches KEDIT's
+  persistent-per-line selection-level semantics so filters follow
+  the *same source lines* across edits rather than going stale.
+  New lines born inside the shift gap are visible by default.
+
+**453 tests green** (up from Phase 1's 274).
 `cargo clippy --workspace --all-targets` clean under the workspace
 pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.
