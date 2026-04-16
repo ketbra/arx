@@ -333,3 +333,54 @@ pub const TEXT_OBJECT_A_BACKTICK: &str = "text-object.a-backtick";
 
 /// Open an embedded terminal in a split pane.
 pub const TERMINAL_OPEN: &str = "terminal.open";
+
+// --- KEDIT command line + block editing ---
+
+/// Move keyboard focus to the KEDIT command line (F11 / Home).
+pub const KEDIT_FOCUS_CMDLINE: &str = "kedit.focus-cmdline";
+/// Move keyboard focus back from the command line to the buffer (F12 / Esc).
+pub const KEDIT_FOCUS_BUFFER: &str = "kedit.focus-buffer";
+/// Toggle command-line focus (Esc when no operation is pending).
+pub const KEDIT_TOGGLE_FOCUS: &str = "kedit.toggle-focus";
+/// Execute the text on the KEDIT command line as a command.
+pub const KEDIT_CMDLINE_EXECUTE: &str = "kedit.cmdline-execute";
+/// Remove the character before the cmd-line cursor.
+pub const KEDIT_CMDLINE_BACKSPACE: &str = "kedit.cmdline-backspace";
+/// Remove the character at the cmd-line cursor.
+pub const KEDIT_CMDLINE_DELETE_FORWARD: &str = "kedit.cmdline-delete-forward";
+/// Clear the cmd-line query entirely.
+pub const KEDIT_CMDLINE_CLEAR: &str = "kedit.cmdline-clear";
+/// Move the cmd-line cursor one character left.
+pub const KEDIT_CMDLINE_CURSOR_LEFT: &str = "kedit.cmdline-cursor-left";
+/// Move the cmd-line cursor one character right.
+pub const KEDIT_CMDLINE_CURSOR_RIGHT: &str = "kedit.cmdline-cursor-right";
+/// Move the cmd-line cursor to the start.
+pub const KEDIT_CMDLINE_CURSOR_HOME: &str = "kedit.cmdline-cursor-home";
+/// Move the cmd-line cursor to the end.
+pub const KEDIT_CMDLINE_CURSOR_END: &str = "kedit.cmdline-cursor-end";
+/// Walk to the previous (older) cmd-line history entry.
+pub const KEDIT_CMDLINE_HISTORY_PREV: &str = "kedit.cmdline-history-prev";
+/// Walk to the next (newer) cmd-line history entry.
+pub const KEDIT_CMDLINE_HISTORY_NEXT: &str = "kedit.cmdline-history-next";
+
+/// Mark a whole-line block (kedit `Alt-L`).
+pub const BLOCK_MARK_LINE: &str = "block.mark-line";
+/// Mark a rectangular / box block (kedit `Alt-B`).
+pub const BLOCK_MARK_BOX: &str = "block.mark-box";
+/// Mark a contiguous-character block (kedit `Alt-A`).
+pub const BLOCK_MARK_CHAR: &str = "block.mark-char";
+/// Copy the marked block to the block clipboard (kedit `Alt-K`).
+pub const BLOCK_COPY: &str = "block.copy";
+/// Cut the marked block for a subsequent paste (kedit `Alt-M`).
+pub const BLOCK_MOVE: &str = "block.move";
+/// Delete the marked block (kedit `Alt-D`).
+pub const BLOCK_DELETE: &str = "block.delete";
+/// Paste the most recent block clipboard at the cursor (kedit `Alt-P`).
+pub const BLOCK_PASTE: &str = "block.paste";
+/// Unmark / clear the current block (kedit `Alt-U`).
+pub const BLOCK_UNMARK: &str = "block.unmark";
+/// Overlay the marked rectangle at the cursor, replacing underlying
+/// text instead of pushing it right (kedit `Alt-O`).
+pub const BLOCK_OVERLAY: &str = "block.overlay";
+/// Fill the marked rectangle with a single character (kedit `Alt-Z`).
+pub const BLOCK_FILL: &str = "block.fill";

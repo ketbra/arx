@@ -120,6 +120,22 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
         }
     }
 
+    // KEDIT persistent command line — one row above the modeline, but
+    // below any palette/search overlay. Unlike the palette this is
+    // *always* painted when enabled, whether or not it has focus, so
+    // the user can see the prompt as a reminder of the profile.
+    let kedit_row = if palette_layout.is_none()
+        && search_layout.is_none()
+        && state.global.kedit_line.is_some()
+        && text_rows > 0
+    {
+        let row = text_rows - 1;
+        text_rows = row;
+        Some(row)
+    } else {
+        None
+    };
+
     let root_rect = Rect::new(0, 0, cols, text_rows);
     let active = state.active_window;
 
@@ -148,6 +164,10 @@ pub fn render(state: &ViewState, frame_id: u64) -> RenderTree {
 
     if let Some(layout) = search_layout {
         paint_search(&layout, cols, &mut grid, &mut cursors);
+    }
+
+    if let (Some(row), Some(view)) = (kedit_row, state.global.kedit_line.as_ref()) {
+        paint_kedit_line(view, row, cols, &mut grid, &mut cursors);
     }
 
     if let Some(ref completion) = state.global.completion {
@@ -315,43 +335,63 @@ fn render_window(
     let rope = buffer.rope();
     let properties = buffer.properties();
 
-    // How much of the window the gutter claims. We need the final line
-    // number to know the gutter width.
-    let last_visible_line =
-        (window.scroll.top_line + rect.height as usize).min(rope.len_lines());
-    let gutter_width = compute_gutter_width(window.gutter, last_visible_line);
+    // Walk only visible (non-excluded) lines; the painted-row list
+    // interleaves buffer-line rows with gap indicators for every run
+    // of hidden lines. KEDIT's `ALL` / `MORE` / `LESS` commands
+    // populate `excluded_lines`.
+    let painted_rows = painted_rows_for_window(window, rect.height, rope.len_lines());
+
+    // How much of the window the gutter claims. Use the *highest*
+    // buffer line number we'll paint, so the gutter width reflects
+    // the actual max digit count (with excluded lines skipped the
+    // painted range can extend well past `top_line + height`).
+    let max_painted_line = painted_rows
+        .iter()
+        .filter_map(|r| match r {
+            PaintedRow::Line(l) => Some(*l + 1),
+            PaintedRow::Gap { .. } => None,
+        })
+        .max()
+        .unwrap_or(window.scroll.top_line);
+    let gutter_width = compute_gutter_width(window.gutter, max_painted_line);
     let text_x = rect.x + gutter_width;
     let text_width = rect.width.saturating_sub(gutter_width);
 
-    for row_idx in 0..rect.height {
-        let line_idx = window.scroll.top_line + row_idx as usize;
-        if line_idx >= rope.len_lines() {
-            break;
-        }
-        let y = rect.y + row_idx;
-        if window.gutter.line_numbers && gutter_width > 0 {
-            paint_gutter(grid, rect.x, y, gutter_width, line_idx + 1);
-        }
-        if text_width > 0 {
-            paint_line(
-                grid,
-                &PaintLine {
-                    buffer,
-                    properties,
-                    line_idx,
-                    window,
-                    text_x,
-                    y,
-                    text_width,
-                },
-            );
+    for (row_idx, row) in painted_rows.iter().enumerate() {
+        let y = rect.y + row_idx as u16;
+        match *row {
+            PaintedRow::Line(line_idx) => {
+                if window.gutter.line_numbers && gutter_width > 0 {
+                    // Paint the *original* 1-indexed buffer line
+                    // number so the user can see the jumps where
+                    // excluded lines used to be.
+                    paint_gutter(grid, rect.x, y, gutter_width, line_idx + 1);
+                }
+                if text_width > 0 {
+                    paint_line(
+                        grid,
+                        &PaintLine {
+                            buffer,
+                            properties,
+                            line_idx,
+                            window,
+                            text_x,
+                            y,
+                            text_width,
+                        },
+                    );
+                }
+            }
+            PaintedRow::Gap { count } => {
+                paint_gap_row(grid, rect.x, y, rect.width, gutter_width, count);
+            }
         }
     }
 
     // Selection highlight: paint the region between mark and cursor
     // with an inverted face so the user sees what's selected.
     if let Some(ref sel) = window.selection {
-        paint_selection(window, sel, rect, gutter_width, text_width, grid);
+        paint_selection(window, sel, rect, gutter_width, text_width, &painted_rows, grid);
     }
 
     // Primary cursor position — only for the active pane.
@@ -364,6 +404,7 @@ fn render_window(
         rect,
         text_x,
         text_width,
+        &painted_rows,
     ) {
         // Flag the underlying cell too, so backends that want to paint a
         // block cursor purely through cell styling can do so.
@@ -374,22 +415,229 @@ fn render_window(
     }
 }
 
+/// What a single row in the painted viewport represents: either a
+/// specific buffer line, or a gap indicator summarising a run of
+/// lines hidden by a KEDIT `ALL` filter.
+#[derive(Debug, Clone, Copy)]
+enum PaintedRow {
+    /// Paint this buffer line at the row.
+    Line(usize),
+    /// Paint a "N lines not displayed" indicator summarising a run
+    /// of excluded lines that sits between two visible lines (or
+    /// between the viewport top and the first visible line).
+    Gap { count: usize },
+}
+
+/// Build the painted-row sequence for `window`. Walks from
+/// `scroll.top_line` and interleaves visible buffer lines with gap
+/// indicators for each contiguous run of excluded lines that sits
+/// *between* two visible lines within the viewport.
+///
+/// Leading excluded lines (those that fall at the scroll-top before
+/// any visible line) don't get a gap row — there's nothing to
+/// indicate a jump from, and painting one would waste a viewport
+/// row. Trailing excluded lines (after the last visible line in the
+/// viewport) are also omitted.
+fn painted_rows_for_window(
+    window: &WindowState,
+    rect_height: u16,
+    total_lines: usize,
+) -> Vec<PaintedRow> {
+    let cap = rect_height as usize;
+    let mut out: Vec<PaintedRow> = Vec::with_capacity(cap);
+    let mut line = window.scroll.top_line;
+    let mut pending_gap: usize = 0;
+    while out.len() < cap && line < total_lines {
+        if window.excluded_lines.contains(&line) {
+            // Only count gaps that fall between visible lines; a
+            // leading excluded run at the viewport top is skipped
+            // silently so we don't spend a row on a "2 hidden above"
+            // indicator at every scroll step.
+            if !out.is_empty() {
+                pending_gap += 1;
+            }
+        } else {
+            if pending_gap > 0 {
+                out.push(PaintedRow::Gap { count: pending_gap });
+                pending_gap = 0;
+                if out.len() >= cap {
+                    break;
+                }
+            }
+            out.push(PaintedRow::Line(line));
+        }
+        line += 1;
+    }
+    out
+}
+
+/// Paint a gap-indicator row: a dim horizontal rule spanning the
+/// text area with a centered `--- N lines hidden ---` label.
+#[allow(clippy::too_many_lines)]
+fn paint_gap_row(
+    grid: &mut CellGrid,
+    x: u16,
+    y: u16,
+    width: u16,
+    gutter_width: u16,
+    count: usize,
+) {
+    if width == 0 {
+        return;
+    }
+    let face = ResolvedFace {
+        fg: Color::rgb(0x60, 0x60, 0x70),
+        bg: ResolvedFace::DEFAULT.bg,
+        ..ResolvedFace::DEFAULT
+    };
+    // Clear the entire row with the gap face.
+    for dx in 0..width {
+        grid.set(
+            x + dx,
+            y,
+            Cell {
+                grapheme: CompactString::const_new(" "),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+    }
+    // Fill the gutter cells with dashes so the missing-line gap is
+    // obvious right where the line numbers usually sit.
+    for dx in 0..gutter_width.saturating_sub(1) {
+        grid.set(
+            x + dx,
+            y,
+            Cell {
+                grapheme: CompactString::const_new("-"),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+    }
+    // Centered label in the text area: `─── N lines hidden ───`.
+    let label = if count == 1 {
+        "1 line hidden".to_owned()
+    } else {
+        format!("{count} lines hidden")
+    };
+    let text_x = x + gutter_width;
+    let text_width = width.saturating_sub(gutter_width);
+    if text_width == 0 {
+        return;
+    }
+    let label_width = UnicodeWidthStr::width(label.as_str()) as u16;
+    // Surround label with horizontal rules: `─── label ───`.
+    let total_rule_cells = text_width.saturating_sub(label_width + 2);
+    let left_rule = total_rule_cells / 2;
+    let right_rule = total_rule_cells - left_rule;
+    let mut col = text_x;
+    for _ in 0..left_rule {
+        if col >= text_x + text_width {
+            break;
+        }
+        grid.set(
+            col,
+            y,
+            Cell {
+                grapheme: CompactString::const_new("\u{2500}"),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+        col += 1;
+    }
+    // One space padding before the label.
+    if col < text_x + text_width {
+        grid.set(
+            col,
+            y,
+            Cell {
+                grapheme: CompactString::const_new(" "),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+        col += 1;
+    }
+    for g in label.graphemes(true) {
+        if col >= text_x + text_width {
+            break;
+        }
+        let w = UnicodeWidthStr::width(g).clamp(1, 2) as u16;
+        grid.set(
+            col,
+            y,
+            Cell {
+                grapheme: CompactString::new(g),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+        if w == 2 && col + 1 < text_x + text_width {
+            grid.set(col + 1, y, Cell::wide_continuation(face));
+        }
+        col = col.saturating_add(w);
+    }
+    // One space padding after the label.
+    if col < text_x + text_width {
+        grid.set(
+            col,
+            y,
+            Cell {
+                grapheme: CompactString::const_new(" "),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+        col += 1;
+    }
+    for _ in 0..right_rule {
+        if col >= text_x + text_width {
+            break;
+        }
+        grid.set(
+            col,
+            y,
+            Cell {
+                grapheme: CompactString::const_new("\u{2500}"),
+                face,
+                flags: CellFlags::empty(),
+            },
+        );
+        col += 1;
+    }
+}
+
 /// Paint a line number at `(x, y)` right-justified to `width - 1` cells,
 /// leaving the final column blank as padding between the gutter and the
 /// text area.
 /// Paint a selection highlight over the cells that fall within the
 /// selection region. Dispatches to linear or rectangle painting.
+///
+/// `painted_rows` is the row→(line | gap) mapping computed once per
+/// frame in [`render_window`]; selections only paint on rows whose
+/// buffer line is visible (i.e. not hidden by a KEDIT `ALL` filter).
 fn paint_selection(
     window: &WindowState,
     sel: &crate::view_state::Selection,
     rect: Rect,
     gutter_width: u16,
     text_width: u16,
+    painted_rows: &[PaintedRow],
     grid: &mut CellGrid,
 ) {
     match sel {
         crate::view_state::Selection::Linear(range) => {
-            paint_linear_selection(window, range, rect, gutter_width, text_width, grid);
+            paint_linear_selection(
+                window,
+                range,
+                rect,
+                gutter_width,
+                text_width,
+                painted_rows,
+                grid,
+            );
         }
         crate::view_state::Selection::Rectangle {
             start_line,
@@ -406,6 +654,7 @@ fn paint_selection(
                 rect,
                 gutter_width,
                 text_width,
+                painted_rows,
                 grid,
             );
         }
@@ -413,12 +662,14 @@ fn paint_selection(
 }
 
 /// Paint a linear (contiguous) selection highlight.
+#[allow(clippy::too_many_arguments)]
 fn paint_linear_selection(
     window: &WindowState,
     sel: &std::ops::Range<usize>,
     rect: Rect,
     gutter_width: u16,
     text_width: u16,
+    painted_rows: &[PaintedRow],
     grid: &mut CellGrid,
 ) {
     if sel.start == sel.end || rect.is_empty() || text_width == 0 {
@@ -432,8 +683,11 @@ fn paint_linear_selection(
     };
     let text_x = rect.x + gutter_width;
 
-    for row_idx in 0..rect.height {
-        let line_idx = window.scroll.top_line + row_idx as usize;
+    for (row_idx_usize, painted) in painted_rows.iter().enumerate() {
+        let PaintedRow::Line(line_idx) = *painted else {
+            continue;
+        };
+        let row_idx = row_idx_usize as u16;
         if line_idx >= rope.len_lines() {
             break;
         }
@@ -490,6 +744,7 @@ fn paint_rect_selection(
     rect: Rect,
     gutter_width: u16,
     text_width: u16,
+    painted_rows: &[PaintedRow],
     grid: &mut CellGrid,
 ) {
     if left_col == right_col || rect.is_empty() || text_width == 0 {
@@ -503,8 +758,11 @@ fn paint_rect_selection(
     };
     let text_x = rect.x + gutter_width;
 
-    for row_idx in 0..rect.height {
-        let line_idx = window.scroll.top_line + row_idx as usize;
+    for (row_idx_usize, painted) in painted_rows.iter().enumerate() {
+        let PaintedRow::Line(line_idx) = *painted else {
+            continue;
+        };
+        let row_idx = row_idx_usize as u16;
         if line_idx >= rope.len_lines() {
             break;
         }
@@ -757,22 +1015,33 @@ fn flags_for_byte(runs: &[StyledRun], byte_offset: usize) -> CellFlags {
 }
 
 /// Convert a cursor's byte offset in the buffer to a `(col, row)` on the
-/// terminal grid, or `None` if the cursor is scrolled out of view.
+/// terminal grid, or `None` if the cursor is scrolled out of view or
+/// sitting on a line hidden by a KEDIT `ALL` filter.
+///
+/// `painted_rows` is the row→(line | gap) mapping produced by
+/// [`painted_rows_for_window`]; finding the cursor's row is a linear
+/// scan over that (at most `rect.height` long). Rows that are gap
+/// indicators are not valid cursor positions.
 fn resolve_cursor(
     byte_offset: usize,
     window: &WindowState,
     rect: Rect,
     text_x: u16,
     text_width: u16,
+    painted_rows: &[PaintedRow],
 ) -> Option<CursorRender> {
     let rope = window.buffer.rope();
     let len = rope.len_bytes();
     let byte = byte_offset.min(len);
     let line = rope.byte_to_line(byte);
-    if line < window.scroll.top_line {
-        return None;
-    }
-    let row_offset = line - window.scroll.top_line;
+    // The cursor only renders if its buffer line appears in the
+    // painted-row mapping. Out-of-view cursors (scrolled above
+    // `scroll.top_line` or below the last rendered row) and cursors
+    // on excluded lines both fail this lookup. Gap rows never match.
+    let row_offset = painted_rows.iter().position(|r| match r {
+        PaintedRow::Line(l) => *l == line,
+        PaintedRow::Gap { .. } => false,
+    })?;
     if row_offset >= rect.height as usize {
         return None;
     }
@@ -1139,6 +1408,79 @@ fn paint_search_matches(
     }
 }
 
+/// Paint the KEDIT persistent command line at `row`. Renders the
+/// prompt glyph, then the query (or the transient message when the
+/// cmd line isn't focused), and places a bar cursor at the end of
+/// the prompt when focused.
+fn paint_kedit_line(
+    view: &crate::view_state::KeditLineView,
+    row: u16,
+    cols: u16,
+    grid: &mut CellGrid,
+    cursors: &mut SmallVec<[CursorRender; 1]>,
+) {
+    // Two faces: focused (brighter prompt background) vs blurred
+    // (dimmer) so the user can tell at a glance where keystrokes go.
+    let face = if view.focused {
+        ResolvedFace {
+            fg: Color::WHITE,
+            bg: Color::rgb(0x20, 0x30, 0x20),
+            ..ResolvedFace::DEFAULT
+        }
+    } else {
+        ResolvedFace {
+            fg: Color::rgb(0xc0, 0xc0, 0xc0),
+            bg: Color::rgb(0x18, 0x20, 0x18),
+            ..ResolvedFace::DEFAULT
+        }
+    };
+    clear_row(grid, row, cols, face);
+    let mut x: u16 = 0;
+    x = paint_palette_text(&view.prompt, x, row, cols, face, grid);
+    if view.focused {
+        // Paint the query and put a bar cursor at `view.cursor`.
+        let mut cursor_col = x;
+        let mut byte: usize = 0;
+        for g in view.query.graphemes(true) {
+            if x >= cols {
+                break;
+            }
+            let w = UnicodeWidthStr::width(g).clamp(1, 2) as u16;
+            grid.set(
+                x,
+                row,
+                Cell {
+                    grapheme: CompactString::new(g),
+                    face,
+                    flags: CellFlags::empty(),
+                },
+            );
+            if w == 2 && x + 1 < cols {
+                grid.set(x + 1, row, Cell::wide_continuation(face));
+            }
+            x = x.saturating_add(w);
+            byte += g.len();
+            if byte <= view.cursor {
+                cursor_col = x;
+            }
+        }
+        cursors.clear();
+        cursors.push(CursorRender {
+            col: cursor_col.min(cols.saturating_sub(1)),
+            row,
+            style: CursorStyle::Bar,
+        });
+    } else if let Some(msg) = view.message.as_deref() {
+        let msg_face = ResolvedFace {
+            fg: Color::rgb(0xff, 0xd0, 0x80),
+            ..face
+        };
+        paint_palette_text(msg, x, row, cols, msg_face, grid);
+    } else {
+        paint_palette_text(&view.query, x, row, cols, face, grid);
+    }
+}
+
 /// Fill every cell in `row` with a space of `face`.
 fn clear_row(grid: &mut CellGrid, row: u16, cols: u16, face: ResolvedFace) {
     for x in 0..cols {
@@ -1490,6 +1832,7 @@ mod tests {
             scroll: ScrollPosition::default(),
             gutter: GutterConfig::default(),
             selection: None,
+            excluded_lines: std::collections::BTreeSet::new(),
         }
     }
 
@@ -1508,6 +1851,7 @@ mod tests {
                 completion: None,
                 which_key: None,
                 search: None,
+                kedit_line: None,
             },
         }
     }
@@ -1713,6 +2057,7 @@ mod tests {
                 completion: None,
                 which_key: None,
                 search: None,
+                kedit_line: None,
             },
         }
     }
@@ -1825,6 +2170,7 @@ mod tests {
             scroll: ScrollPosition::default(),
             gutter: GutterConfig::default(),
             selection: None,
+            excluded_lines: std::collections::BTreeSet::new(),
         }
     }
 
@@ -1893,6 +2239,92 @@ mod tests {
         assert!(bot_row > 0);
     }
 
+    // ---- KEDIT command line ----
+
+    fn state_with_kedit(window: WindowState, cols: u16, rows: u16, view: crate::view_state::KeditLineView) -> ViewState {
+        let id = window.id;
+        ViewState {
+            size: TerminalSize::new(cols, rows),
+            layout: LayoutTree::Single(id),
+            windows: vec![window],
+            terminal_panes: vec![],
+            active_window: Some(id),
+            global: GlobalState {
+                modeline_left: String::new(),
+                modeline_right: String::new(),
+                palette: None,
+                completion: None,
+                which_key: None,
+                search: None,
+                kedit_line: Some(view),
+            },
+        }
+    }
+
+    #[test]
+    fn kedit_line_paints_prompt_above_modeline() {
+        let w = window_for("hello");
+        let view = crate::view_state::KeditLineView {
+            prompt: "====> ".into(),
+            query: "QUIT".into(),
+            cursor: 4,
+            focused: true,
+            message: None,
+        };
+        // 20 cols × 5 rows: text rows are 0..3, kedit at row 3, modeline at row 4.
+        let state = state_with_kedit(w, 20, 5, view);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines.len(), 5);
+        // Kedit row contains prompt + query.
+        assert!(lines[3].starts_with("====> QUIT"), "kedit row: {:?}", lines[3]);
+        // Cursor must live on the kedit row because it's focused.
+        assert_eq!(tree.cursors.len(), 1);
+        assert_eq!(tree.cursors[0].row, 3);
+    }
+
+    #[test]
+    fn kedit_line_shrinks_text_area() {
+        // A tall buffer should only paint as many rows as the text area minus the kedit row.
+        let w = window_for("l1\nl2\nl3\nl4\nl5");
+        let view = crate::view_state::KeditLineView {
+            prompt: "====> ".into(),
+            query: String::new(),
+            cursor: 0,
+            focused: false,
+            message: None,
+        };
+        // 20 cols × 5 rows: modeline=row4, kedit=row3, text rows 0..=2.
+        let state = state_with_kedit(w, 20, 5, view);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        // Row 3 is the kedit prompt, not buffer content.
+        assert!(!lines[3].contains("l4"), "row 3 should be kedit, got {:?}", lines[3]);
+        // And buffer rows should contain the first three lines.
+        assert!(lines[0].contains("l1"));
+        assert!(lines[1].contains("l2"));
+        assert!(lines[2].contains("l3"));
+    }
+
+    #[test]
+    fn kedit_line_paints_message_when_not_focused() {
+        let w = window_for("hello");
+        let view = crate::view_state::KeditLineView {
+            prompt: "====> ".into(),
+            query: String::new(),
+            cursor: 0,
+            focused: false,
+            message: Some("Saved".into()),
+        };
+        let state = state_with_kedit(w, 20, 5, view);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert!(lines[3].contains("Saved"), "kedit row: {:?}", lines[3]);
+    }
+
     #[test]
     fn inactive_pane_does_not_emit_a_cursor() {
         let mut a = window_with_id(1, "aaa");
@@ -1932,6 +2364,96 @@ mod tests {
             "cursor at col {} should be right of divider at {}",
             tree.cursors[0].col,
             divider_col
+        );
+    }
+
+    // ---- KEDIT ALL exclusion ----
+
+    #[test]
+    fn excluded_lines_skip_in_render() {
+        // Buffer: 5 lines; exclude 1 and 3. The painted rows
+        // interleave visible lines with "N lines hidden" gap rows,
+        // so the sequence is:
+        //   row 0: l0
+        //   row 1: ─── 1 line hidden ───
+        //   row 2: l2
+        //   row 3: ─── 1 line hidden ───
+        //   row 4: l4
+        // Modeline lives on row 5.
+        let mut w = window_for("l0\nl1\nl2\nl3\nl4");
+        w.excluded_lines = [1_usize, 3].into_iter().collect();
+        let state = state_for(w, 40, 6);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert!(lines[0].contains("l0"), "row 0: {:?}", lines[0]);
+        assert!(lines[1].contains("line hidden"), "row 1: {:?}", lines[1]);
+        assert!(lines[2].contains("l2"), "row 2: {:?}", lines[2]);
+        assert!(lines[3].contains("line hidden"), "row 3: {:?}", lines[3]);
+        assert!(lines[4].contains("l4"), "row 4: {:?}", lines[4]);
+        // l1 and l3 should not appear as buffer content.
+        assert!(!lines[2].contains("l1"));
+        assert!(!lines[4].contains("l3"));
+    }
+
+    #[test]
+    fn gutter_shows_original_line_numbers_under_filter() {
+        // After interleaving gap rows: visible rows are 0, 2, 4
+        // (buffer lines 0, 2, 4 → 1-based numbers 1, 3, 5). The rows
+        // in between are gap indicators with dashes in the gutter.
+        let mut w = window_for("l0\nl1\nl2\nl3\nl4");
+        w.excluded_lines = [1_usize, 3].into_iter().collect();
+        let state = state_for(w, 40, 6);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let rows: Vec<&str> = text.split('\n').collect();
+        // The line-bearing rows are 0, 2, 4. Extract the leading
+        // non-space token on each one.
+        let nums: Vec<String> = [0, 2, 4]
+            .iter()
+            .map(|&i| {
+                rows[i]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(nums[0], "1");
+        assert_eq!(nums[1], "3");
+        assert_eq!(nums[2], "5");
+    }
+
+    #[test]
+    fn gap_indicator_shows_count_of_hidden_lines() {
+        // Hide three contiguous lines between two visible ones —
+        // the gap row should report "3 lines hidden".
+        let mut w = window_for("keep\nskip\nskip\nskip\nkeep");
+        w.excluded_lines = [1_usize, 2, 3].into_iter().collect();
+        let state = state_for(w, 40, 5);
+        let tree = render(&state, 0);
+        let text = tree.cells.to_debug_text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert!(lines[0].contains("keep"));
+        assert!(
+            lines[1].contains("3 lines hidden"),
+            "expected gap count; got {:?}",
+            lines[1]
+        );
+        assert!(lines[2].contains("keep"));
+    }
+
+    #[test]
+    fn cursor_on_excluded_line_is_not_rendered() {
+        // Cursor sits at byte 3 (start of "l1"), which is excluded.
+        let mut w = window_for("l0\nl1\nl2");
+        w.cursors = sv![Cursor::at(3)];
+        w.excluded_lines = [1_usize].into_iter().collect();
+        let state = state_for(w, 30, 4);
+        let tree = render(&state, 0);
+        assert!(
+            tree.cursors.is_empty(),
+            "cursor on excluded line should produce no render entry"
         );
     }
 }

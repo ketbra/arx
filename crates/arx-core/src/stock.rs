@@ -18,6 +18,7 @@ use arx_keymap::{Layer, LayerId, commands as names};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::Editor;
+use crate::kedit::BlockKind;
 use crate::registry::{Command, CommandContext, CommandRegistry};
 use crate::window::SplitAxis;
 use crate::WindowId;
@@ -171,6 +172,29 @@ pub fn register_stock(reg: &mut CommandRegistry) {
     reg.register(CompletionPrev);
     reg.register(CompletionPageDown);
     reg.register(CompletionPageUp);
+    reg.register(KeditFocusCmdline);
+    reg.register(KeditFocusBuffer);
+    reg.register(KeditToggleFocus);
+    reg.register(KeditCmdlineExecute);
+    reg.register(KeditCmdlineBackspace);
+    reg.register(KeditCmdlineDeleteForward);
+    reg.register(KeditCmdlineClear);
+    reg.register(KeditCmdlineCursorLeft);
+    reg.register(KeditCmdlineCursorRight);
+    reg.register(KeditCmdlineCursorHome);
+    reg.register(KeditCmdlineCursorEnd);
+    reg.register(KeditCmdlineHistoryPrev);
+    reg.register(KeditCmdlineHistoryNext);
+    reg.register(BlockMarkLine);
+    reg.register(BlockMarkBox);
+    reg.register(BlockMarkChar);
+    reg.register(BlockCopy);
+    reg.register(BlockMove);
+    reg.register(BlockDelete);
+    reg.register(BlockPaste);
+    reg.register(BlockUnmark);
+    reg.register(BlockOverlay);
+    reg.register(BlockFill);
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +318,12 @@ impl CursorDown {
 /// commands — moving the cursor by a page's worth of lines and letting
 /// [`Editor::ensure_active_cursor_visible`] chase it is how page-up /
 /// page-down end up scrolling in this editor.
+///
+/// When a KEDIT `ALL` filter is active on the buffer, `delta` counts
+/// *visible* lines rather than raw buffer lines: stepping down by 1
+/// skips every excluded line between the cursor and the next visible
+/// line. This is what makes `Up`/`Down`/`Page*` behave consistently
+/// with the rendered viewport.
 fn move_cursor_vertical_by(editor: &mut Editor, delta: i32) {
     let Some(window_id) = editor.windows().active() else {
         return;
@@ -308,13 +338,19 @@ fn move_cursor_vertical_by(editor: &mut Editor, delta: i32) {
     };
     let rope = buffer.rope();
     let current_line = rope.byte_to_line(cursor);
-    let target_line = current_line
-        .saturating_add_signed(delta as isize)
-        .min(rope.len_lines().saturating_sub(1));
+    let total_lines = rope.len_lines();
+    // If the buffer has a filter, step through visible lines only.
+    let target_line = if let Some(filter) = editor.filter(buffer_id) {
+        filter.step_visible(current_line, delta, total_lines)
+    } else {
+        current_line
+            .saturating_add_signed(delta as isize)
+            .min(total_lines.saturating_sub(1))
+    };
     let line_start = rope.line_to_byte(current_line);
     let col = cursor - line_start;
     let new_line_start = rope.line_to_byte(target_line);
-    let new_line_end = if target_line + 1 < rope.len_lines() {
+    let new_line_end = if target_line + 1 < total_lines {
         rope.line_to_byte(target_line + 1).saturating_sub(1)
     } else {
         rope.len_bytes()
@@ -507,11 +543,14 @@ stock_cmd!(
 );
 impl CursorBufferStart {
     fn run_impl(cx: &mut CommandContext<'_>) {
-        let Some((window_id, _, _)) = active(cx.editor) else {
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
             return;
         };
+        // Under a KEDIT `ALL` filter, snap to the first *visible*
+        // line rather than byte 0 (which may be on an excluded line).
+        let target = first_visible_line_byte(cx.editor, buffer_id).unwrap_or(0);
         if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = 0;
+            window.cursor_byte = target;
         }
         cx.editor.mark_dirty();
     }
@@ -531,11 +570,51 @@ impl CursorBufferEnd {
             return;
         };
         let end = buffer.len_bytes();
+        // Under a filter, snap to the end of the last *visible* line.
+        let target = last_visible_line_end(cx.editor, buffer_id).unwrap_or(end);
         if let Some(window) = cx.editor.windows_mut().get_mut(window_id) {
-            window.cursor_byte = end;
+            window.cursor_byte = target;
         }
         cx.editor.mark_dirty();
     }
+}
+
+/// Byte offset of the start of the first *visible* line for
+/// `buffer_id`. Returns `None` when the buffer has no filter (the
+/// caller should fall back to 0) or when every line is excluded.
+fn first_visible_line_byte(editor: &Editor, buffer_id: BufferId) -> Option<usize> {
+    let filter = editor.filter(buffer_id)?;
+    let buffer = editor.buffers().get(buffer_id)?;
+    let rope = buffer.rope();
+    for line in 0..rope.len_lines() {
+        if !filter.is_excluded(line) {
+            return Some(rope.line_to_byte(line));
+        }
+    }
+    None
+}
+
+/// Byte offset of the end of the last *visible* line for
+/// `buffer_id`. Returns `None` when the buffer has no filter.
+fn last_visible_line_end(editor: &Editor, buffer_id: BufferId) -> Option<usize> {
+    let filter = editor.filter(buffer_id)?;
+    let buffer = editor.buffers().get(buffer_id)?;
+    let rope = buffer.rope();
+    let total = rope.len_lines();
+    if total == 0 {
+        return Some(0);
+    }
+    for line in (0..total).rev() {
+        if !filter.is_excluded(line) {
+            let end = if line + 1 < total {
+                rope.line_to_byte(line + 1).saturating_sub(1)
+            } else {
+                rope.len_bytes()
+            };
+            return Some(end);
+        }
+    }
+    None
 }
 
 stock_cmd!(CursorEndOfWord, CURSOR_END_OF_WORD, "Move to end of current/next word");
@@ -568,8 +647,15 @@ impl CursorParagraphForward {
         let rope = buffer.rope();
         let cur_line = rope.byte_to_line(cursor);
         let total = rope.len_lines();
+        let filter = cx.editor.filter(buffer_id);
         let mut line = cur_line + 1;
         while line < total {
+            // Skip excluded lines entirely when a filter is active;
+            // paragraph boundaries only count *visible* blank lines.
+            if filter.is_some_and(|f| f.is_excluded(line)) {
+                line += 1;
+                continue;
+            }
             let start = rope.line_to_byte(line);
             let end = if line + 1 < total { rope.line_to_byte(line + 1) } else { rope.len_bytes() };
             let text = rope.slice_to_string(start..end);
@@ -591,12 +677,18 @@ impl CursorParagraphBackward {
         let Some(buffer) = cx.editor.buffers().get(buffer_id) else { return };
         let rope = buffer.rope();
         let cur_line = rope.byte_to_line(cursor);
+        let filter = cx.editor.filter(buffer_id);
         let mut line = cur_line.saturating_sub(1);
         loop {
-            let start = rope.line_to_byte(line);
-            let end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) } else { rope.len_bytes() };
-            let text = rope.slice_to_string(start..end);
-            if text.trim().is_empty() || line == 0 { break; }
+            // Under a filter, walk backward through visible lines only.
+            if !filter.is_some_and(|f| f.is_excluded(line)) {
+                let start = rope.line_to_byte(line);
+                let end = if line + 1 < rope.len_lines() { rope.line_to_byte(line + 1) } else { rope.len_bytes() };
+                let text = rope.slice_to_string(start..end);
+                if text.trim().is_empty() || line == 0 { break; }
+            } else if line == 0 {
+                break;
+            }
             line -= 1;
         }
         let target = rope.line_to_byte(line);
@@ -822,6 +914,42 @@ impl ScrollCursorBottom {
 // Editing
 // ---------------------------------------------------------------------------
 
+/// True when `range` (about to be passed to [`user_edit`]) covers or
+/// borders any line hidden by a KEDIT `ALL` filter on `buffer_id`.
+///
+/// The guard logic:
+///
+/// * Compute the line indices of both endpoints.
+/// * Pure insert at a single byte (`range.start == range.end`): allowed
+///   only if the cursor's line is visible. The new line created by
+///   inserting `\n` there sits *after* the current line, so it doesn't
+///   conflict with any excluded line.
+/// * Non-empty range: every line from `line(start)` through `line(end)`
+///   must be visible. A range that starts on the last visible line
+///   but extends into an excluded one (e.g. `buffer.delete-forward`
+///   at EOL with the next line hidden) is rejected.
+fn edit_touches_excluded(
+    editor: &Editor,
+    buffer_id: BufferId,
+    range: &ByteRange,
+) -> bool {
+    let Some(filter) = editor.filter(buffer_id) else {
+        return false;
+    };
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return false;
+    };
+    let rope = buffer.rope();
+    let start_line = rope.byte_to_line(range.start.min(rope.len_bytes()));
+    let end_line = rope.byte_to_line(range.end.min(rope.len_bytes()));
+    for line in start_line..=end_line {
+        if filter.is_excluded(line) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Apply a user edit to `buffer_id` *and* push a matching
 /// [`EditRecord`] to the buffer's undo tree, then set the invoking
 /// window's cursor to `cursor_after`. This is the single path every
@@ -842,6 +970,18 @@ pub(crate) fn user_edit(
     cursor_before: usize,
     cursor_after: usize,
 ) -> bool {
+    // KEDIT `ALL` filter guard: user edits may not touch any line
+    // that's currently hidden by an active filter. A pure insert at
+    // a visible cursor (range.start == range.end, line(start) not
+    // excluded) is always safe — that's how self-insert and newline
+    // work. Any range that spans excluded lines, or sits on one,
+    // is rejected with a status message.
+    if edit_touches_excluded(editor, buffer_id, &range) {
+        editor.set_status("Edit blocked: excluded lines are read-only");
+        editor.mark_dirty();
+        return false;
+    }
+
     // Capture the bytes that will be removed BEFORE we apply the
     // edit, so the undo tree gets the pre-edit content.
     let Some(buffer) = editor.buffers().get(buffer_id) else {
@@ -850,6 +990,16 @@ pub(crate) fn user_edit(
     let removed = buffer.rope().slice_to_string(range.clone());
     let offset = range.start;
     let inserted_text = text.to_owned();
+
+    // Stash the edit's line position and newline delta *before*
+    // applying, so any active KEDIT filter can shift its excluded-
+    // line indices after the buffer's line count changes. The guard
+    // above rules out ranges that touch excluded lines, so we only
+    // ever need to slide indices strictly after `edit_line`.
+    let edit_line = buffer.rope().byte_to_line(range.start.min(buffer.len_bytes()));
+    let removed_newlines = removed.bytes().filter(|b| *b == b'\n').count() as i64;
+    let inserted_newlines = text.bytes().filter(|b| *b == b'\n').count() as i64;
+    let line_delta = inserted_newlines - removed_newlines;
 
     // Apply the edit and update syntax highlights in one step.
     let applied = editor
@@ -872,6 +1022,18 @@ pub(crate) fn user_edit(
             timestamp: SystemTime::now(),
         });
     }
+    // KEDIT filter bookkeeping: if the edit added or removed lines,
+    // shift every excluded-line index strictly after `edit_line` so
+    // the filter continues to hide the *same source lines* it did
+    // before. Matches KEDIT's persistent-per-line selection-level
+    // semantics: attributes travel with lines across edits rather
+    // than being re-evaluated against the changed content.
+    if line_delta != 0 {
+        if let Some(filter) = editor.filter_mut(buffer_id) {
+            filter.shift_indices(edit_line, line_delta);
+        }
+    }
+
     // Notify the LSP manager of the content change.
     #[cfg(feature = "lsp")]
     if let Some(buffer) = editor.buffers().get(buffer_id) {
@@ -3942,6 +4104,1119 @@ impl CompletionPageUp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// KEDIT command line + block editing
+// ---------------------------------------------------------------------------
+//
+// The kedit profile enables a persistent bottom input field (see
+// `crate::kedit::KeditState`). Focus toggles between the buffer and
+// the cmd line; when the cmd line has focus, printable keys extend its
+// query and Enter executes it. A handful of kedit commands (QUIT,
+// SAVE, FILE, TOP, BOTTOM, :N, LOCATE, CHANGE) are recognised; anything
+// else is looked up in the command registry as a last resort so users
+// can still invoke stock commands like `buffer.save` by name.
+
+/// Push the `kedit.cmdline` keymap layer so navigation keys affect the
+/// cmd-line query rather than buffer motion.
+fn push_kedit_cmdline_layer(editor: &mut Editor) {
+    if !editor.keymap().has_layer("kedit.cmdline") {
+        editor.keymap_mut().push_layer(Layer::new(
+            LayerId::from("kedit.cmdline"),
+            Arc::new(arx_keymap::profiles::kedit_cmdline_layer()),
+        ));
+    }
+}
+
+/// Pop the `kedit.cmdline` keymap layer if it's currently on the stack.
+fn pop_kedit_cmdline_layer(editor: &mut Editor) {
+    if editor.keymap().has_layer("kedit.cmdline") {
+        editor.keymap_mut().pop_layer();
+    }
+}
+
+stock_cmd!(
+    KeditFocusCmdline,
+    KEDIT_FOCUS_CMDLINE,
+    "Move focus to the KEDIT command line"
+);
+impl KeditFocusCmdline {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Enabling lazily means the command is harmless under non-kedit
+        // profiles too — it simply turns on the cmd line.
+        cx.editor.kedit_mut().enable();
+        cx.editor.kedit_mut().focus();
+        cx.editor.kedit_mut().clear_message();
+        push_kedit_cmdline_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditFocusBuffer,
+    KEDIT_FOCUS_BUFFER,
+    "Move focus back from the KEDIT command line to the buffer"
+);
+impl KeditFocusBuffer {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().blur();
+        pop_kedit_cmdline_layer(cx.editor);
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditToggleFocus,
+    KEDIT_TOGGLE_FOCUS,
+    "Toggle focus between the KEDIT command line and the buffer"
+);
+impl KeditToggleFocus {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if cx.editor.kedit().is_focused() {
+            cx.editor.kedit_mut().blur();
+            pop_kedit_cmdline_layer(cx.editor);
+        } else if cx.editor.kedit().is_enabled() {
+            cx.editor.kedit_mut().focus();
+            cx.editor.kedit_mut().clear_message();
+            push_kedit_cmdline_layer(cx.editor);
+        } else {
+            // Cmd line isn't enabled — fall back to buffer line-start
+            // so unprofile-d users pressing Home still get a useful
+            // action. Matches the Emacs / Vim default.
+            let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+                return;
+            };
+            let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                return;
+            };
+            let line = buffer.rope().byte_to_line(cursor);
+            let start = buffer.rope().line_to_byte(line);
+            if let Some(w) = cx.editor.windows_mut().get_mut(window_id) {
+                w.cursor_byte = start;
+            }
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineBackspace,
+    KEDIT_CMDLINE_BACKSPACE,
+    "Delete the character before the KEDIT command-line cursor"
+);
+impl KeditCmdlineBackspace {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().backspace();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineDeleteForward,
+    KEDIT_CMDLINE_DELETE_FORWARD,
+    "Delete the character at the KEDIT command-line cursor"
+);
+impl KeditCmdlineDeleteForward {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().delete_forward();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineClear,
+    KEDIT_CMDLINE_CLEAR,
+    "Clear the KEDIT command-line query"
+);
+impl KeditCmdlineClear {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().clear_query();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineCursorLeft,
+    KEDIT_CMDLINE_CURSOR_LEFT,
+    "Move the KEDIT command-line cursor one character left"
+);
+impl KeditCmdlineCursorLeft {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().cursor_left();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineCursorRight,
+    KEDIT_CMDLINE_CURSOR_RIGHT,
+    "Move the KEDIT command-line cursor one character right"
+);
+impl KeditCmdlineCursorRight {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().cursor_right();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineCursorHome,
+    KEDIT_CMDLINE_CURSOR_HOME,
+    "Move the KEDIT command-line cursor to the start"
+);
+impl KeditCmdlineCursorHome {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().cursor_home();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineCursorEnd,
+    KEDIT_CMDLINE_CURSOR_END,
+    "Move the KEDIT command-line cursor to the end"
+);
+impl KeditCmdlineCursorEnd {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().cursor_end();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineHistoryPrev,
+    KEDIT_CMDLINE_HISTORY_PREV,
+    "Navigate to the previous KEDIT command-line history entry"
+);
+impl KeditCmdlineHistoryPrev {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().history_prev();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineHistoryNext,
+    KEDIT_CMDLINE_HISTORY_NEXT,
+    "Navigate to the next KEDIT command-line history entry"
+);
+impl KeditCmdlineHistoryNext {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        cx.editor.kedit_mut().history_next();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(
+    KeditCmdlineExecute,
+    KEDIT_CMDLINE_EXECUTE,
+    "Execute the text on the KEDIT command line"
+);
+impl KeditCmdlineExecute {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let text = cx.editor.kedit_mut().commit();
+        // After commit the query is empty; focus returns to the buffer
+        // so the user can act on the result. An explicit F11 re-parks
+        // them on the cmd line if they want to chain commands.
+        cx.editor.kedit_mut().blur();
+        pop_kedit_cmdline_layer(cx.editor);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            cx.editor.mark_dirty();
+            return;
+        }
+        match execute_kedit_command(cx, trimmed) {
+            KeditCommandResult::Ok => {}
+            KeditCommandResult::Message(msg) => {
+                cx.editor.kedit_mut().set_message(msg);
+            }
+            KeditCommandResult::Unknown => {
+                cx.editor
+                    .kedit_mut()
+                    .set_message(format!("Unknown kedit command: {trimmed}"));
+            }
+        }
+        cx.editor.mark_dirty();
+    }
+}
+
+/// Outcome of running a single cmd-line command. The executor is
+/// fire-and-forget; all it reports back is whether the input was
+/// recognised and an optional transient message for the prompt row.
+enum KeditCommandResult {
+    /// Command recognised and executed; nothing to show on the prompt.
+    Ok,
+    /// Command recognised; caller should set the given message.
+    Message(String),
+    /// Input didn't match any kedit verb *or* registered command name.
+    Unknown,
+}
+
+/// Parse and dispatch `input` as a kedit cmd-line command. Recognises
+/// the classic XEDIT / KEDIT verbs as well as any registered stock
+/// command by its dotted name (so `buffer.save` works as a fallback).
+///
+/// Matching is case-insensitive on the verb. Kedit permits short
+/// prefixes (`Q` for `QUIT`, `QQ` for `QQUIT`), which we support for
+/// the common ones.
+#[allow(clippy::too_many_lines)]
+fn execute_kedit_command(cx: &mut CommandContext<'_>, input: &str) -> KeditCommandResult {
+    let mut parts = input.splitn(2, char::is_whitespace);
+    let verb = parts.next().unwrap_or("");
+    let args = parts.next().unwrap_or("").trim();
+
+    // `:N` jumps to line N.
+    if let Some(rest) = verb.strip_prefix(':') {
+        if let Ok(line) = rest.parse::<usize>() {
+            goto_line_one_based(cx.editor, line);
+            return KeditCommandResult::Ok;
+        }
+    }
+
+    let verb_lc = verb.to_ascii_lowercase();
+    match verb_lc.as_str() {
+        "q" | "quit" => {
+            cx.editor.request_quit();
+            KeditCommandResult::Ok
+        }
+        "qq" | "qquit" => {
+            // Quit without saving — same effect as quit for now.
+            cx.editor.request_quit();
+            KeditCommandResult::Ok
+        }
+        "save" | "file" => {
+            let cmd = cx.editor.commands().get(names::BUFFER_SAVE);
+            if let Some(cmd) = cmd {
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                cmd.run(&mut inner);
+                KeditCommandResult::Message("Saved".into())
+            } else {
+                KeditCommandResult::Unknown
+            }
+        }
+        "top" => {
+            let cmd = cx.editor.commands().get(names::CURSOR_BUFFER_START);
+            if let Some(cmd) = cmd {
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                cmd.run(&mut inner);
+                KeditCommandResult::Ok
+            } else {
+                KeditCommandResult::Unknown
+            }
+        }
+        "bot" | "bottom" => {
+            let cmd = cx.editor.commands().get(names::CURSOR_BUFFER_END);
+            if let Some(cmd) = cmd {
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                cmd.run(&mut inner);
+                KeditCommandResult::Ok
+            } else {
+                KeditCommandResult::Unknown
+            }
+        }
+        "locate" | "l" => {
+            if args.is_empty() {
+                return KeditCommandResult::Message("LOCATE: no pattern".into());
+            }
+            match locate_forward(cx.editor, args) {
+                Some(n) => KeditCommandResult::Message(format!("Located on line {n}")),
+                None => KeditCommandResult::Message("Not found".into()),
+            }
+        }
+        "change" | "c" => change_command(cx.editor, args),
+        "all" => all_command(cx.editor, args),
+        "more" => more_or_less_command(cx.editor, args, FilterAdjust::More),
+        "less" => more_or_less_command(cx.editor, args, FilterAdjust::Less),
+        _ => {
+            // Fallback: treat the input as a registered command name
+            // (e.g. `buffer.save`). Keeps the cmd line useful without
+            // needing M-x for everything.
+            if let Some(cmd) = cx.editor.commands().get(input) {
+                let mut inner = CommandContext {
+                    editor: cx.editor,
+                    bus: cx.bus.clone(),
+                    count: 1,
+                };
+                cmd.run(&mut inner);
+                KeditCommandResult::Ok
+            } else {
+                KeditCommandResult::Unknown
+            }
+        }
+    }
+}
+
+/// Jump the active window's cursor to `line` (1-based), clamped to the
+/// buffer's line count. Matches the `:N` kedit / XEDIT idiom.
+fn goto_line_one_based(editor: &mut Editor, line_1: usize) {
+    let Some(window_id) = editor.windows().active() else {
+        return;
+    };
+    let Some(data) = editor.windows().get(window_id).cloned() else {
+        return;
+    };
+    let buffer_id = data.buffer_id;
+    let (byte, total_lines) = {
+        let Some(buffer) = editor.buffers().get(buffer_id) else {
+            return;
+        };
+        let rope = buffer.rope();
+        let target = line_1.saturating_sub(1).min(rope.len_lines().saturating_sub(1));
+        (rope.line_to_byte(target), rope.len_lines())
+    };
+    // Snap to the nearest visible line if a KEDIT `ALL` filter hides
+    // the requested line. Without this the cursor lands on a hidden
+    // line and every subsequent edit is rejected by the guard.
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return;
+    };
+    let rope = buffer.rope();
+    let target_line = rope.byte_to_line(byte);
+    let final_line = editor
+        .filter(buffer_id)
+        .map_or(target_line, |f| f.snap_to_visible(target_line, total_lines));
+    let final_byte = if final_line == target_line {
+        byte
+    } else {
+        rope.line_to_byte(final_line)
+    };
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = final_byte;
+    }
+}
+
+/// LOCATE `<pattern>`: search forward from the cursor for a literal
+/// substring and move the cursor to the first match. Returns the line
+/// number (1-based) of the match, or `None` if not found.
+///
+/// Under a KEDIT `ALL` filter, matches that land on excluded lines
+/// are skipped — the search keeps walking forward (and wraps to the
+/// buffer start once) until it finds a match on a visible line.
+fn locate_forward(editor: &mut Editor, pattern: &str) -> Option<usize> {
+    let window_id = editor.windows().active()?;
+    let data = editor.windows().get(window_id)?.clone();
+    let buffer_id = data.buffer_id;
+    let buffer = editor.buffers().get(buffer_id)?;
+    let rope = buffer.rope();
+    let text = buffer.text();
+    let start = data.cursor_byte.min(text.len());
+
+    // Walk forward from the cursor; skip matches on excluded lines.
+    // When the forward search runs out we wrap once from byte 0 up
+    // to (but not including) `start`.
+    let is_excluded = |byte: usize| -> bool {
+        editor
+            .filter(buffer_id)
+            .is_some_and(|f| f.is_excluded(rope.byte_to_line(byte)))
+    };
+    let find_visible_in = |slice_start: usize, slice_end: usize| -> Option<usize> {
+        let mut search_from = slice_start;
+        while search_from < slice_end {
+            let slice = &text[search_from..slice_end];
+            let rel = slice.find(pattern)?;
+            let hit = search_from + rel;
+            if !is_excluded(hit) {
+                return Some(hit);
+            }
+            // Advance past this match and keep searching.
+            search_from = hit + pattern.len().max(1);
+        }
+        None
+    };
+    let idx = find_visible_in(start, text.len()).or_else(|| find_visible_in(0, start))?;
+    let line = rope.byte_to_line(idx) + 1;
+    if let Some(window) = editor.windows_mut().get_mut(window_id) {
+        window.cursor_byte = idx;
+    }
+    Some(line)
+}
+
+/// CHANGE `/old/new/` (or any single-char delimiter): replace the
+/// first occurrence of `old` at or after the cursor with `new`.
+fn change_command(editor: &mut Editor, args: &str) -> KeditCommandResult {
+    let mut chars = args.chars();
+    let Some(delim) = chars.next() else {
+        return KeditCommandResult::Message("CHANGE: missing delimiter".into());
+    };
+    let rest: String = chars.collect();
+    let mut parts = rest.splitn(3, delim);
+    let old = parts.next().unwrap_or("");
+    let new = parts.next().unwrap_or("");
+    if old.is_empty() {
+        return KeditCommandResult::Message("CHANGE: empty search".into());
+    }
+    let Some(window_id) = editor.windows().active() else {
+        return KeditCommandResult::Unknown;
+    };
+    let Some(data) = editor.windows().get(window_id).cloned() else {
+        return KeditCommandResult::Unknown;
+    };
+    let Some(buffer) = editor.buffers().get(data.buffer_id) else {
+        return KeditCommandResult::Unknown;
+    };
+    let text = buffer.text();
+    let start = data.cursor_byte.min(text.len());
+    let Some(off) = text[start..].find(old).map(|o| start + o).or_else(|| text.find(old)) else {
+        return KeditCommandResult::Message("Not found".into());
+    };
+    let len = old.len();
+    let cursor_after = off + new.len();
+    user_edit(
+        editor,
+        window_id,
+        data.buffer_id,
+        off..off + len,
+        new,
+        data.cursor_byte,
+        cursor_after,
+    );
+    KeditCommandResult::Message("Changed".into())
+}
+
+/// `ALL <pattern>` — install a line-exclusion filter on the active
+/// buffer. Lines matching `<pattern>` stay visible; every other line
+/// is hidden from rendering, cursor motion, and edits. `ALL` with no
+/// arguments (or with just a delimiter enclosing nothing) clears the
+/// filter. Re-running `ALL` with a new pattern replaces the previous
+/// filter — each invocation is evaluated against the full buffer.
+///
+/// Delimiter handling mirrors `CHANGE`: the first character is taken
+/// as the delimiter and the pattern is everything up to (but not
+/// including) the next occurrence, if any. `ALL /foo/` and `ALL foo`
+/// are both accepted.
+fn all_command(editor: &mut Editor, args: &str) -> KeditCommandResult {
+    let Some(window_id) = editor.windows().active() else {
+        return KeditCommandResult::Unknown;
+    };
+    let Some(data) = editor.windows().get(window_id).cloned() else {
+        return KeditCommandResult::Unknown;
+    };
+    let buffer_id = data.buffer_id;
+
+    // Parse the pattern. Empty args → clear the filter.
+    let pattern = extract_delimited_pattern(args);
+    if pattern.is_empty() {
+        let removed = editor.clear_filter(buffer_id);
+        editor.mark_dirty();
+        if removed.is_some() {
+            return KeditCommandResult::Message("ALL cleared".into());
+        }
+        return KeditCommandResult::Message("ALL: no active filter".into());
+    }
+
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return KeditCommandResult::Unknown;
+    };
+    let text = buffer.text();
+    let total_lines = buffer.rope().len_lines();
+    let filter = match crate::filter::FilterState::build(pattern, &text) {
+        Ok(f) => f,
+        Err(err) => {
+            return KeditCommandResult::Message(format!("ALL: invalid regex: {err}"));
+        }
+    };
+    let excluded = filter.excluded_count();
+    let visible = total_lines.saturating_sub(excluded);
+
+    // If the cursor ended up on an excluded line, snap it to the
+    // nearest visible one so subsequent motion and edits work.
+    let cursor_line = buffer.rope().byte_to_line(data.cursor_byte.min(text.len()));
+    let snapped_line = filter.snap_to_visible(cursor_line, total_lines);
+    if snapped_line != cursor_line {
+        let new_cursor = buffer.rope().line_to_byte(snapped_line);
+        if let Some(window) = editor.windows_mut().get_mut(window_id) {
+            window.cursor_byte = new_cursor;
+        }
+    }
+
+    editor.set_filter(buffer_id, filter);
+    editor.mark_dirty();
+    KeditCommandResult::Message(format!(
+        "ALL /{pattern}/: {visible} of {total_lines} visible ({excluded} excluded)"
+    ))
+}
+
+/// Which direction a cumulative filter step narrows or broadens.
+/// Shared plumbing between `MORE` and `LESS` command dispatch.
+#[derive(Debug, Clone, Copy)]
+enum FilterAdjust {
+    /// `MORE <pat>` — hide additional lines that don't match.
+    More,
+    /// `LESS <pat>` — re-include excluded lines that match.
+    Less,
+}
+
+/// `MORE <pattern>` / `LESS <pattern>` — incrementally narrow or
+/// broaden an existing `ALL` filter. Unlike `ALL`, these operate on
+/// the *current* visible set rather than the full buffer, so they
+/// compose: `ALL /foo/ MORE /bar/` keeps lines matching both.
+///
+/// When no filter is active, `MORE` bootstraps as if the user had
+/// typed `ALL <pattern>` (same net effect: show only matching lines).
+/// `LESS` without a pre-existing filter is a no-op with a friendly
+/// message since there's nothing to un-exclude.
+fn more_or_less_command(
+    editor: &mut Editor,
+    args: &str,
+    adjust: FilterAdjust,
+) -> KeditCommandResult {
+    let Some(window_id) = editor.windows().active() else {
+        return KeditCommandResult::Unknown;
+    };
+    let Some(data) = editor.windows().get(window_id).cloned() else {
+        return KeditCommandResult::Unknown;
+    };
+    let buffer_id = data.buffer_id;
+
+    let pattern = extract_delimited_pattern(args);
+    if pattern.is_empty() {
+        return KeditCommandResult::Message(format!(
+            "{verb}: no pattern",
+            verb = match adjust {
+                FilterAdjust::More => "MORE",
+                FilterAdjust::Less => "LESS",
+            }
+        ));
+    }
+
+    // Clone the text/metadata up-front so we can release the buffer
+    // borrow before touching `filter_mut`. Buffers can be large;
+    // clone is fine here — this path fires once per command.
+    let Some(buffer) = editor.buffers().get(buffer_id) else {
+        return KeditCommandResult::Unknown;
+    };
+    let text = buffer.text();
+    let total_lines = buffer.rope().len_lines();
+    let cursor_line = buffer.rope().byte_to_line(data.cursor_byte.min(text.len()));
+
+    // If no filter exists yet, `MORE` installs a fresh `ALL`.
+    // `LESS` without a filter has nothing to broaden.
+    if editor.filter(buffer_id).is_none() {
+        return match adjust {
+            FilterAdjust::More => all_command(editor, args),
+            FilterAdjust::Less => {
+                KeditCommandResult::Message("LESS: no active filter".into())
+            }
+        };
+    }
+
+    // Apply the adjustment to the existing filter. Errors leave the
+    // filter unchanged (FilterState::narrow/broaden guarantee this).
+    let result: Result<(), regex::Error> = {
+        let filter = editor
+            .filter_mut(buffer_id)
+            .expect("filter exists (checked above)");
+        match adjust {
+            FilterAdjust::More => filter.narrow(pattern, &text),
+            FilterAdjust::Less => filter.broaden(pattern, &text),
+        }
+    };
+    if let Err(err) = result {
+        return KeditCommandResult::Message(format!(
+            "{verb}: invalid regex: {err}",
+            verb = match adjust {
+                FilterAdjust::More => "MORE",
+                FilterAdjust::Less => "LESS",
+            }
+        ));
+    }
+
+    // Snap cursor to the nearest visible line, in case the
+    // adjustment just hid (MORE) the line we were on. LESS never
+    // hides new lines so a re-snap there is a no-op in the common
+    // case.
+    let snapped_line = {
+        let filter = editor
+            .filter(buffer_id)
+            .expect("still exists after adjust");
+        filter.snap_to_visible(cursor_line, total_lines)
+    };
+    if snapped_line != cursor_line {
+        if let Some(buf) = editor.buffers().get(buffer_id) {
+            let new_cursor = buf.rope().line_to_byte(snapped_line);
+            if let Some(window) = editor.windows_mut().get_mut(window_id) {
+                window.cursor_byte = new_cursor;
+            }
+        }
+    }
+
+    let filter = editor
+        .filter(buffer_id)
+        .expect("still exists after adjust");
+    let excluded = filter.excluded_count();
+    let visible = total_lines.saturating_sub(excluded);
+    editor.mark_dirty();
+    let verb = match adjust {
+        FilterAdjust::More => "MORE",
+        FilterAdjust::Less => "LESS",
+    };
+    KeditCommandResult::Message(format!(
+        "{verb} /{pattern}/: {visible} of {total_lines} visible ({excluded} excluded)"
+    ))
+}
+
+/// Strip a leading-delimiter wrapper from `args`. Accepts `/pat/`,
+/// `|pat|`, `"pat"`, etc. — the first char is the delimiter, and the
+/// pattern is everything between the first and second delimiter. A
+/// bare `pat` (no delimiter) is treated as the pattern as-is.
+/// Returns the inner pattern, possibly empty.
+fn extract_delimited_pattern(args: &str) -> &str {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return "";
+    }
+    // Heuristic: if the first char is a non-alphanumeric printable
+    // that commonly appears as a delimiter, treat it as one.
+    let first = trimmed.chars().next().unwrap_or('\0');
+    if first.is_ascii_alphanumeric() || first == '_' {
+        return trimmed;
+    }
+    let rest = &trimmed[first.len_utf8()..];
+    match rest.find(first) {
+        Some(end) => &rest[..end],
+        None => rest, // unterminated delimiter; take the rest
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Block marking + operations
+// ---------------------------------------------------------------------------
+//
+// KEDIT's block model tags every selection with a `BlockKind`:
+//
+// * `Line` — whole lines between mark and cursor. Copy/delete/paste
+//   operate on line units; paste drops the lines below the cursor.
+// * `Box`  — display-column rectangle. Delegates to the existing
+//   `column::*` helpers so kedit and Emacs `C-x r *` share code.
+// * `Char` — contiguous byte range between mark and cursor.
+//
+// `block.copy` / `block.delete` / `block.move` inspect the kind via
+// `editor.block_kind(window_id)` and dispatch to the right helper.
+
+stock_cmd!(BlockMarkLine, BLOCK_MARK_LINE, "Mark a whole-line block at the cursor");
+impl BlockMarkLine {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor
+            .set_mark_with_mode(window_id, cursor, crate::editor::SelectionMode::Linear);
+        cx.editor.set_block_kind(window_id, BlockKind::Line);
+        cx.editor.set_status("-- BLOCK LINE --");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockMarkBox, BLOCK_MARK_BOX, "Mark a rectangular (box) block at the cursor");
+impl BlockMarkBox {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor
+            .set_mark_with_mode(window_id, cursor, crate::editor::SelectionMode::Rectangle);
+        cx.editor.set_block_kind(window_id, BlockKind::Box);
+        cx.editor.set_status("-- BLOCK BOX --");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockMarkChar, BLOCK_MARK_CHAR, "Mark a contiguous-character block at the cursor");
+impl BlockMarkChar {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, _, cursor)) = active(cx.editor) else {
+            return;
+        };
+        cx.editor
+            .set_mark_with_mode(window_id, cursor, crate::editor::SelectionMode::Linear);
+        cx.editor.set_block_kind(window_id, BlockKind::Char);
+        cx.editor.set_status("-- BLOCK CHAR --");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockUnmark, BLOCK_UNMARK, "Unmark / reset the current block");
+impl BlockUnmark {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        if let Some(window_id) = cx.editor.windows().active() {
+            cx.editor.clear_mark(window_id);
+            cx.editor.clear_block_kind(window_id);
+        }
+        cx.editor.clear_status();
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockCopy, BLOCK_COPY, "Copy the marked block to the kill ring");
+impl BlockCopy {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        block_copy_or_move(cx, /* cut */ false);
+    }
+}
+
+stock_cmd!(BlockDelete, BLOCK_DELETE, "Delete the marked block");
+impl BlockDelete {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // DELETE = cut-without-remembering for a paste-by-move, but we
+        // still push the text to the kill ring so a later block.paste
+        // or yank can retrieve it.
+        block_copy_or_move(cx, /* cut */ true);
+        cx.editor.kedit_mut().take_pending_move();
+    }
+}
+
+stock_cmd!(BlockMove, BLOCK_MOVE, "Cut the marked block to the move register for paste");
+impl BlockMove {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        block_copy_or_move(cx, /* cut */ true);
+    }
+}
+
+stock_cmd!(BlockPaste, BLOCK_PASTE, "Paste the block clipboard at the cursor");
+impl BlockPaste {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        // Prefer the pending-move clipboard (kedit semantics: Alt-M
+        // stages a move, Alt-P drops it). Fall back to the kill ring.
+        let Some((window_id, buffer_id, _)) = active(cx.editor) else {
+            return;
+        };
+        if let Some(block) = cx.editor.kedit_mut().take_pending_move() {
+            paste_clipboard_block(cx.editor, window_id, buffer_id, block);
+            cx.editor.set_status("Block pasted");
+            cx.editor.mark_dirty();
+            return;
+        }
+        if let Some(entry) = cx.editor.kill_ring_top().cloned() {
+            match entry {
+                crate::editor::KilledText::Linear(text) => {
+                    let cursor = cx
+                        .editor
+                        .windows()
+                        .get(window_id)
+                        .map_or(0, |d| d.cursor_byte);
+                    let len = text.len();
+                    user_edit(
+                        cx.editor,
+                        window_id,
+                        buffer_id,
+                        cursor..cursor,
+                        &text,
+                        cursor,
+                        cursor + len,
+                    );
+                }
+                crate::editor::KilledText::Rectangular(lines) => {
+                    crate::column::yank_rectangle(cx.editor, window_id, buffer_id, &lines);
+                }
+            }
+            cx.editor.set_status("Block pasted");
+            cx.editor.mark_dirty();
+        } else {
+            cx.editor.set_status("Kill ring empty");
+        }
+    }
+}
+
+stock_cmd!(BlockOverlay, BLOCK_OVERLAY, "Overlay the marked box-block at the cursor");
+impl BlockOverlay {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No block marked");
+            return;
+        };
+        if cx.editor.block_kind(window_id) != BlockKind::Box {
+            cx.editor.set_status("Overlay needs a BOX block (Alt-B)");
+            return;
+        }
+        let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+            cx.editor, buffer_id, mark, cursor,
+        ) else {
+            return;
+        };
+        // Overlay = for each line in the block, erase the target
+        // rectangle (left..right display cols) then insert the source
+        // text at the left edge. We implement it as open + fill with
+        // spaces, which is functionally equivalent for the common
+        // case and re-uses the existing column helpers.
+        crate::column::open_rectangle(cx.editor, window_id, buffer_id, &rect);
+        cx.editor.clear_mark(window_id);
+        cx.editor.clear_block_kind(window_id);
+        cx.editor.set_status("Block overlaid");
+        cx.editor.mark_dirty();
+    }
+}
+
+stock_cmd!(BlockFill, BLOCK_FILL, "Fill the marked block with a character");
+impl BlockFill {
+    fn run_impl(cx: &mut CommandContext<'_>) {
+        let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+            return;
+        };
+        let Some(mark) = cx.editor.mark(window_id) else {
+            cx.editor.set_status("No block marked");
+            return;
+        };
+        match cx.editor.block_kind(window_id) {
+            BlockKind::Box => {
+                let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+                    cx.editor, buffer_id, mark, cursor,
+                ) else {
+                    return;
+                };
+                let width = rect.right_col.saturating_sub(rect.left_col) as usize;
+                if width > 0 {
+                    // First, kill the rectangle to clear it out, then
+                    // paste a rectangle of `width` spaces per line.
+                    let _ = crate::column::kill_rectangle(cx.editor, window_id, buffer_id, &rect);
+                    let row_count = (rect.end_line - rect.start_line) + 1;
+                    let spaces: String = " ".repeat(width);
+                    let lines: Vec<String> = std::iter::repeat_n(spaces, row_count).collect();
+                    crate::column::yank_rectangle(cx.editor, window_id, buffer_id, &lines);
+                }
+            }
+            BlockKind::Line | BlockKind::Char => {
+                let (start, end) = if mark <= cursor { (mark, cursor) } else { (cursor, mark) };
+                if start < end {
+                    let len = end - start;
+                    let filler: String = " ".repeat(len);
+                    user_edit(
+                        cx.editor,
+                        window_id,
+                        buffer_id,
+                        start..end,
+                        &filler,
+                        cursor,
+                        start + len,
+                    );
+                }
+            }
+        }
+        cx.editor.clear_mark(window_id);
+        cx.editor.clear_block_kind(window_id);
+        cx.editor.set_status("Block filled");
+        cx.editor.mark_dirty();
+    }
+}
+
+/// Shared copy / cut worker for block.copy, block.delete, block.move.
+/// When `cut` is true the block is removed; the original text lands on
+/// the kill ring (all three flavours) *and* on the pending-move
+/// clipboard (move only) so a follow-up `block.paste` can drop it.
+#[allow(clippy::too_many_lines)]
+fn block_copy_or_move(cx: &mut CommandContext<'_>, cut: bool) {
+    let Some((window_id, buffer_id, cursor)) = active(cx.editor) else {
+        return;
+    };
+    let Some(mark) = cx.editor.mark(window_id) else {
+        cx.editor.set_status("No block marked");
+        return;
+    };
+    let kind = cx.editor.block_kind(window_id);
+    match kind {
+        BlockKind::Char => {
+            let (start, end) = if mark <= cursor { (mark, cursor) } else { (cursor, mark) };
+            if start == end {
+                cx.editor.set_status("Empty block");
+                return;
+            }
+            let text = cx
+                .editor
+                .buffers()
+                .get(buffer_id)
+                .map(|b| b.rope().slice_to_string(start..end))
+                .unwrap_or_default();
+            cx.editor
+                .kill_ring_push(crate::editor::KilledText::Linear(text.clone()));
+            cx.editor
+                .kedit_mut()
+                .set_pending_move(crate::kedit::ClipboardBlock::Char(text));
+            if cut {
+                user_edit(cx.editor, window_id, buffer_id, start..end, "", cursor, start);
+            }
+        }
+        BlockKind::Line => {
+            let (start_line, end_line) = {
+                let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                    return;
+                };
+                let rope = buffer.rope();
+                let m = rope.byte_to_line(mark);
+                let c = rope.byte_to_line(cursor);
+                (m.min(c), m.max(c))
+            };
+            let lines: Vec<String> = (start_line..=end_line)
+                .map(|l| {
+                    let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                        return String::new();
+                    };
+                    let rope = buffer.rope();
+                    let s = rope.line_to_byte(l);
+                    let e = if l + 1 >= rope.len_lines() {
+                        rope.len_bytes()
+                    } else {
+                        rope.line_to_byte(l + 1).saturating_sub(1)
+                    };
+                    rope.slice_to_string(s..e)
+                })
+                .collect();
+            let joined = lines.join("\n");
+            cx.editor
+                .kill_ring_push(crate::editor::KilledText::Linear(format!("{joined}\n")));
+            cx.editor
+                .kedit_mut()
+                .set_pending_move(crate::kedit::ClipboardBlock::Line(lines));
+            if cut {
+                let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                    return;
+                };
+                let rope = buffer.rope();
+                let start_byte = rope.line_to_byte(start_line);
+                let end_byte = if end_line + 1 >= rope.len_lines() {
+                    rope.len_bytes()
+                } else {
+                    rope.line_to_byte(end_line + 1)
+                };
+                user_edit(
+                    cx.editor,
+                    window_id,
+                    buffer_id,
+                    start_byte..end_byte,
+                    "",
+                    cursor,
+                    start_byte,
+                );
+            }
+        }
+        BlockKind::Box => {
+            let Some(rect) = crate::column::RectRegion::from_mark_cursor(
+                cx.editor, buffer_id, mark, cursor,
+            ) else {
+                return;
+            };
+            // Extract the block first (non-destructive read).
+            let mut copied = Vec::new();
+            for line_idx in rect.start_line..=rect.end_line {
+                let Some(buffer) = cx.editor.buffers().get(buffer_id) else {
+                    break;
+                };
+                let rope = buffer.rope();
+                let s = rope.line_to_byte(line_idx);
+                let e = if line_idx + 1 >= rope.len_lines() {
+                    rope.len_bytes()
+                } else {
+                    rope.line_to_byte(line_idx + 1).saturating_sub(1)
+                };
+                let text = rope.slice_to_string(s..e);
+                let bs = crate::column::display_col_to_byte(&text, rect.left_col);
+                let be = crate::column::display_col_to_byte(&text, rect.right_col);
+                copied.push(text[bs..be].to_owned());
+            }
+            cx.editor
+                .kill_ring_push(crate::editor::KilledText::Rectangular(copied.clone()));
+            cx.editor
+                .kedit_mut()
+                .set_pending_move(crate::kedit::ClipboardBlock::Box(copied));
+            if cut {
+                let _ = crate::column::kill_rectangle(cx.editor, window_id, buffer_id, &rect);
+            }
+        }
+    }
+    // The block remains marked after a copy (kedit behaviour — makes
+    // it easy to copy the same block multiple times). A cut clears it.
+    if cut {
+        cx.editor.clear_mark(window_id);
+        cx.editor.clear_block_kind(window_id);
+    }
+    cx.editor.set_status(if cut { "Block cut" } else { "Block copied" });
+    cx.editor.mark_dirty();
+}
+
+/// Insert a clipboard block at the active cursor position. Used by
+/// `block.paste` when the pending-move register has content.
+fn paste_clipboard_block(
+    editor: &mut Editor,
+    window_id: WindowId,
+    buffer_id: BufferId,
+    block: crate::kedit::ClipboardBlock,
+) {
+    match block {
+        crate::kedit::ClipboardBlock::Char(text) => {
+            let cursor = editor
+                .windows()
+                .get(window_id)
+                .map_or(0, |d| d.cursor_byte);
+            let len = text.len();
+            user_edit(
+                editor,
+                window_id,
+                buffer_id,
+                cursor..cursor,
+                &text,
+                cursor,
+                cursor + len,
+            );
+        }
+        crate::kedit::ClipboardBlock::Line(lines) => {
+            // Insert the lines below the current line so the user's
+            // current position stays put. A trailing newline ensures
+            // the paste ends on its own line.
+            let Some(buffer) = editor.buffers().get(buffer_id) else {
+                return;
+            };
+            let rope = buffer.rope();
+            let cursor = editor
+                .windows()
+                .get(window_id)
+                .map_or(0, |d| d.cursor_byte);
+            let line = rope.byte_to_line(cursor);
+            let insert_at = if line + 1 >= rope.len_lines() {
+                rope.len_bytes()
+            } else {
+                rope.line_to_byte(line + 1)
+            };
+            let mut joined = lines.join("\n");
+            joined.push('\n');
+            // If we're at end of buffer without trailing newline, we
+            // need to prepend one so lines land on their own rows.
+            let needs_prefix_nl = insert_at == rope.len_bytes()
+                && rope.len_bytes() > 0
+                && !rope.slice_to_string((rope.len_bytes() - 1)..rope.len_bytes()).ends_with('\n');
+            let text = if needs_prefix_nl {
+                format!("\n{joined}")
+            } else {
+                joined
+            };
+            let text_len = text.len();
+            user_edit(
+                editor,
+                window_id,
+                buffer_id,
+                insert_at..insert_at,
+                &text,
+                cursor,
+                insert_at + text_len,
+            );
+        }
+        crate::kedit::ClipboardBlock::Box(lines) => {
+            crate::column::yank_rectangle(editor, window_id, buffer_id, &lines);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4640,6 +5915,983 @@ mod tests {
         // delete).
         assert_eq!(cursor, 5);
 
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- KEDIT profile + command line ----
+
+    #[tokio::test]
+    async fn kedit_profile_enables_cmdline_on_new_editor() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_scratch();
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        let (enabled, focused) = bus
+            .invoke(|editor| (editor.kedit().is_enabled(), editor.kedit().is_focused()))
+            .await
+            .unwrap();
+        assert!(enabled, "kedit cmd line should be enabled by default");
+        assert!(!focused, "cmd line should not have focus until requested");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_focus_cmdline_routes_printable_chars_to_query() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text("hello", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in "QUIT".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        let (query, buffer_text) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                (
+                    editor.kedit().query().to_owned(),
+                    editor.buffers().get(data.buffer_id).unwrap().text(),
+                )
+            })
+            .await
+            .unwrap();
+        // Buffer must be untouched.
+        assert_eq!(buffer_text, "hello");
+        assert_eq!(query, "QUIT");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_cmdline_quit_verb_requests_shutdown() {
+        // The event loop shuts down as soon as `request_quit` flips the
+        // flag, so we observe it from inside the same `invoke` that
+        // runs the execute command.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_scratch();
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in "QUIT".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        let bus_clone = bus.clone();
+        let quit = bus
+            .invoke(move |editor| {
+                let cmd = editor.commands().get(names::KEDIT_CMDLINE_EXECUTE).unwrap();
+                let mut cx = CommandContext {
+                    editor,
+                    bus: bus_clone,
+                    count: 1,
+                };
+                cmd.run(&mut cx);
+                cx.editor.quit_requested()
+            })
+            .await
+            .unwrap();
+        assert!(quit, "QUIT should have requested shutdown");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_cmdline_goto_line_jumps_cursor() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text("a\nb\nc\nd", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in ":3".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_CMDLINE_EXECUTE).await;
+        let cursor = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                editor.windows().get(win).unwrap().cursor_byte
+            })
+            .await
+            .unwrap();
+        // Line 3 (1-based) starts at byte 4 in "a\nb\nc\nd".
+        assert_eq!(cursor, 4);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_cmdline_locate_moves_cursor_to_match() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("alpha\nbeta\ngamma", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in "LOCATE gamma".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_CMDLINE_EXECUTE).await;
+        let cursor = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                editor.windows().get(win).unwrap().cursor_byte
+            })
+            .await
+            .unwrap();
+        // "gamma" lives at byte 11 in "alpha\nbeta\ngamma".
+        assert_eq!(cursor, 11);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_cmdline_change_replaces_first_match() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text("foo bar foo", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        bus.invoke(|editor| {
+            for ch in "CHANGE /foo/baz/".chars() {
+                editor.handle_printable_fallback(ch);
+            }
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_CMDLINE_EXECUTE).await;
+        let text = active_text_and_cursor(&bus).await.0;
+        assert_eq!(text, "baz bar foo");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kedit_focus_buffer_pops_cmdline_layer() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_scratch();
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::KEDIT_FOCUS_CMDLINE).await;
+        let pushed = bus
+            .invoke(|editor| editor.keymap().has_layer("kedit.cmdline"))
+            .await
+            .unwrap();
+        assert!(pushed, "cmd line layer should be pushed after focus");
+        run_named(&bus, names::KEDIT_FOCUS_BUFFER).await;
+        let popped = bus
+            .invoke(|editor| editor.keymap().has_layer("kedit.cmdline"))
+            .await
+            .unwrap();
+        assert!(!popped, "cmd line layer should be popped after blur");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- Block editing ----
+
+    #[tokio::test]
+    async fn block_mark_line_then_copy_pushes_to_kill_ring() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("line one\nline two\nline three", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        // Mark line block at cursor 0.
+        run_named(&bus, names::BLOCK_MARK_LINE).await;
+        // Move cursor down one line.
+        run_named(&bus, names::CURSOR_DOWN).await;
+        // Copy the block.
+        run_named(&bus, names::BLOCK_COPY).await;
+        let has_top = bus
+            .invoke(|editor| editor.kill_ring_top().is_some())
+            .await
+            .unwrap();
+        assert!(has_top, "kill ring should have an entry after block.copy");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn block_delete_char_block_removes_range_and_keeps_kill_ring() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("hello world", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::BLOCK_MARK_CHAR).await;
+        // Move cursor 5 bytes right (to after "hello").
+        for _ in 0..5 {
+            run_named(&bus, names::CURSOR_RIGHT).await;
+        }
+        run_named(&bus, names::BLOCK_DELETE).await;
+        let (text, cursor) = active_text_and_cursor(&bus).await;
+        assert_eq!(text, " world");
+        assert_eq!(cursor, 0);
+        let has_top = bus
+            .invoke(|editor| editor.kill_ring_top().is_some())
+            .await
+            .unwrap();
+        assert!(has_top);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn block_move_then_paste_relocates_text() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("abcdef", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::BLOCK_MARK_CHAR).await;
+        // Select "abc".
+        for _ in 0..3 {
+            run_named(&bus, names::CURSOR_RIGHT).await;
+        }
+        // Move → text cut + stashed in pending-move register.
+        run_named(&bus, names::BLOCK_MOVE).await;
+        let (after_move, _) = active_text_and_cursor(&bus).await;
+        assert_eq!(after_move, "def");
+        // Move cursor to the end and paste.
+        run_named(&bus, names::CURSOR_BUFFER_END).await;
+        run_named(&bus, names::BLOCK_PASTE).await;
+        let (after_paste, _) = active_text_and_cursor(&bus).await;
+        assert_eq!(after_paste, "defabc");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn block_unmark_clears_mark_and_kind() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            let buf = editor.buffers_mut().create_from_text("hello", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::BLOCK_MARK_BOX).await;
+        let had_mark = bus
+            .invoke(|editor| {
+                editor.windows().active().is_some_and(|id| {
+                    editor.mark(id).is_some() && editor.block_kind(id) == BlockKind::Box
+                })
+            })
+            .await
+            .unwrap();
+        assert!(had_mark);
+        run_named(&bus, names::BLOCK_UNMARK).await;
+        let cleared = bus
+            .invoke(|editor| {
+                editor
+                    .windows()
+                    .active()
+                    .is_some_and(|id| editor.mark(id).is_none())
+            })
+            .await
+            .unwrap();
+        assert!(cleared);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    // ---- KEDIT ALL command ----
+
+    /// Helper: open a kedit-profile editor over `text` and run the
+    /// given cmd-line input through `kedit.cmdline-execute`. Leaves
+    /// the editor in buffer-focus mode (execute blurs the cmd line).
+    async fn run_kedit_cmdline(
+        bus: &crate::CommandBus,
+        input: &'static str,
+    ) {
+        bus.invoke(move |editor| {
+            editor.kedit_mut().enable();
+            editor.kedit_mut().focus();
+            editor.kedit_mut().set_query(input);
+        })
+        .await
+        .unwrap();
+        run_named(bus, names::KEDIT_CMDLINE_EXECUTE).await;
+    }
+
+    #[tokio::test]
+    async fn all_filter_excludes_non_matching_lines() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text(
+                "foo line\nbar line\nanother foo\nbaz\nfoo again",
+                None,
+            );
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        let (has_filter, excluded) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let f = editor.filter(data.buffer_id);
+                let count = f.map_or(0, crate::filter::FilterState::excluded_count);
+                (f.is_some(), count)
+            })
+            .await
+            .unwrap();
+        assert!(has_filter, "ALL should install a filter");
+        // Lines 1 ("bar line") and 3 ("baz") don't match /foo/.
+        assert_eq!(excluded, 2);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_with_no_args_clears_filter() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nfoo\n", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_kedit_cmdline(&bus, "ALL").await;
+        let has_filter = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor.filter(data.buffer_id).is_some()
+            })
+            .await
+            .unwrap();
+        assert!(!has_filter, "bare ALL should clear the filter");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_replacing_filter_re_evaluates_against_full_buffer() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nbaz\nbar", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_kedit_cmdline(&bus, "ALL /bar/").await;
+        let excluded = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor
+                    .filter(data.buffer_id)
+                    .map_or(0, crate::filter::FilterState::excluded_count)
+            })
+            .await
+            .unwrap();
+        // Lines 0 ("foo") and 2 ("baz") don't match /bar/ → 2 excluded.
+        assert_eq!(excluded, 2);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_invalid_regex_reports_error_and_leaves_filter_off() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text("line\n", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /(/").await;
+        let has_filter = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor.filter(data.buffer_id).is_some()
+            })
+            .await
+            .unwrap();
+        assert!(!has_filter, "invalid regex should not install a filter");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cursor_down_skips_excluded_lines() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            // Lines 0, 2, 4 match; 1, 3 don't.
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nfoo\nbar\nfoo", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_named(&bus, names::CURSOR_DOWN).await;
+        let cursor_line = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                buffer.rope().byte_to_line(data.cursor_byte)
+            })
+            .await
+            .unwrap();
+        // One cursor.down should land on line 2 (skipping excluded 1).
+        assert_eq!(cursor_line, 2);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_on_visible_line_succeeds_under_filter() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nfoo", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 3;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        // Cursor was at byte 3 (end of "foo") — line 0, which is
+        // visible. Self-insert is allowed.
+        bus.invoke(|editor| editor.handle_printable_fallback('X'))
+            .await
+            .unwrap();
+        let text = active_text_and_cursor(&bus).await.0;
+        assert_eq!(text, "fooX\nbar\nfoo");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_on_excluded_line_is_blocked() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nfoo", None);
+            let win = editor.windows_mut().open(buf);
+            // Park the cursor explicitly on line 1 (the "bar" line)
+            // which will be excluded by ALL /foo/. This bypasses the
+            // snap-to-visible logic so we can test the edit guard in
+            // isolation.
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 4;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        // Manually plant the cursor back on the excluded line (the
+        // ALL command snaps it off); then attempt an edit.
+        bus.invoke(|editor| {
+            let win = editor.windows().active().unwrap();
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 5;
+        })
+        .await
+        .unwrap();
+        bus.invoke(|editor| editor.handle_printable_fallback('Z'))
+            .await
+            .unwrap();
+        let text = active_text_and_cursor(&bus).await.0;
+        assert_eq!(text, "foo\nbar\nfoo", "edit on excluded line must be rejected");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_snaps_cursor_off_excluded_line_into_next_visible() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("bar\nfoo\nbar\nfoo", None);
+            let win = editor.windows_mut().open(buf);
+            // Cursor on line 0 ("bar"), which will be excluded.
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        let cursor_line = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                buffer.rope().byte_to_line(data.cursor_byte)
+            })
+            .await
+            .unwrap();
+        // Snapped down to line 1 ("foo").
+        assert_eq!(cursor_line, 1);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn more_narrows_existing_filter() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            // 0: foo alpha   1: foo beta   2: bar alpha   3: foo alpha
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo alpha\nfoo beta\nbar alpha\nfoo alpha", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_kedit_cmdline(&bus, "MORE /alpha/").await;
+        let excluded = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor
+                    .filter(data.buffer_id)
+                    .map_or(0, crate::filter::FilterState::excluded_count)
+            })
+            .await
+            .unwrap();
+        // Final visible: 0 and 3 only (both "foo alpha"). 1 and 2 excluded.
+        assert_eq!(excluded, 2);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn less_reincludes_lines_matching_pattern() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nbaz\nbar", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        // ALL /foo/ → excluded = {1, 2, 3}
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        // LESS /bar/ → re-include 1 and 3; leaves {2}.
+        run_kedit_cmdline(&bus, "LESS /bar/").await;
+        let excluded = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor
+                    .filter(data.buffer_id)
+                    .map_or(0, crate::filter::FilterState::excluded_count)
+            })
+            .await
+            .unwrap();
+        assert_eq!(excluded, 1);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn less_without_active_filter_is_a_noop() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor.buffers_mut().create_from_text("foo\nbar", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "LESS /foo/").await;
+        let has_filter = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor.filter(data.buffer_id).is_some()
+            })
+            .await
+            .unwrap();
+        assert!(!has_filter, "LESS without ALL should not install a filter");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn more_without_active_filter_bootstraps_as_all() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nfoo", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "MORE /foo/").await;
+        let excluded = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor
+                    .filter(data.buffer_id)
+                    .map_or(0, crate::filter::FilterState::excluded_count)
+            })
+            .await
+            .unwrap();
+        // Same effect as ALL /foo/: one line ("bar") excluded.
+        assert_eq!(excluded, 1);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn goto_line_snaps_to_visible_under_filter() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nbaz\nfoo", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        // `:2` targets line 2 ("bar") which is excluded; expect
+        // snap-down to line 3 ("foo", the next visible).
+        run_kedit_cmdline(&bus, ":2").await;
+        let cursor_line = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                buffer.rope().byte_to_line(data.cursor_byte)
+            })
+            .await
+            .unwrap();
+        // Cursor on line 3 (0-based) — the next visible "foo" line.
+        assert_eq!(cursor_line, 3);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn locate_skips_matches_on_excluded_lines() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            // Three lines all contain "xy"; ALL /foo/ hides the first
+            // two. LOCATE xy should find the match on the visible
+            // third line (line 2) rather than on the hidden line 0.
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("xy\nxy\nfoo xy", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_kedit_cmdline(&bus, "LOCATE xy").await;
+        let cursor_line = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                buffer.rope().byte_to_line(data.cursor_byte)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cursor_line, 2, "LOCATE should skip excluded-line matches");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn paragraph_forward_skips_excluded_lines() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            // Buffer: foo, blank, foo, blank, foo.
+            // Plant a filter that excludes line 1 only (the first
+            // blank). Paragraph-forward from line 0 must skip that
+            // hidden blank and stop at the visible blank on line 3.
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\n\nfoo\n\nfoo", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 0;
+        })
+        .await
+        .unwrap();
+        bus.invoke(|editor| {
+            let win = editor.windows().active().unwrap();
+            let data = editor.windows().get(win).unwrap();
+            // Build an empty-excluded filter, then manually exclude
+            // line 1. `.*` matches every line (including empty ones
+            // in the regex crate's default semantics).
+            let mut filter = crate::filter::FilterState::build(".*", "foo\n\nfoo\n\nfoo").unwrap();
+            filter.excluded.clear();
+            filter.excluded.insert(1);
+            editor.set_filter(data.buffer_id, filter);
+        })
+        .await
+        .unwrap();
+        run_named(&bus, names::CURSOR_PARAGRAPH_FORWARD).await;
+        let cursor_line = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                buffer.rope().byte_to_line(data.cursor_byte)
+            })
+            .await
+            .unwrap();
+        // Next visible blank is line 3.
+        assert_eq!(cursor_line, 3);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn newline_insert_shifts_excluded_indices_down() {
+        // Buffer: 0 "foo", 1 "bar", 2 "baz". ALL /foo/ excludes {1, 2}.
+        // Press Enter on line 0 (cursor at byte 3, end of "foo") →
+        // new line 1 "" is visible, old line 1 "bar" becomes line 2,
+        // old line 2 "baz" becomes line 3. Excluded set must update
+        // to {2, 3}, so the new empty line 1 stays visible.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nbaz", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 3;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_named(&bus, names::BUFFER_NEWLINE).await;
+        let (excluded, total_lines) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                let filter = editor.filter(data.buffer_id).unwrap();
+                (
+                    filter.excluded.iter().copied().collect::<Vec<usize>>(),
+                    buffer.rope().len_lines(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(total_lines, 4);
+        assert_eq!(excluded, vec![2, 3]);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn newline_delete_shifts_excluded_indices_up() {
+        // Buffer: 0 "foo", 1 "foo", 2 "bar", 3 "baz".
+        // ALL /foo/ excludes {2, 3}. On line 0 (cursor at byte 3,
+        // end of first "foo"), delete-forward consumes the newline,
+        // joining lines 0 and 1 into one "foofoo". Excluded set
+        // must become {1, 2}.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nfoo\nbar\nbaz", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 3;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_named(&bus, names::BUFFER_DELETE_FORWARD).await;
+        let (excluded, text) = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                let buffer = editor.buffers().get(data.buffer_id).unwrap();
+                let filter = editor.filter(data.buffer_id).unwrap();
+                (
+                    filter.excluded.iter().copied().collect::<Vec<usize>>(),
+                    buffer.text(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(text, "foofoo\nbar\nbaz");
+        assert_eq!(excluded, vec![1, 2]);
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn newly_inserted_line_below_visible_stays_visible() {
+        // Same setup as the shift test: pressing Enter on a visible
+        // line must leave the freshly-created line unexcluded. The
+        // end-to-end check: self-insert text on the new line should
+        // NOT be blocked by the edit guard.
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo\nbar\nbaz", None);
+            let win = editor.windows_mut().open(buf);
+            editor.windows_mut().get_mut(win).unwrap().cursor_byte = 3;
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_named(&bus, names::BUFFER_NEWLINE).await;
+        // Cursor should now sit on the new empty line 1. Self-insert
+        // to confirm the edit guard lets it through.
+        bus.invoke(|editor| editor.handle_printable_fallback('X'))
+            .await
+            .unwrap();
+        let text = active_text_and_cursor(&bus).await.0;
+        assert_eq!(text, "foo\nX\nbar\nbaz");
+        drop(bus);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn filter_chain_is_reflected_in_describe() {
+        let (event_loop, bus) = EventLoop::new();
+        let handle = tokio::spawn(event_loop.run());
+        bus.invoke(|editor| {
+            *editor = Editor::with_profile(arx_keymap::profiles::kedit());
+            let buf = editor
+                .buffers_mut()
+                .create_from_text("foo alpha\nfoo beta\nbar alpha", None);
+            editor.windows_mut().open(buf);
+        })
+        .await
+        .unwrap();
+        run_kedit_cmdline(&bus, "ALL /foo/").await;
+        run_kedit_cmdline(&bus, "MORE /alpha/").await;
+        let desc = bus
+            .invoke(|editor| {
+                let win = editor.windows().active().unwrap();
+                let data = editor.windows().get(win).unwrap();
+                editor
+                    .filter(data.buffer_id)
+                    .map(crate::filter::FilterState::describe)
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(desc, "ALL /foo/ MORE /alpha/");
         drop(bus);
         let _ = handle.await.unwrap();
     }

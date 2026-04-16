@@ -104,7 +104,53 @@ and **completion framework** (item 5). The editor has:
   Accepting replaces the prefix (`anchor..cursor`) with the selected
   item's insert text via the `user_edit` path (so it's undoable).
 
-**352 tests green** (up from Phase 1's 274).
+- **(Phase 2)** **KEDIT emulation** via a new `kedit` keymap profile
+  (`arx --keymap kedit`). Ships with classic kedit bindings: function
+  keys (`F2=save`, `F3=quit`, `F7/F8=scroll`, `F11/F12=focus
+  cmd-line/buffer`), Alt-chord block editing (`M-l/b/a` mark
+  line/box/char, `M-k/m/d/p` copy/move/delete/paste, `M-u/o/z`
+  unmark/overlay/fill), and a persistent `====>` command line at the
+  bottom of the screen. The cmd line is a distinct input field
+  modeled in `arx_core::kedit::KeditState`: focus toggles between
+  buffer and cmd line with `Home`/`F11`/`F12`/`Esc`; typed verbs
+  include `QUIT`, `SAVE`, `FILE`, `TOP`, `BOTTOM`, `:N` (go to
+  line), `LOCATE <pat>`, `CHANGE /old/new/`, and `ALL <pattern>`,
+  with a fallback to any registered stock command name. Block
+  operations are tagged with a `BlockKind` (Line/Box/Char) so
+  copy/paste reproduce the right geometry — line blocks insert on
+  their own rows, box blocks round-trip through
+  `column::{kill,yank}_rectangle`.
+
+- **(Phase 2)** **KEDIT `ALL` / `MORE` / `LESS` line filter** —
+  `ALL <regex>` hides every line that doesn't match the pattern;
+  `ALL` alone clears the filter; re-running `ALL` with a new pattern
+  replaces the previous filter (each invocation is evaluated against
+  the full buffer). `MORE <pat>` narrows the current filter further
+  (only lines in the existing visible set matching `pat` stay),
+  `LESS <pat>` re-includes excluded lines matching `pat`. The chain
+  of steps is stored on `FilterState::steps` and surfaced in the
+  modeline as `ALL /foo/ MORE /bar/  — N excluded`. Excluded lines
+  are transparent to the renderer, cursor motion, and the edit
+  guard: they don't paint, they're skipped by `cursor.up/down/page-*`
+  and paragraph motion, and any edit whose byte range touches an
+  excluded line is rejected at the single `user_edit` choke-point
+  with a `"Edit blocked: excluded lines are read-only"` status.
+  `LOCATE` skips hits on excluded lines; `:N` snaps to the nearest
+  visible line when the target is hidden. The renderer paints a
+  dim `─── N lines hidden ───` gap row between runs of visible
+  lines so missing content is visible. State lives in
+  `arx_core::filter::FilterState` (keyed per `BufferId` on `Editor`),
+  projected into `WindowState::excluded_lines` by the driver. The
+  gutter keeps painting *original* 1-indexed line numbers so gaps
+  are obvious.
+
+  Excluded-line indices on `FilterState` shift to track line
+  inserts/deletes from `user_edit` — matches KEDIT's
+  persistent-per-line selection-level semantics so filters follow
+  the *same source lines* across edits rather than going stale.
+  New lines born inside the shift gap are visible by default.
+
+**453 tests green** (up from Phase 1's 274).
 `cargo clippy --workspace --all-targets` clean under the workspace
 pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.

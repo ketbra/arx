@@ -32,6 +32,11 @@ pub struct Profile {
     /// Whether digits at the start of a sequence accumulate a count.
     /// Vim yes; Emacs no.
     pub count_mode: CountMode,
+    /// Whether the KEDIT-style persistent command line should be
+    /// enabled for this profile. Currently only the `kedit` profile
+    /// turns it on — the render layer paints the prompt row above
+    /// the modeline and commands can route focus to it.
+    pub enables_kedit_cmdline: bool,
 }
 
 /// The profile shipped by default.
@@ -174,6 +179,7 @@ pub fn emacs() -> Profile {
         global: Arc::new(m),
         startup_layer: None,
         count_mode: CountMode::Reject,
+        enables_kedit_cmdline: false,
     }
 }
 
@@ -474,7 +480,121 @@ pub fn vim() -> Profile {
         global: Arc::new(global),
         startup_layer: Some(("vim.normal".into(), Arc::new(normal))),
         count_mode: CountMode::Accept,
+        enables_kedit_cmdline: false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// KEDIT
+// ---------------------------------------------------------------------------
+
+/// KEDIT (Mansfield Software / XEDIT family) profile.
+///
+/// Ships the classic kedit keybindings: function keys for save / quit /
+/// scroll, `Alt-*` chords for block editing, and `F11` / `Home` to park
+/// the cursor on a persistent command line at the bottom of the screen.
+///
+/// The profile sets `enables_kedit_cmdline = true`, which the editor
+/// uses at startup to call [`crate::KeditState::enable`] so the prompt
+/// row is painted. Once enabled, the `kedit.focus-cmdline` command
+/// pushes the `kedit.cmdline` keymap layer (see
+/// [`kedit_cmdline_layer`]) and `kedit.focus-buffer` pops it back off.
+pub fn kedit() -> Profile {
+    let mut m = Keymap::named("kedit");
+
+    // Cursor motion — standard arrows, Home/End.
+    m.bind_str("<Left>", CURSOR_LEFT).unwrap();
+    m.bind_str("<Right>", CURSOR_RIGHT).unwrap();
+    m.bind_str("<Up>", CURSOR_UP).unwrap();
+    m.bind_str("<Down>", CURSOR_DOWN).unwrap();
+    m.bind_str("<Home>", KEDIT_TOGGLE_FOCUS).unwrap();
+    m.bind_str("<End>", CURSOR_LINE_END).unwrap();
+    m.bind_str("C-<Home>", CURSOR_BUFFER_START).unwrap();
+    m.bind_str("C-<End>", CURSOR_BUFFER_END).unwrap();
+    m.bind_str("C-<Left>", CURSOR_WORD_BACKWARD).unwrap();
+    m.bind_str("C-<Right>", CURSOR_WORD_FORWARD).unwrap();
+    m.bind_str("<PageUp>", SCROLL_PAGE_UP).unwrap();
+    m.bind_str("<PageDown>", SCROLL_PAGE_DOWN).unwrap();
+
+    // Basic editing.
+    m.bind_str("<Enter>", BUFFER_NEWLINE).unwrap();
+    m.bind_str("<Backspace>", BUFFER_DELETE_BACKWARD).unwrap();
+    m.bind_str("<Delete>", BUFFER_DELETE_FORWARD).unwrap();
+
+    // KEDIT function keys. PF1/F1=help, F2=save, F3=quit, F7=back,
+    // F8=forward, F10=next window, F11/F12=focus cmd line / buffer.
+    // (Authentic kedit has more, but these are the load-bearing few.)
+    m.bind_str("<F1>", COMMAND_PALETTE_OPEN).unwrap();
+    m.bind_str("<F2>", BUFFER_SAVE).unwrap();
+    m.bind_str("<F3>", EDITOR_QUIT).unwrap();
+    m.bind_str("<F7>", SCROLL_PAGE_UP).unwrap();
+    m.bind_str("<F8>", SCROLL_PAGE_DOWN).unwrap();
+    m.bind_str("<F10>", WINDOW_FOCUS_NEXT).unwrap();
+    m.bind_str("<F11>", KEDIT_FOCUS_CMDLINE).unwrap();
+    m.bind_str("<F12>", KEDIT_FOCUS_BUFFER).unwrap();
+
+    // Ctrl "modern" shortcuts — most kedit users expect these too.
+    m.bind_str("C-s", BUFFER_SAVE).unwrap();
+    m.bind_str("C-q", EDITOR_QUIT).unwrap();
+    m.bind_str("C-z", BUFFER_UNDO).unwrap();
+    m.bind_str("C-y", BUFFER_REDO).unwrap();
+    m.bind_str("C-g", EDITOR_CANCEL).unwrap();
+    m.bind_str("C-f", SEARCH_OPEN).unwrap();
+
+    // Block-editing Alt chords — the kedit classics.
+    m.bind_str("M-l", BLOCK_MARK_LINE).unwrap();
+    m.bind_str("M-b", BLOCK_MARK_BOX).unwrap();
+    m.bind_str("M-a", BLOCK_MARK_CHAR).unwrap();
+    m.bind_str("M-k", BLOCK_COPY).unwrap();
+    m.bind_str("M-m", BLOCK_MOVE).unwrap();
+    m.bind_str("M-d", BLOCK_DELETE).unwrap();
+    m.bind_str("M-p", BLOCK_PASTE).unwrap();
+    m.bind_str("M-u", BLOCK_UNMARK).unwrap();
+    m.bind_str("M-o", BLOCK_OVERLAY).unwrap();
+    m.bind_str("M-z", BLOCK_FILL).unwrap();
+
+    // Command palette / fallback access to full command catalogue.
+    m.bind_str("M-x", COMMAND_PALETTE_OPEN).unwrap();
+
+    // Window splits — same as Emacs' `C-x` prefix (kedit's SPLIT /
+    // FSLIST command-line equivalents are reachable via the cmd line
+    // once that's wired up).
+    m.bind_str("C-x 2", WINDOW_SPLIT_HORIZONTAL).unwrap();
+    m.bind_str("C-x 3", WINDOW_SPLIT_VERTICAL).unwrap();
+    m.bind_str("C-x 0", WINDOW_CLOSE).unwrap();
+    m.bind_str("C-x o", WINDOW_FOCUS_NEXT).unwrap();
+
+    Profile {
+        global: Arc::new(m),
+        startup_layer: None,
+        count_mode: CountMode::Reject,
+        enables_kedit_cmdline: true,
+    }
+}
+
+/// Keymap pushed on top of the kedit profile when the user gives the
+/// command line keyboard focus (via `F11` or `Home`). Every printable
+/// key falls through to the editor's printable-fallback path, which
+/// routes it to the cmd-line query when `KeditState::is_focused` is
+/// true. The few explicit bindings here handle navigation, editing
+/// the query, executing, and returning focus to the buffer.
+pub fn kedit_cmdline_layer() -> Keymap {
+    let mut m = Keymap::named("kedit.cmdline");
+    m.bind_str("<Enter>", KEDIT_CMDLINE_EXECUTE).unwrap();
+    m.bind_str("<Esc>", KEDIT_FOCUS_BUFFER).unwrap();
+    m.bind_str("<F11>", KEDIT_FOCUS_BUFFER).unwrap();
+    m.bind_str("<F12>", KEDIT_FOCUS_BUFFER).unwrap();
+    m.bind_str("<Home>", KEDIT_CMDLINE_CURSOR_HOME).unwrap();
+    m.bind_str("<End>", KEDIT_CMDLINE_CURSOR_END).unwrap();
+    m.bind_str("<Left>", KEDIT_CMDLINE_CURSOR_LEFT).unwrap();
+    m.bind_str("<Right>", KEDIT_CMDLINE_CURSOR_RIGHT).unwrap();
+    m.bind_str("<Backspace>", KEDIT_CMDLINE_BACKSPACE).unwrap();
+    m.bind_str("<Delete>", KEDIT_CMDLINE_DELETE_FORWARD).unwrap();
+    m.bind_str("<Up>", KEDIT_CMDLINE_HISTORY_PREV).unwrap();
+    m.bind_str("<Down>", KEDIT_CMDLINE_HISTORY_NEXT).unwrap();
+    m.bind_str("C-u", KEDIT_CMDLINE_CLEAR).unwrap();
+    m.bind_str("C-g", KEDIT_FOCUS_BUFFER).unwrap();
+    m
 }
 
 #[cfg(test)]
@@ -545,6 +665,80 @@ mod tests {
             assert_eq!(count, 5);
         } else {
             panic!("{last:?}");
+        }
+    }
+
+    fn feed_all(engine: &mut KeymapEngine, s: &str) -> FeedOutcome {
+        let seq = parse_sequence(s).unwrap();
+        let mut last = FeedOutcome::Pending;
+        for chord in seq {
+            last = engine.feed(chord);
+        }
+        last
+    }
+
+    #[test]
+    fn kedit_profile_enables_cmdline() {
+        let p = kedit();
+        assert!(p.enables_kedit_cmdline);
+    }
+
+    #[test]
+    fn kedit_function_keys_bound_to_save_quit_scroll() {
+        let p = kedit();
+        let mut engine = KeymapEngine::new(p.global);
+        for (seq, expected) in [
+            ("<F2>", BUFFER_SAVE),
+            ("<F3>", EDITOR_QUIT),
+            ("<F7>", SCROLL_PAGE_UP),
+            ("<F8>", SCROLL_PAGE_DOWN),
+            ("<F11>", KEDIT_FOCUS_CMDLINE),
+            ("<F12>", KEDIT_FOCUS_BUFFER),
+        ] {
+            if let FeedOutcome::Execute { command, .. } = feed_all(&mut engine, seq) {
+                assert_eq!(&*command.name, expected, "{seq} bound wrong");
+            } else {
+                panic!("{seq} did not resolve");
+            }
+        }
+    }
+
+    #[test]
+    fn kedit_alt_block_keys_bound() {
+        let p = kedit();
+        let mut engine = KeymapEngine::new(p.global);
+        for (seq, expected) in [
+            ("M-l", BLOCK_MARK_LINE),
+            ("M-b", BLOCK_MARK_BOX),
+            ("M-a", BLOCK_MARK_CHAR),
+            ("M-k", BLOCK_COPY),
+            ("M-m", BLOCK_MOVE),
+            ("M-d", BLOCK_DELETE),
+            ("M-p", BLOCK_PASTE),
+            ("M-u", BLOCK_UNMARK),
+            ("M-o", BLOCK_OVERLAY),
+            ("M-z", BLOCK_FILL),
+        ] {
+            if let FeedOutcome::Execute { command, .. } = feed_all(&mut engine, seq) {
+                assert_eq!(&*command.name, expected, "{seq} bound wrong");
+            } else {
+                panic!("{seq} did not resolve");
+            }
+        }
+    }
+
+    #[test]
+    fn kedit_cmdline_layer_binds_enter_and_escape() {
+        let layer = kedit_cmdline_layer();
+        let enter = parse_sequence("<Enter>").unwrap();
+        let esc = parse_sequence("<Esc>").unwrap();
+        match layer.lookup(&enter) {
+            crate::keymap::Lookup::Command(c) => assert_eq!(&*c.name, KEDIT_CMDLINE_EXECUTE),
+            other => panic!("{other:?}"),
+        }
+        match layer.lookup(&esc) {
+            crate::keymap::Lookup::Command(c) => assert_eq!(&*c.name, KEDIT_FOCUS_BUFFER),
+            other => panic!("{other:?}"),
         }
     }
 }

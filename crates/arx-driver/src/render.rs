@@ -21,12 +21,10 @@ use tracing::{debug, trace, warn};
 
 use arx_core::{CommandBus, Layout as CoreLayout, SplitAxis, WindowId as CoreWindowId};
 use arx_render::{
-    Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, LayoutTree,
-    PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SearchEntry, SearchView,
-    Selection, SplitDirection, TerminalSize,
-    TerminalViewCell, TerminalViewState, ViewState, WhichKeyEntry, WindowId as ViewWindowId,
-    WindowState, diff,
-    initial_paint, render,
+    Backend, CompletionEntry, CompletionView, Cursor, GlobalState, GutterConfig, KeditLineView,
+    LayoutTree, PaletteEntry, PaletteView, Rect, RenderTree, ScrollPosition, SearchEntry,
+    SearchView, Selection, SplitDirection, TerminalSize, TerminalViewCell, TerminalViewState,
+    ViewState, WhichKeyEntry, WindowId as ViewWindowId, WindowState, diff, initial_paint, render,
 };
 
 use crate::state::{SharedTerminalSize, Shutdown};
@@ -546,6 +544,13 @@ fn build_view_state_sync(
                     }
                 }
             });
+            // KEDIT `ALL` filter: project the per-buffer excluded
+            // line set into the ViewState so the renderer can skip
+            // hidden lines without reaching back into the editor.
+            let excluded_lines = editor
+                .filter(data.buffer_id)
+                .map(|f| f.excluded.clone())
+                .unwrap_or_default();
             windows.push(WindowState {
                 id: ViewWindowId(id.0),
                 buffer: snapshot,
@@ -556,6 +561,7 @@ fn build_view_state_sync(
                 },
                 gutter,
                 selection,
+                excluded_lines,
             });
         }
     }
@@ -711,11 +717,19 @@ fn build_global_state(
 
     // If there's a status message (hover info, LSP status), show it
     // in the modeline instead of the default line/byte info.
+    // KEDIT `ALL` / `MORE` / `LESS` filter chain + hidden-line
+    // count. Shown after the line-position info so users can tell at
+    // a glance how much of the buffer is filtered out and by which
+    // steps.
+    let filter_tag = editor
+        .filter(active_data.buffer_id)
+        .map(|f| format!("  [{chain} — {n} excluded]", chain = f.describe(), n = f.excluded_count()))
+        .unwrap_or_default();
     let left = if let Some(status) = editor.status_message() {
         status.to_owned()
     } else {
         format!(
-            "{label}{modified_tag}  (ln {}/{})",
+            "{label}{modified_tag}  (ln {}/{}){filter_tag}",
             snapshot.rope().byte_to_line(active_data.cursor_byte) + 1,
             snapshot.rope().len_lines(),
         )
@@ -755,6 +769,18 @@ fn build_global_state(
         None
     };
 
+    let kedit_line = if editor.kedit().is_enabled() {
+        Some(KeditLineView {
+            prompt: "====> ".to_owned(),
+            query: editor.kedit().query().to_owned(),
+            cursor: editor.kedit().cursor(),
+            focused: editor.kedit().is_focused(),
+            message: editor.kedit().message().map(str::to_owned),
+        })
+    } else {
+        None
+    };
+
     Some(GlobalState {
         modeline_left: left,
         modeline_right: format!("{} bytes", text.len()),
@@ -762,6 +788,7 @@ fn build_global_state(
         completion: completion_view,
         which_key,
         search: search_view,
+        kedit_line,
     })
 }
 
