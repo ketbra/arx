@@ -20,7 +20,7 @@ use std::io;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use arx_render::{Backend, DiffOp};
+use arx_render::{Backend, BackendResult, DiffOp};
 
 /// A [`Backend`] that forwards every `apply` batch into an
 /// [`UnboundedSender`] for a writer task to serialise.
@@ -59,7 +59,7 @@ impl Backend for RemoteBackend {
         (self.width, self.height)
     }
 
-    fn apply(&mut self, ops: &[DiffOp]) -> io::Result<()> {
+    fn apply(&mut self, ops: &[DiffOp]) -> BackendResult<()> {
         if ops.is_empty() {
             return Ok(());
         }
@@ -81,13 +81,13 @@ impl Backend for RemoteBackend {
         Ok(())
     }
 
-    fn present(&mut self) -> io::Result<()> {
+    fn present(&mut self) -> BackendResult<()> {
         // Nothing buffered at this layer — the writer task flushes the
         // underlying socket on every frame.
         Ok(())
     }
 
-    fn clear(&mut self) -> io::Result<()> {
+    fn clear(&mut self) -> BackendResult<()> {
         // A "clear" is a resize to the same dimensions: issue a Resize
         // op so the client repaints from a blank grid.
         self.apply(&[DiffOp::Resize {

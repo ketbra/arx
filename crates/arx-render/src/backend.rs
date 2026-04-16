@@ -1,7 +1,7 @@
-//! Terminal backends.
+//! Renderer backends.
 //!
 //! A [`Backend`] applies a sequence of [`DiffOp`]s to some output target.
-//! Two implementations ship with Phase 1:
+//! Three implementations live in the workspace today:
 //!
 //! * [`TestBackend`] — in-memory [`CellGrid`] that mirrors what a real
 //!   terminal would display. Tests diff a rendered [`RenderTree`] into a
@@ -13,8 +13,16 @@
 //!   `io::Write` target (`io::stdout()`, a `Vec<u8>` for byte-level tests,
 //!   a pipe to a pty for golden-master tests, etc.).
 //!
-//! Both satisfy the same [`Backend`] trait so callers (the editor's
-//! renderer task) don't care which they're driving.
+//! * `RemoteBackend` in `arx-driver` — ships [`DiffOp`] batches down an
+//!   IPC socket so the daemon can render for a remote client.
+//!
+//! A future `GpuBackend` in `arx-gui` will satisfy the same trait using
+//! `wgpu` + `cosmic-text`. The trait surfaces errors as [`BackendError`]
+//! so non-I/O backends (wgpu surface loss, font-atlas failures) aren't
+//! forced to masquerade as `io::Error`.
+//!
+//! All backends satisfy the same [`Backend`] trait so callers (the
+//! editor's renderer task) don't care which they're driving.
 
 use std::io::{self, Write};
 
@@ -25,6 +33,42 @@ use crate::diff::DiffOp;
 use crate::face::{Color, ResolvedFace};
 use crate::render_tree::{CursorRender, CursorStyle};
 use arx_buffer::UnderlineStyle;
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors a [`Backend`] can return from `apply` / `present` / `clear`.
+///
+/// TTY backends produce [`BackendError::Io`]; GPU/GUI backends can
+/// report their own errors as [`BackendError::Other`] without pretending
+/// to be I/O.
+#[derive(Debug, thiserror::Error)]
+pub enum BackendError {
+    /// An underlying [`io::Error`] — typical for TTY backends.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+
+    /// Any backend-specific error (e.g. wgpu surface lost, shaping
+    /// failure). The payload is `Box<dyn Error + Send + Sync>` so
+    /// implementations can forward arbitrary error types without
+    /// this crate depending on them.
+    #[error(transparent)]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl BackendError {
+    /// Wrap an arbitrary error as [`BackendError::Other`].
+    pub fn other<E>(err: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        BackendError::Other(err.into())
+    }
+}
+
+/// `Result` alias for [`Backend`] operations.
+pub type BackendResult<T> = Result<T, BackendError>;
 
 // ---------------------------------------------------------------------------
 // Trait
@@ -38,14 +82,14 @@ pub trait Backend {
     fn size(&self) -> (u16, u16);
 
     /// Apply a batch of [`DiffOp`]s.
-    fn apply(&mut self, ops: &[DiffOp]) -> io::Result<()>;
+    fn apply(&mut self, ops: &[DiffOp]) -> BackendResult<()>;
 
     /// Flush any buffered output to the underlying target.
-    fn present(&mut self) -> io::Result<()>;
+    fn present(&mut self) -> BackendResult<()>;
 
     /// Reset the backend to an empty state (blank cells, no cursor). Used
     /// on terminal resume or mode switches.
-    fn clear(&mut self) -> io::Result<()>;
+    fn clear(&mut self) -> BackendResult<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +134,7 @@ impl Backend for TestBackend {
         (self.grid.width(), self.grid.height())
     }
 
-    fn apply(&mut self, ops: &[DiffOp]) -> io::Result<()> {
+    fn apply(&mut self, ops: &[DiffOp]) -> BackendResult<()> {
         for op in ops {
             match op {
                 DiffOp::Resize { width, height } => {
@@ -111,11 +155,11 @@ impl Backend for TestBackend {
         Ok(())
     }
 
-    fn present(&mut self) -> io::Result<()> {
+    fn present(&mut self) -> BackendResult<()> {
         Ok(())
     }
 
-    fn clear(&mut self) -> io::Result<()> {
+    fn clear(&mut self) -> BackendResult<()> {
         self.grid.clear();
         self.cursor = None;
         Ok(())
@@ -231,7 +275,7 @@ impl<W: Write> Backend for CrosstermBackend<W> {
         (self.width, self.height)
     }
 
-    fn apply(&mut self, ops: &[DiffOp]) -> io::Result<()> {
+    fn apply(&mut self, ops: &[DiffOp]) -> BackendResult<()> {
         for op in ops {
             match op {
                 DiffOp::Resize { width, height } => {
@@ -262,15 +306,17 @@ impl<W: Write> Backend for CrosstermBackend<W> {
         Ok(())
     }
 
-    fn present(&mut self) -> io::Result<()> {
-        self.out.flush()
+    fn present(&mut self) -> BackendResult<()> {
+        self.out.flush()?;
+        Ok(())
     }
 
-    fn clear(&mut self) -> io::Result<()> {
+    fn clear(&mut self) -> BackendResult<()> {
         self.out.queue(terminal::Clear(terminal::ClearType::All))?;
         self.out.queue(cursor::MoveTo(0, 0))?;
         self.last_face = None;
-        self.out.flush()
+        self.out.flush()?;
+        Ok(())
     }
 }
 

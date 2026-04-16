@@ -131,7 +131,7 @@ async fn draw_once<B: Backend>(
     size: &SharedTerminalSize,
     frame_id: &mut u64,
     previous: &mut Option<RenderTree>,
-) -> std::io::Result<()> {
+) -> arx_render::BackendResult<()> {
     *frame_id = frame_id.wrapping_add(1);
     let (cols, rows) = size.get();
     let Some(state) = build_view_state(bus, cols, rows).await else {

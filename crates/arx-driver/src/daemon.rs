@@ -72,6 +72,8 @@ pub enum DaemonError {
     Transport(#[from] TransportError),
     #[error("IPC framing error: {0}")]
     Frame(#[from] FrameError),
+    #[error("renderer backend error: {0}")]
+    Backend(#[from] arx_render::BackendError),
     #[error("task join error")]
     Join(#[from] tokio::task::JoinError),
 }
@@ -629,10 +631,10 @@ impl DaemonClient {
             match msg {
                 DaemonMessage::RenderOps(ops) => {
                     if let Err(err) = backend.apply(&ops) {
-                        break Err(DaemonError::Io(err));
+                        break Err(DaemonError::Backend(err));
                     }
                     if let Err(err) = backend.present() {
-                        break Err(DaemonError::Io(err));
+                        break Err(DaemonError::Backend(err));
                     }
                 }
                 DaemonMessage::Shutdown(_) => break Ok(()),

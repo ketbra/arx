@@ -57,7 +57,7 @@ pub mod render_tree;
 pub mod view;
 pub mod view_state;
 
-pub use backend::{Backend, CrosstermBackend, TestBackend};
+pub use backend::{Backend, BackendError, BackendResult, CrosstermBackend, TestBackend};
 pub use cell::{Cell, CellFlags, CellGrid};
 pub use diff::{DiffOp, diff, initial_paint};
 pub use face::{Color, ResolvedFace};

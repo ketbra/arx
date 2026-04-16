@@ -15,6 +15,7 @@ arx-buffer = { workspace = true }
 bitflags = { workspace = true }
 compact_str = { workspace = true }
 smallvec = { workspace = true }
+thiserror = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 crossterm = { workspace = true }
