@@ -5,6 +5,7 @@ members = [
     "crates/arx-buffer",
     "crates/arx-core",
     "crates/arx-driver",
+    "crates/arx-gui",
     "crates/arx-highlight",
     "crates/arx-lsp",
     "crates/arx-terminal",
@@ -37,6 +38,7 @@ arx-lsp = { path = "crates/arx-lsp" }
 arx-terminal = { path = "crates/arx-terminal" }
 serde_json = "1"
 arx-core = { path = "crates/arx-core" }
+arx-gui = { path = "crates/arx-gui" }
 arx-render = { path = "crates/arx-render" }
 arx-driver = { path = "crates/arx-driver" }
 arx-keymap = { path = "crates/arx-keymap" }
