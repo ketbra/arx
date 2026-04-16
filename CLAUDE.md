@@ -121,22 +121,30 @@ and **completion framework** (item 5). The editor has:
   their own rows, box blocks round-trip through
   `column::{kill,yank}_rectangle`.
 
-- **(Phase 2)** **KEDIT `ALL` line filter** — `ALL <regex>` hides
-  every line that doesn't match the pattern; `ALL` alone clears the
-  filter; re-running `ALL` with a new pattern replaces the previous
-  filter (each invocation is evaluated against the full buffer).
-  Excluded lines are transparent to the renderer, cursor motion,
-  and the edit guard: they don't paint, they're skipped by
-  `cursor.up/down/page-*`, and any edit whose byte range touches an
+- **(Phase 2)** **KEDIT `ALL` / `MORE` / `LESS` line filter** —
+  `ALL <regex>` hides every line that doesn't match the pattern;
+  `ALL` alone clears the filter; re-running `ALL` with a new pattern
+  replaces the previous filter (each invocation is evaluated against
+  the full buffer). `MORE <pat>` narrows the current filter further
+  (only lines in the existing visible set matching `pat` stay),
+  `LESS <pat>` re-includes excluded lines matching `pat`. The chain
+  of steps is stored on `FilterState::steps` and surfaced in the
+  modeline as `ALL /foo/ MORE /bar/  — N excluded`. Excluded lines
+  are transparent to the renderer, cursor motion, and the edit
+  guard: they don't paint, they're skipped by `cursor.up/down/page-*`
+  and paragraph motion, and any edit whose byte range touches an
   excluded line is rejected at the single `user_edit` choke-point
   with a `"Edit blocked: excluded lines are read-only"` status.
-  State lives in `arx_core::filter::FilterState` (keyed per
-  `BufferId` on `Editor`), projected into `WindowState::excluded_lines`
-  by the driver. The gutter keeps painting *original* 1-indexed line
-  numbers so gaps are visible, and the modeline shows
-  `[ALL /pat/ N excluded]`.
+  `LOCATE` skips hits on excluded lines; `:N` snaps to the nearest
+  visible line when the target is hidden. The renderer paints a
+  dim `─── N lines hidden ───` gap row between runs of visible
+  lines so missing content is visible. State lives in
+  `arx_core::filter::FilterState` (keyed per `BufferId` on `Editor`),
+  projected into `WindowState::excluded_lines` by the driver. The
+  gutter keeps painting *original* 1-indexed line numbers so gaps
+  are obvious.
 
-**432 tests green** (up from Phase 1's 274).
+**446 tests green** (up from Phase 1's 274).
 `cargo clippy --workspace --all-targets` clean under the workspace
 pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.

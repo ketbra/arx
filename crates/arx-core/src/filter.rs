@@ -18,25 +18,83 @@ use std::collections::BTreeSet;
 
 use regex::Regex;
 
-/// State held per buffer that has an active `ALL` filter.
+/// One filter step applied to a buffer. The cumulative filter is the
+/// sequence of steps in order; the excluded-line set on
+/// [`FilterState`] is the result of replaying them all against the
+/// buffer. Kept separately so the modeline can show the history as
+/// `ALL /foo/ MORE /bar/` rather than just the last pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterStep {
+    pub kind: FilterStepKind,
+    pub pattern: String,
+}
+
+/// Which flavour of filter the step represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterStepKind {
+    /// `ALL <pattern>` — reset filter, then keep matching lines only.
+    All,
+    /// `MORE <pattern>` — narrow further: among currently visible
+    /// lines, keep only those also matching the new pattern.
+    More,
+    /// `LESS <pattern>` — broaden: re-include excluded lines that
+    /// match the new pattern.
+    Less,
+}
+
+impl FilterStepKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "ALL",
+            Self::More => "MORE",
+            Self::Less => "LESS",
+        }
+    }
+}
+
+/// State held per buffer that has an active `ALL` / `MORE` / `LESS`
+/// filter chain.
 ///
 /// [`excluded`](Self::excluded) is a `BTreeSet` so callers that scan
 /// for "next visible line after N" can use `range(N..)` in O(log n).
 #[derive(Debug, Clone)]
 pub struct FilterState {
-    /// The source pattern text the user typed (for display).
-    pub pattern: String,
-    /// The compiled regex, applied against each line's text.
-    pub regex: Regex,
+    /// History of filter steps, most recent last. Used by the
+    /// modeline for a compact display.
+    pub steps: Vec<FilterStep>,
     /// Buffer line indices (0-based) that are currently hidden.
     pub excluded: BTreeSet<usize>,
 }
 
 impl FilterState {
+    /// Pattern of the last applied step, for modeline display.
+    pub fn latest_pattern(&self) -> &str {
+        self.steps.last().map_or("", |s| s.pattern.as_str())
+    }
+
+    /// Compact one-line description of the filter chain, e.g.
+    /// `"ALL /foo/ MORE /bar/"`. Returns an empty string when no
+    /// steps are recorded.
+    pub fn describe(&self) -> String {
+        let mut out = String::new();
+        for (i, step) in self.steps.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            out.push_str(step.kind.label());
+            out.push_str(" /");
+            out.push_str(&step.pattern);
+            out.push('/');
+        }
+        out
+    }
+
     /// Compile `pattern` and scan `text` line-by-line, returning a
     /// fresh `FilterState` whose `excluded` set contains every line
     /// that *doesn't* match. Returns a `regex::Error` if the pattern
-    /// is malformed.
+    /// is malformed. This is the `ALL` entry point; subsequent
+    /// narrowing/broadening goes through [`Self::narrow`] /
+    /// [`Self::broaden`].
     pub fn build(pattern: &str, text: &str) -> Result<Self, regex::Error> {
         let regex = Regex::new(pattern)?;
         let mut excluded = BTreeSet::new();
@@ -46,10 +104,46 @@ impl FilterState {
             }
         }
         Ok(Self {
-            pattern: pattern.to_owned(),
-            regex,
+            steps: vec![FilterStep {
+                kind: FilterStepKind::All,
+                pattern: pattern.to_owned(),
+            }],
             excluded,
         })
+    }
+
+    /// `MORE <pattern>`: narrow the filter further. Lines that were
+    /// already hidden stay hidden; lines that were visible are
+    /// re-tested against the new pattern and excluded if they don't
+    /// match. Pushes a step onto `steps`.
+    pub fn narrow(&mut self, pattern: &str, text: &str) -> Result<(), regex::Error> {
+        let regex = Regex::new(pattern)?;
+        for (i, line) in text.split('\n').enumerate() {
+            if !self.excluded.contains(&i) && !regex.is_match(line) {
+                self.excluded.insert(i);
+            }
+        }
+        self.steps.push(FilterStep {
+            kind: FilterStepKind::More,
+            pattern: pattern.to_owned(),
+        });
+        Ok(())
+    }
+
+    /// `LESS <pattern>`: broaden the filter. Excluded lines that now
+    /// match the pattern are re-included. Pushes a step onto `steps`.
+    pub fn broaden(&mut self, pattern: &str, text: &str) -> Result<(), regex::Error> {
+        let regex = Regex::new(pattern)?;
+        let lines: Vec<&str> = text.split('\n').collect();
+        self.excluded.retain(|&i| {
+            let Some(line) = lines.get(i) else { return true };
+            !regex.is_match(line)
+        });
+        self.steps.push(FilterStep {
+            kind: FilterStepKind::Less,
+            pattern: pattern.to_owned(),
+        });
+        Ok(())
     }
 
     /// Is `line` hidden by this filter?
@@ -224,5 +318,65 @@ mod tests {
         let f = FilterState::build("foo", "foo\nbar\nfoo").unwrap();
         assert_eq!(f.snap_to_visible(0, 3), 0);
         assert_eq!(f.snap_to_visible(2, 3), 2);
+    }
+
+    #[test]
+    fn narrow_hides_additional_non_matching_lines() {
+        // Buffer: 0 "foo alpha", 1 "foo beta", 2 "bar alpha", 3 "foo alpha"
+        let text = "foo alpha\nfoo beta\nbar alpha\nfoo alpha";
+        let mut f = FilterState::build("foo", text).unwrap();
+        // After ALL /foo/: 0, 1, 3 visible; 2 excluded.
+        assert_eq!(f.excluded_count(), 1);
+        // MORE /alpha/: among visible, keep only those matching alpha.
+        // So 1 "foo beta" gets excluded too. Final visible: 0, 3.
+        f.narrow("alpha", text).unwrap();
+        assert_eq!(f.excluded_count(), 2);
+        assert!(f.is_excluded(1));
+        assert!(f.is_excluded(2));
+        assert!(!f.is_excluded(0));
+        assert!(!f.is_excluded(3));
+    }
+
+    #[test]
+    fn narrow_does_not_revive_already_hidden_lines() {
+        // Line 2 "bar alpha" was hidden by ALL /foo/; MORE /alpha/
+        // must not bring it back just because it matches alpha.
+        let text = "foo alpha\nbar alpha\nfoo beta";
+        let mut f = FilterState::build("foo", text).unwrap();
+        f.narrow("alpha", text).unwrap();
+        assert!(f.is_excluded(1), "bar alpha should stay hidden");
+    }
+
+    #[test]
+    fn broaden_reincludes_matching_excluded_lines() {
+        let text = "foo\nbar\nbaz\nbar";
+        // ALL /foo/: excluded = {1, 2, 3}.
+        let mut f = FilterState::build("foo", text).unwrap();
+        assert_eq!(f.excluded_count(), 3);
+        // LESS /bar/: re-include 1 and 3; 2 stays excluded.
+        f.broaden("bar", text).unwrap();
+        assert_eq!(f.excluded_count(), 1);
+        assert!(f.is_excluded(2));
+        assert!(!f.is_excluded(1));
+        assert!(!f.is_excluded(3));
+    }
+
+    #[test]
+    fn narrow_rejects_invalid_regex_and_leaves_state_unchanged() {
+        let text = "foo\nbar";
+        let mut f = FilterState::build("foo", text).unwrap();
+        let before = f.excluded.clone();
+        let result = f.narrow("(", text);
+        assert!(result.is_err());
+        assert_eq!(f.excluded, before);
+    }
+
+    #[test]
+    fn describe_shows_chain() {
+        let text = "foo alpha\nfoo beta\nbar alpha";
+        let mut f = FilterState::build("foo", text).unwrap();
+        f.narrow("alpha", text).unwrap();
+        f.broaden("beta", text).unwrap();
+        assert_eq!(f.describe(), "ALL /foo/ MORE /alpha/ LESS /beta/");
     }
 }

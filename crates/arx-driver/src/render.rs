@@ -717,12 +717,13 @@ fn build_global_state(
 
     // If there's a status message (hover info, LSP status), show it
     // in the modeline instead of the default line/byte info.
-    // KEDIT `ALL` hidden-line count. Shown after the line-position
-    // info so users can tell at a glance how much of the buffer is
-    // filtered out.
+    // KEDIT `ALL` / `MORE` / `LESS` filter chain + hidden-line
+    // count. Shown after the line-position info so users can tell at
+    // a glance how much of the buffer is filtered out and by which
+    // steps.
     let filter_tag = editor
         .filter(active_data.buffer_id)
-        .map(|f| format!("  [ALL /{pat}/  {n} excluded]", pat = f.pattern, n = f.excluded_count()))
+        .map(|f| format!("  [{chain} — {n} excluded]", chain = f.describe(), n = f.excluded_count()))
         .unwrap_or_default();
     let left = if let Some(status) = editor.status_message() {
         status.to_owned()

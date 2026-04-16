@@ -579,6 +579,15 @@ impl Editor {
         self.filters.get(&buffer_id)
     }
 
+    /// Mutable borrow of the line-exclusion filter for `buffer_id`,
+    /// for incremental updates (e.g. `MORE` / `LESS`).
+    pub fn filter_mut(
+        &mut self,
+        buffer_id: arx_buffer::BufferId,
+    ) -> Option<&mut FilterState> {
+        self.filters.get_mut(&buffer_id)
+    }
+
     /// Install (or replace) the line-exclusion filter for `buffer_id`.
     pub fn set_filter(&mut self, buffer_id: arx_buffer::BufferId, filter: FilterState) {
         self.filters.insert(buffer_id, filter);
