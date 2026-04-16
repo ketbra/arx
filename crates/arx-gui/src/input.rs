@@ -14,8 +14,11 @@
 //! * Anything we don't recognise returns `None`; the caller just
 //!   drops the event.
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use winit::event::{ElementState, KeyEvent as WinitKeyEvent};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton as XtermMouseButton, MouseEvent,
+    MouseEventKind,
+};
+use winit::event::{ElementState, KeyEvent as WinitKeyEvent, MouseButton, MouseScrollDelta};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// Convert a winit key event to a `crossterm::event::Event`.
@@ -107,6 +110,84 @@ pub(crate) fn translate_named_key(named: NamedKey) -> Option<KeyCode> {
         N::F12 => KeyCode::F(12),
         _ => return None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Mouse translation
+// ---------------------------------------------------------------------------
+
+/// Translate a winit mouse-button press/release into a crossterm
+/// [`MouseEvent`]. Coordinates must already be in cell space.
+pub fn translate_mouse_button(
+    button: MouseButton,
+    state: ElementState,
+    col: u16,
+    row: u16,
+    mods: ModifiersState,
+) -> Option<Event> {
+    let xbutton = match button {
+        MouseButton::Left => XtermMouseButton::Left,
+        MouseButton::Right => XtermMouseButton::Right,
+        MouseButton::Middle => XtermMouseButton::Middle,
+        _ => return None,
+    };
+    let kind = match state {
+        ElementState::Pressed => MouseEventKind::Down(xbutton),
+        ElementState::Released => MouseEventKind::Up(xbutton),
+    };
+    Some(Event::Mouse(MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: translate_mods(mods),
+    }))
+}
+
+/// Translate a winit cursor-move into a crossterm drag event.
+///
+/// Only generates a drag event for the left button (the editor only
+/// handles left-drag). Caller should only call this while the left
+/// button is held.
+pub fn translate_mouse_drag(col: u16, row: u16, mods: ModifiersState) -> Event {
+    Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Drag(XtermMouseButton::Left),
+        column: col,
+        row,
+        modifiers: translate_mods(mods),
+    })
+}
+
+/// Translate a winit scroll event into crossterm scroll events.
+///
+/// Winit reports scroll in fractional pixels or lines depending on
+/// the device. We collapse into `ScrollUp` / `ScrollDown` lines.
+pub fn translate_scroll(
+    delta: MouseScrollDelta,
+    col: u16,
+    row: u16,
+    mods: ModifiersState,
+) -> Option<Event> {
+    let lines = match delta {
+        MouseScrollDelta::LineDelta(_, y) => y,
+        MouseScrollDelta::PixelDelta(pos) => {
+            // Convert pixels to approximate lines (16px ≈ 1 line).
+            (pos.y / 16.0) as f32
+        }
+    };
+    if lines.abs() < 0.1 {
+        return None;
+    }
+    let kind = if lines > 0.0 {
+        MouseEventKind::ScrollUp
+    } else {
+        MouseEventKind::ScrollDown
+    };
+    Some(Event::Mouse(MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: translate_mods(mods),
+    }))
 }
 
 #[cfg(test)]

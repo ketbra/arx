@@ -13,7 +13,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tracing::warn;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{StartCause, WindowEvent};
+use winit::event::{ElementState, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -87,6 +87,10 @@ struct RunningState {
     term_size: SharedTerminalSize,
     /// Current modifier state.
     modifiers: ModifiersState,
+    /// Last known cursor position in window-local pixels.
+    cursor_pos: (f64, f64),
+    /// Whether the left mouse button is currently held.
+    left_pressed: bool,
 }
 
 impl GuiApp {
@@ -187,6 +191,8 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             input_tx,
             term_size,
             modifiers: ModifiersState::empty(),
+            cursor_pos: (0.0, 0.0),
+            left_pressed: false,
         });
     }
 
@@ -254,6 +260,36 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     // Surface needs reconfiguring.
                     let size = state.window.inner_size();
                     state.renderer.resize(size.width, size.height);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                state.cursor_pos = (position.x, position.y);
+                if state.left_pressed {
+                    let (col, row) =
+                        state.renderer.pixel_to_cell(position.x, position.y);
+                    let ev = input::translate_mouse_drag(col, row, state.modifiers);
+                    let _ = state.input_tx.send(Ok(ev));
+                }
+            }
+            WindowEvent::MouseInput { state: btn_state, button, .. } => {
+                if button == winit::event::MouseButton::Left {
+                    state.left_pressed = btn_state == ElementState::Pressed;
+                }
+                let (col, row) =
+                    state.renderer.pixel_to_cell(state.cursor_pos.0, state.cursor_pos.1);
+                if let Some(ev) = input::translate_mouse_button(
+                    button, btn_state, col, row, state.modifiers,
+                ) {
+                    let _ = state.input_tx.send(Ok(ev));
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (col, row) =
+                    state.renderer.pixel_to_cell(state.cursor_pos.0, state.cursor_pos.1);
+                if let Some(ev) =
+                    input::translate_scroll(delta, col, row, state.modifiers)
+                {
+                    let _ = state.input_tx.send(Ok(ev));
                 }
             }
             _ => {}

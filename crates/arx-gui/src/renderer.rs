@@ -356,6 +356,16 @@ impl GuiRenderer {
         );
     }
 
+    /// Convert window-local pixel coordinates to cell-grid `(col, row)`.
+    /// Clamps to `(grid_width - 1, grid_height - 1)`.
+    pub fn pixel_to_cell(&self, px: f64, py: f64) -> (u16, u16) {
+        let col = (px as f32 / self.cell_w).floor().max(0.0) as u16;
+        let row = (py as f32 / self.cell_h).floor().max(0.0) as u16;
+        let max_col = self.grid.width().saturating_sub(1);
+        let max_row = self.grid.height().saturating_sub(1);
+        (col.min(max_col), row.min(max_row))
+    }
+
     pub fn apply_ops(&mut self, ops: &[DiffOp]) {
         for op in ops {
             match op {
