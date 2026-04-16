@@ -1,0 +1,32 @@
+[package]
+name = "arx-gui"
+description = "Arx GUI frontend: wgpu + glyphon + winit backend for the Arx editor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arx-core = { workspace = true }
+arx-driver = { workspace = true }
+arx-keymap = { workspace = true }
+arx-render = { workspace = true }
+compact_str = { workspace = true }
+crossterm = { workspace = true }
+futures-util = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tracing = { workspace = true }
+
+# GUI-specific
+bytemuck = { version = "1", features = ["derive"] }
+glyphon = "0.11"
+pollster = "0.4"
+wgpu = { version = "29", features = ["wgsl"] }
+winit = "0.30"

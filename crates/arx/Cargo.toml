@@ -14,10 +14,15 @@ workspace = true
 name = "arx"
 path = "src/main.rs"
 
+[features]
+default = ["gui"]
+gui = ["dep:arx-gui"]
+
 [dependencies]
 arx-buffer = { workspace = true }
 arx-core = { workspace = true }
 arx-driver = { workspace = true }
+arx-gui = { workspace = true, optional = true }
 arx-keymap = { workspace = true }
 arx-protocol = { workspace = true }
 clap = { workspace = true }

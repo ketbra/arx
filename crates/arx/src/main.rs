@@ -42,6 +42,11 @@ struct Cli {
     #[arg(long, default_value = "emacs")]
     keymap: String,
 
+    /// Launch the GPU-rendered GUI frontend instead of the terminal
+    /// UI. Requires a windowing system (X11/Wayland/macOS/Windows).
+    #[arg(long)]
+    gui: bool,
+
     #[command(subcommand)]
     mode: Option<Mode>,
 }
@@ -151,6 +156,26 @@ async fn main() -> ExitCode {
         "kedit" => arx_keymap::profiles::kedit(),
         _ => arx_keymap::profiles::emacs(),
     };
+    // GUI mode runs on the main thread (winit requirement) and
+    // manages its own tokio runtime, so handle it before matching
+    // the other modes.
+    #[cfg(feature = "gui")]
+    if cli.gui {
+        let file = cli.files.into_iter().next();
+        return match arx_gui::run_gui(file, profile) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("arx: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(not(feature = "gui"))]
+    if cli.gui {
+        eprintln!("arx: GUI support not compiled in (enable the 'gui' feature)");
+        return ExitCode::FAILURE;
+    }
+
     let result = match cli.mode {
         None => run_embedded(cli.files, profile).await,
         Some(Mode::Session { action, socket }) => {

@@ -168,13 +168,13 @@ impl arx_render::Backend for SharedBackend {
     fn size(&self) -> (u16, u16) {
         self.inner.lock().unwrap().size()
     }
-    fn apply(&mut self, ops: &[arx_render::DiffOp]) -> std::io::Result<()> {
+    fn apply(&mut self, ops: &[arx_render::DiffOp]) -> arx_render::BackendResult<()> {
         self.inner.lock().unwrap().apply(ops)
     }
-    fn present(&mut self) -> std::io::Result<()> {
+    fn present(&mut self) -> arx_render::BackendResult<()> {
         self.inner.lock().unwrap().present()
     }
-    fn clear(&mut self) -> std::io::Result<()> {
+    fn clear(&mut self) -> arx_render::BackendResult<()> {
         self.inner.lock().unwrap().clear()
     }
 }
