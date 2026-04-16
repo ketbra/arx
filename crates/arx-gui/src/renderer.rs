@@ -15,8 +15,8 @@
 
 use glyphon::{
     Attrs, Buffer as GlyphonBuffer, Cache as GlyphonCache, Color as GlyphonColor, Family,
-    FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
-    TextRenderer, Viewport,
+    FontSystem, Metrics, Resolution, Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds,
+    TextRenderer, Viewport, Weight,
 };
 use wgpu::util::DeviceExt;
 
@@ -88,6 +88,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return in.color;
 }
 ";
+
+// ---------------------------------------------------------------------------
+// Span coalescing helper
+// ---------------------------------------------------------------------------
+
+/// Style key for run-length coalescing of text spans.
+struct SpanStyle {
+    fg: ArxColor,
+    bold: bool,
+    italic: bool,
+}
+
+impl SpanStyle {
+    fn matches(&self, fg: ArxColor, bold: bool, italic: bool) -> bool {
+        self.fg == fg && self.bold == bold && self.italic == italic
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Renderer
@@ -433,9 +450,18 @@ impl GuiRenderer {
             Some(self.surface_config.height as f32),
         );
 
-        let mut owned_strings: Vec<String> = Vec::with_capacity(gh as usize);
+        // Build per-cell spans so each cell's fg colour, bold, and
+        // italic from the editor (syntax highlighting, modeline,
+        // diagnostics, etc.) are preserved. Consecutive cells with
+        // the same style are coalesced into a single span.
+        let mut spans: Vec<(String, SpanStyle)> = Vec::new();
         for row in 0..gh {
-            let mut row_text = String::new();
+            let mut run_text = String::new();
+            let mut run_style = SpanStyle {
+                fg: theme_fg,
+                bold: false,
+                italic: false,
+            };
             for col in 0..gw {
                 if let Some(cell) = self.grid.get(col, row) {
                     if cell
@@ -444,25 +470,39 @@ impl GuiRenderer {
                     {
                         continue;
                     }
-                    row_text.push_str(&cell.grapheme);
+                    let fg = cell.face.fg;
+                    let bold = cell.face.bold;
+                    let italic = cell.face.italic;
+                    if !run_style.matches(fg, bold, italic) && !run_text.is_empty() {
+                        spans.push((std::mem::take(&mut run_text), run_style));
+                        run_style = SpanStyle { fg, bold, italic };
+                    }
+                    run_text.push_str(&cell.grapheme);
                 } else {
-                    row_text.push(' ');
+                    run_text.push(' ');
                 }
             }
-            row_text.push('\n');
-            owned_strings.push(row_text);
+            run_text.push('\n');
+            spans.push((
+                std::mem::take(&mut run_text),
+                run_style,
+            ));
         }
 
         let default_attrs = Attrs::new().family(Family::Monospace);
-        let rich: Vec<(&str, Attrs)> = owned_strings
+        let rich: Vec<(&str, Attrs)> = spans
             .iter()
-            .map(|s| {
-                (
-                    s.as_str(),
-                    Attrs::new()
-                        .family(Family::Monospace)
-                        .color(arx_to_glyphon_color(theme_fg)),
-                )
+            .map(|(text, style)| {
+                let mut attrs = Attrs::new()
+                    .family(Family::Monospace)
+                    .color(arx_to_glyphon_color(style.fg));
+                if style.bold {
+                    attrs = attrs.weight(Weight::BOLD);
+                }
+                if style.italic {
+                    attrs = attrs.style(Style::Italic);
+                }
+                (text.as_str(), attrs)
             })
             .collect();
         text_buf.set_rich_text(
