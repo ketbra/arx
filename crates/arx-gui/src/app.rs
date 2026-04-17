@@ -184,6 +184,12 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             })
             .expect("spawn tokio thread");
 
+        // Request keyboard focus so the window receives mouse-wheel
+        // events immediately — many Linux WMs (X11 click-to-focus,
+        // Wayland) only route scroll to the focused surface.
+        window.focus_window();
+        window.request_redraw();
+
         self.state = Some(RunningState {
             window,
             renderer,
