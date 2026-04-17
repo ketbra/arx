@@ -292,17 +292,31 @@ impl From<&crossterm::event::KeyEvent> for KeyChord {
         //   terminals (SHIFT on the base key, not the result).
         //   Re-apply the shift so the chord matches "C-_".
         //
-        // Problem 2: Legacy terminals send Ctrl+/ and Ctrl+_ both
-        //   as the raw ASCII control character 0x1F (Unit Separator)
-        //   with no CONTROL modifier. Reconstruct the chord so "C-/"
-        //   and "C-_" bindings match.
+        // Problem 2: Legacy terminals without the Kitty keyboard
+        //   protocol send Ctrl+/, Ctrl+_, and Ctrl+? all as the raw
+        //   ASCII control byte 0x1F (Unit Separator). Crossterm 0.28
+        //   decodes bytes in 0x1C..=0x1F as `KeyCode::Char('4'..'7')
+        //   + CONTROL` (see crossterm's `parse_event`), so what we
+        //   actually receive for Ctrl+_ is `Char('7')` + CONTROL,
+        //   not `Char('\x1f')`. Remap to the canonical C-/ so the
+        //   undo binding fires. Trade-off: in Kitty-protocol
+        //   terminals a genuine Ctrl+7 is also reported as
+        //   `Char('7')` + CONTROL, and would be remapped here too;
+        //   the editor doesn't bind C-7, so the binding falls
+        //   through as C-/ instead.
+        //
+        //   Defensive: we also handle `Char('\x1f')` directly in
+        //   case a future crossterm stops collapsing the raw byte.
         match key {
             Key::Char('-') if modifiers.ctrl && ev.modifiers.contains(XtermMods::SHIFT) => {
                 key = Key::Char('_');
             }
+            Key::Char('7')
+                if modifiers.ctrl && !ev.modifiers.contains(XtermMods::SHIFT) =>
+            {
+                key = Key::Char('/');
+            }
             Key::Char('\x1f') => {
-                // 0x1F is the ASCII code for Ctrl+/ and Ctrl+_.
-                // Map it to C-/ which is the canonical binding.
                 key = Key::Char('/');
                 modifiers.ctrl = true;
             }
@@ -432,6 +446,32 @@ mod tests {
         let ev = KeyEvent::new(KeyCode::Char('\x1f'), XM::CONTROL);
         let chord = KeyChord::from(&ev);
         assert_eq!(chord.key, Key::Char('/'));
+        assert!(chord.modifiers.ctrl);
+    }
+
+    #[test]
+    fn ctrl_7_from_legacy_terminal_normalizes_to_ctrl_slash() {
+        // Legacy terminals (no Kitty protocol) send Ctrl+/, Ctrl+_,
+        // and Ctrl+? as the raw byte 0x1F. Crossterm 0.28 decodes
+        // that byte to `KeyCode::Char('7')` + CONTROL — not
+        // `Char('\x1f')`. Without remapping, C-/ and C-_ bindings
+        // (undo) would never fire in those terminals.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as XM};
+        let ev = KeyEvent::new(KeyCode::Char('7'), XM::CONTROL);
+        let chord = KeyChord::from(&ev);
+        assert_eq!(chord.key, Key::Char('/'));
+        assert!(chord.modifiers.ctrl);
+        assert!(!chord.modifiers.shift);
+    }
+
+    #[test]
+    fn ctrl_shift_7_keeps_original_char() {
+        // Ctrl+Shift+7 (not a remap target) must keep its char so
+        // the binding engine can dispatch it unchanged.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as XM};
+        let ev = KeyEvent::new(KeyCode::Char('7'), XM::CONTROL | XM::SHIFT);
+        let chord = KeyChord::from(&ev);
+        assert_eq!(chord.key, Key::Char('7'));
         assert!(chord.modifiers.ctrl);
     }
 }
