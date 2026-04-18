@@ -1,26 +1,170 @@
 //! LSP server configuration: which command to run for which language.
+//!
+//! Two shapes coexist:
+//!
+//! * [`LspServerConfig`] — the `&'static`-backed built-in registry
+//!   baked into the binary for well-known languages.
+//! * [`OwnedLspServerConfig`] — heap-owned entries sourced from the
+//!   user's config file.
+//!
+//! [`LspRegistry`] merges both. [`ResolvedLspConfig`] is the borrow
+//! the client uses to spawn a server; callers should use
+//! [`LspRegistry::config_for_extension`] /
+//! [`LspRegistry::config_for_language_id`] rather than the raw
+//! lookups directly.
 
-/// Configuration for one LSP server.
+/// Configuration for one built-in LSP server.
 #[derive(Debug, Clone)]
 pub struct LspServerConfig {
-    /// Human-readable language name (`"Rust"`, `"Python"`, ...).
     pub name: &'static str,
-    /// The LSP `languageId` string sent in `textDocument/didOpen`.
     pub language_id: &'static str,
-    /// Command to spawn (e.g. `"rust-analyzer"`).
     pub command: &'static str,
-    /// Arguments to pass to the command.
     pub args: &'static [&'static str],
-    /// File-name patterns used to detect the workspace root. Walk up
-    /// from the file's directory and stop at the first directory that
-    /// contains any of these.
     pub root_markers: &'static [&'static str],
-    /// File extensions this server handles (without the leading dot).
     pub extensions: &'static [&'static str],
 }
 
-/// Look up the server config for a file extension. Returns `None` for
-/// extensions that don't have a known LSP server.
+/// User-supplied override/extension of the registry. Wins over a
+/// built-in with the same `language_id`; adds a new entry when the
+/// `language_id` doesn't match any built-in.
+#[derive(Debug, Clone)]
+pub struct OwnedLspServerConfig {
+    pub name: String,
+    pub language_id: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub root_markers: Vec<String>,
+    pub extensions: Vec<String>,
+    pub initialization_options: Option<serde_json::Value>,
+}
+
+/// A resolved config ready to be spawned. Borrows from either the
+/// static registry or a heap-owned override so the hot path doesn't
+/// allocate.
+#[derive(Debug)]
+pub enum ResolvedLspConfig<'a> {
+    Builtin(&'a LspServerConfig),
+    Override(&'a OwnedLspServerConfig),
+}
+
+impl ResolvedLspConfig<'_> {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Builtin(c) => c.name,
+            Self::Override(c) => &c.name,
+        }
+    }
+
+    pub fn language_id(&self) -> &str {
+        match self {
+            Self::Builtin(c) => c.language_id,
+            Self::Override(c) => &c.language_id,
+        }
+    }
+
+    pub fn command(&self) -> &str {
+        match self {
+            Self::Builtin(c) => c.command,
+            Self::Override(c) => &c.command,
+        }
+    }
+
+    /// Arguments to pass to the server process. Iterator form so
+    /// callers don't have to distinguish `&[&str]` vs `Vec<String>`.
+    pub fn args(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+        match self {
+            Self::Builtin(c) => Box::new(c.args.iter().copied()),
+            Self::Override(c) => Box::new(c.args.iter().map(String::as_str)),
+        }
+    }
+
+    pub fn root_markers(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+        match self {
+            Self::Builtin(c) => Box::new(c.root_markers.iter().copied()),
+            Self::Override(c) => Box::new(c.root_markers.iter().map(String::as_str)),
+        }
+    }
+
+    pub fn extensions(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+        match self {
+            Self::Builtin(c) => Box::new(c.extensions.iter().copied()),
+            Self::Override(c) => Box::new(c.extensions.iter().map(String::as_str)),
+        }
+    }
+
+    /// The user-specified `initializationOptions` to send with
+    /// `initialize`. Built-ins never carry these today — only
+    /// overrides can.
+    pub fn initialization_options(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Builtin(_) => None,
+            Self::Override(c) => c.initialization_options.as_ref(),
+        }
+    }
+}
+
+/// Merged view over built-in and user-provided server configs. Cheap
+/// to construct; clones of the underlying data are not made.
+#[derive(Debug, Clone)]
+pub struct LspRegistry {
+    overrides: Vec<OwnedLspServerConfig>,
+}
+
+impl LspRegistry {
+    /// Registry with no user overrides — identical to the legacy
+    /// behaviour.
+    pub fn builtin_only() -> Self {
+        Self { overrides: Vec::new() }
+    }
+
+    /// Registry with a user-supplied override list. Overrides are
+    /// searched before built-ins.
+    pub fn with_overrides(overrides: Vec<OwnedLspServerConfig>) -> Self {
+        Self { overrides }
+    }
+
+    /// Borrow the user overrides (for diagnostics/tests).
+    pub fn overrides(&self) -> &[OwnedLspServerConfig] {
+        &self.overrides
+    }
+
+    /// Resolve a server by file extension. Overrides win; built-ins
+    /// are the fallback.
+    pub fn config_for_extension(&self, ext: &str) -> Option<ResolvedLspConfig<'_>> {
+        if let Some(o) = self
+            .overrides
+            .iter()
+            .find(|o| o.extensions.iter().any(|e| e == ext))
+        {
+            return Some(ResolvedLspConfig::Override(o));
+        }
+        BUILTIN_CONFIGS
+            .iter()
+            .find(|c| c.extensions.contains(&ext))
+            .map(ResolvedLspConfig::Builtin)
+    }
+
+    /// Resolve a server by LSP `languageId`. Overrides win.
+    pub fn config_for_language_id(&self, id: &str) -> Option<ResolvedLspConfig<'_>> {
+        if let Some(o) = self.overrides.iter().find(|o| o.language_id == id) {
+            return Some(ResolvedLspConfig::Override(o));
+        }
+        BUILTIN_CONFIGS
+            .iter()
+            .find(|c| c.language_id == id)
+            .map(ResolvedLspConfig::Builtin)
+    }
+}
+
+impl Default for LspRegistry {
+    fn default() -> Self {
+        Self::builtin_only()
+    }
+}
+
+/// Look up the server config for a file extension in the built-in
+/// registry only. Kept for backward-compat; prefer
+/// [`LspRegistry::config_for_extension`].
 pub fn config_for_extension(ext: &str) -> Option<&'static LspServerConfig> {
     BUILTIN_CONFIGS.iter().find(|c| c.extensions.contains(&ext))
 }
@@ -169,5 +313,77 @@ mod tests {
     #[test]
     fn unknown_returns_none() {
         assert!(config_for_extension("zzz").is_none());
+    }
+
+    fn py_override() -> OwnedLspServerConfig {
+        OwnedLspServerConfig {
+            name: "Python (pylsp)".into(),
+            language_id: "python".into(),
+            command: "pylsp".into(),
+            args: vec!["--stdio".into()],
+            root_markers: vec!["pyproject.toml".into()],
+            extensions: vec!["py".into()],
+            initialization_options: None,
+        }
+    }
+
+    #[test]
+    fn registry_override_wins_over_builtin_by_language_id() {
+        let reg = LspRegistry::with_overrides(vec![py_override()]);
+        let got = reg.config_for_language_id("python").unwrap();
+        assert_eq!(got.command(), "pylsp");
+        assert!(matches!(got, ResolvedLspConfig::Override(_)));
+    }
+
+    #[test]
+    fn registry_override_wins_over_builtin_by_extension() {
+        let reg = LspRegistry::with_overrides(vec![py_override()]);
+        let got = reg.config_for_extension("py").unwrap();
+        assert_eq!(got.command(), "pylsp");
+    }
+
+    #[test]
+    fn registry_falls_back_to_builtin() {
+        let reg = LspRegistry::with_overrides(vec![py_override()]);
+        let got = reg.config_for_extension("rs").unwrap();
+        assert_eq!(got.command(), "rust-analyzer");
+        assert!(matches!(got, ResolvedLspConfig::Builtin(_)));
+    }
+
+    #[test]
+    fn registry_extends_for_new_language_id() {
+        let elm = OwnedLspServerConfig {
+            name: "Elm".into(),
+            language_id: "elm".into(),
+            command: "elm-language-server".into(),
+            args: vec![],
+            root_markers: vec!["elm.json".into()],
+            extensions: vec!["elm".into()],
+            initialization_options: None,
+        };
+        let reg = LspRegistry::with_overrides(vec![elm]);
+        let got = reg.config_for_extension("elm").unwrap();
+        assert_eq!(got.command(), "elm-language-server");
+    }
+
+    #[test]
+    fn builtin_only_matches_static() {
+        let reg = LspRegistry::builtin_only();
+        assert_eq!(
+            reg.config_for_extension("rs").unwrap().command(),
+            "rust-analyzer"
+        );
+        assert!(reg.config_for_extension("zzz").is_none());
+    }
+
+    #[test]
+    fn args_iter_works_for_both_variants() {
+        let reg = LspRegistry::with_overrides(vec![py_override()]);
+        let ov = reg.config_for_language_id("python").unwrap();
+        let ov_args: Vec<&str> = ov.args().collect();
+        assert_eq!(ov_args, vec!["--stdio"]);
+        let bi = reg.config_for_extension("rs").unwrap();
+        let bi_args: Vec<&str> = bi.args().collect();
+        assert!(bi_args.is_empty());
     }
 }

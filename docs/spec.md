@@ -1523,6 +1523,114 @@ pub fn setup(arx: &mut Arx) -> Result<()> {
 - Rust init crate: `arx config build` recompiles; daemon hot-reloads
 - Theme/keybinding changes: instant, no restart
 
+### 12.7 v1 Implementation (shipping)
+
+The above §12.1–§12.6 describe the long-term target. What ships
+today is a single `config.toml` file (no separate `keys.toml` /
+`theme.toml` / init crate yet) loaded by the `arx-config` crate.
+Hot-reload is deferred to v2 — relaunch to pick up changes.
+
+**Discovery order** (first hit wins):
+
+1. `--config <path>` CLI flag. Hard error if missing or unparseable.
+2. `$ARX_CONFIG` env var. Same hard-fail semantics.
+3. Platform default:
+   - Linux/macOS: `$XDG_CONFIG_HOME/arx/config.toml`, else
+     `$HOME/.config/arx/config.toml`.
+   - Windows: `%APPDATA%\arx\config.toml`, else
+     `%USERPROFILE%\arx\config.toml`.
+4. Missing default-path file → `Config::default()` silently.
+5. `--no-config` skips discovery entirely.
+
+**Schema**:
+
+```toml
+[keymap]
+profile = "emacs"          # "emacs" | "vim" | "kedit"
+
+# Applied in file order, after the profile is built.
+[[keymap.bindings]]
+keys = "C-c p"
+command = "command-palette.open"
+
+# Shadows anything inherited from the profile.
+[[keymap.unbind]]
+keys = "C-z"
+
+[features]                 # All default to true.
+syntax = true
+lsp = true
+mouse = true
+kitty_keyboard_protocol = true
+extensions = true
+
+[appearance]
+theme = "one-dark"
+line_numbers = true
+# Tokens: {name}, {modified}, {line}, {total}, {bytes}, {mode}.
+# Unknown tokens render literally. `None` = built-in default.
+status_format = "{name}{modified}  (ln {line}/{total})"
+
+# User overrides win over built-ins by `language_id`. New ids extend
+# the registry when `extensions` is supplied. `initialization_options`
+# is arbitrary TOML, converted to JSON at spawn time.
+[[lsp.servers]]
+language_id = "python"
+command = "pylsp"
+args = ["--stdio"]
+extensions = ["py"]
+root_markers = ["pyproject.toml"]
+
+[lsp.servers.initialization_options]
+"pylsp.plugins.ruff.enabled" = true
+```
+
+**Semantics**:
+
+- `[keymap].profile` — overridden by `--keymap {emacs,vim,kedit}` on
+  the CLI when provided.
+- `[[keymap.bindings]]` / `[[keymap.unbind]]` — applied to
+  `profile.global` via `Arc::make_mut` + the existing
+  `Keymap::bind_str` / `Keymap::unbind`. v1 does not target modal
+  layers (e.g. `vim.normal`); that requires a `layer = "..."`
+  field added later.
+- `[features]` — runtime toggles layered on top of the existing
+  Cargo feature gates. A binary built `--no-default-features` still
+  compiles out the code for `syntax` and `lsp`; a default build
+  honours the runtime boolean. Mouse and Kitty flags are consulted
+  in `TerminalGuard::enable`; `extensions` is read in the daemon's
+  extension-host bootstrap.
+- `[appearance].theme` — looked up via
+  `arx_highlight::Theme::by_name`. v1 registers `"one-dark"`,
+  `"default"`, and `"dark"` as aliases for the built-in theme;
+  unknown names emit a warning and fall back to the default.
+- `[[lsp.servers]]` — merged into the static registry via
+  `arx_lsp::LspRegistry::with_overrides`. Resolution: override hit
+  by `language_id` first, then built-in by `language_id`, then
+  extension lookup in the same order.
+
+**Programmatic customization** that TOML can't express stays in the
+Rust extension SDK (`arx-sdk`). Extensions register commands and
+keybindings programmatically at activation; users compose TOML for
+the declarative 90% and cdylibs for the procedural 10%.
+
+**Validation & error UX**:
+
+- Hard errors (non-zero exit): TOML parse error in an explicit
+  `--config` file, missing explicit config path, invalid
+  `profile = "..."` value.
+- Warnings (collected into a `Vec<Warning>`): unknown command name,
+  invalid key-sequence syntax, unknown theme, LSP override with
+  unknown `language_id` and no extensions, invalid
+  `initialization_options` (TOML → JSON conversion failure).
+- Warnings are printed to stderr before the alt-screen takes over,
+  and the first is set as a startup status message via
+  `Editor::set_status` (auto-clears on the first keystroke). If
+  there's more than one warning, the status appends `" (+N more;
+  see stderr)"`.
+
+**File watching**: deferred to v2. v1 users relaunch to reload.
+
 ---
 
 ## 13. Package Manager & Registry

@@ -28,7 +28,10 @@ use std::path::PathBuf;
 use arx_buffer::BufferId;
 
 pub use client::{LspClient, LspClientError};
-pub use config::{LspServerConfig, config_for_extension};
+pub use config::{
+    LspRegistry, LspServerConfig, OwnedLspServerConfig, ResolvedLspConfig,
+    config_for_extension,
+};
 pub use transport::{LspTransport, TransportError};
 
 /// Events that the editor sends to the LSP manager task.

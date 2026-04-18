@@ -17,6 +17,7 @@ lsp = ["dep:arx-lsp"]
 
 [dependencies]
 arx-buffer = { workspace = true }
+arx-config = { workspace = true }
 arx-highlight = { workspace = true, optional = true }
 arx-keymap = { workspace = true }
 arx-lsp = { workspace = true, optional = true }

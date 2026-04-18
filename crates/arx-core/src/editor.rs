@@ -195,6 +195,19 @@ pub struct Editor {
     /// Transient message shown in the modeline (e.g. hover info, LSP
     /// status). Cleared on the next user keystroke.
     status_message: Option<String>,
+    /// Runtime feature toggles sourced from the user's config file.
+    /// Syntax and LSP also have compile-time `#[cfg(feature = ...)]`
+    /// gates; these booleans layer on top so the user can disable a
+    /// subsystem without rebuilding. See the guards inside
+    /// `attach_highlight`, `edit_with_highlight`, and `notify_lsp`.
+    runtime_features: arx_config::RuntimeFeatures,
+    /// Whether new windows show line numbers in the gutter. Read by
+    /// the driver's render layer when building the view state.
+    show_line_numbers: bool,
+    /// Optional modeline template. `None` = built-in default.
+    /// Tokens: `{name}`, `{modified}`, `{line}`, `{total}`, `{bytes}`,
+    /// `{mode}`. Read by the driver's modeline renderer.
+    status_format: Option<String>,
     dirty: bool,
     quit_requested: bool,
     suspend_requested: bool,
@@ -265,10 +278,66 @@ impl Editor {
             kedit,
             filters: HashMap::new(),
             status_message: None,
+            runtime_features: arx_config::RuntimeFeatures::default(),
+            show_line_numbers: true,
+            status_format: None,
             dirty: false,
             quit_requested: false,
             suspend_requested: false,
         }
+    }
+
+    /// Replace the runtime feature toggles. Subsequent calls into
+    /// `attach_highlight`, `edit_with_highlight`, and `notify_lsp`
+    /// honour the new values immediately.
+    pub fn set_runtime_features(&mut self, features: arx_config::RuntimeFeatures) {
+        self.runtime_features = features;
+    }
+
+    /// Borrow the current runtime feature toggles.
+    pub fn runtime_features(&self) -> arx_config::RuntimeFeatures {
+        self.runtime_features
+    }
+
+    /// Toggle line-number gutter for all windows. Read by the render
+    /// layer when constructing each frame's `GutterConfig`.
+    pub fn set_show_line_numbers(&mut self, on: bool) {
+        self.show_line_numbers = on;
+    }
+
+    /// Whether windows should show a line-number gutter.
+    pub fn show_line_numbers(&self) -> bool {
+        self.show_line_numbers
+    }
+
+    /// Install a modeline template. `None` restores the built-in
+    /// default format used by the renderer.
+    pub fn set_status_format(&mut self, template: Option<String>) {
+        self.status_format = template;
+    }
+
+    /// Borrow the current modeline template, if any.
+    pub fn status_format(&self) -> Option<&str> {
+        self.status_format.as_deref()
+    }
+
+    /// Apply a theme to the syntax highlighter by registry name.
+    /// Unknown names are ignored silently — the config loader should
+    /// have already emitted a warning.
+    #[cfg(feature = "syntax")]
+    pub fn set_theme_by_name(&mut self, name: &str) -> bool {
+        if let Some(theme) = arx_highlight::Theme::by_name(name) {
+            self.highlight.set_theme(theme);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Stub when the `syntax` feature is off.
+    #[cfg(not(feature = "syntax"))]
+    pub fn set_theme_by_name(&mut self, _name: &str) -> bool {
+        false
     }
 
     /// Borrow the [`BufferManager`].
@@ -343,8 +412,13 @@ impl Editor {
         extension: Option<&str>,
     ) {
         #[cfg(feature = "syntax")]
-        if let Some(buffer) = self.buffers.get_mut(id) {
-            self.highlight.attach_buffer(buffer, extension);
+        {
+            if !self.runtime_features.syntax {
+                return;
+            }
+            if let Some(buffer) = self.buffers.get_mut(id) {
+                self.highlight.attach_buffer(buffer, extension);
+            }
         }
         #[cfg(not(feature = "syntax"))]
         { let _ = (id, extension); }
@@ -364,8 +438,10 @@ impl Editor {
     ) -> Option<arx_buffer::Edit> {
         let edit = self.buffers.edit(id, range, text, origin)?;
         #[cfg(feature = "syntax")]
-        if let Some(buffer) = self.buffers.get_mut(id) {
-            self.highlight.on_edit(buffer, &edit);
+        if self.runtime_features.syntax {
+            if let Some(buffer) = self.buffers.get_mut(id) {
+                self.highlight.on_edit(buffer, &edit);
+            }
         }
         Some(edit)
     }
@@ -465,9 +541,13 @@ impl Editor {
     }
 
     /// Send an LSP event (best-effort, non-blocking). No-op if the
-    /// `lsp` feature is disabled or no notifier is set.
+    /// `lsp` feature is disabled, runtime-disabled, or no notifier
+    /// is set.
     #[cfg(feature = "lsp")]
     pub fn notify_lsp(&self, event: arx_lsp::LspEvent) {
+        if !self.runtime_features.lsp {
+            return;
+        }
         if let Some(tx) = &self.lsp_notifier {
             let _ = tx.try_send(event);
         }

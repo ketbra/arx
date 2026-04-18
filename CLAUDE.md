@@ -150,7 +150,30 @@ and **completion framework** (item 5). The editor has:
   the *same source lines* across edits rather than going stale.
   New lines born inside the shift gap are visible by default.
 
-**453 tests green** (up from Phase 1's 274).
+- **(Post-Phase 2)** **User configuration system** via the new
+  `arx-config` crate. Loads `config.toml` from
+  `$XDG_CONFIG_HOME/arx/` (Linux/macOS) or `%APPDATA%\arx\`
+  (Windows); CLI flags `--config <path>` and `--no-config` override
+  discovery. The file controls: the default keymap profile
+  (`[keymap].profile = "emacs" | "vim" | "kedit"`); user keybinding
+  overrides (`[[keymap.bindings]]` and `[[keymap.unbind]]` applied
+  on top of the profile via `Arc::make_mut` + the existing
+  `Keymap::bind_str` / `Keymap::unbind` APIs); runtime feature
+  toggles (`[features]` — syntax, lsp, mouse, kitty_keyboard_protocol,
+  extensions — layered on top of the existing Cargo feature gates so
+  `--no-default-features` builds still work); appearance
+  (`[appearance]` — theme name, line-number gutter, status_format
+  template with `{name}{modified}{line}{total}{bytes}{mode}`
+  tokens); and LSP server overrides (`[[lsp.servers]]` — per-
+  `language_id` command/args/root_markers/extensions plus
+  `initialization_options` converted from TOML to JSON at spawn
+  time). Programmatic customization stays in the Rust extension
+  SDK (`arx-sdk`). v1 does not hot-reload; users relaunch to pick
+  up changes. Non-fatal issues (unknown command, bad chord
+  syntax, unknown theme) print to stderr and are composed into a
+  startup status message that clears on the first keystroke.
+
+**503 tests green** (up from Phase 1's 274; +50 for `arx-config` + LSP registry + status-format template).
 `cargo clippy --workspace --all-targets` clean under the workspace
 pedantic lint set.
 `cargo check --workspace --target x86_64-pc-windows-gnu` clean.
@@ -160,6 +183,7 @@ pedantic lint set.
 | Crate | Role |
 |---|---|
 | `arx-buffer` | Rope buffer, property map, interval tree, buffer snapshots. |
+| `arx-config` | User-facing TOML config: schema, discovery, keymap-override/appearance appliers. Leaf crate — depends only on `arx-keymap` + `toml` + `serde`. |
 | `arx-core` | `Editor`, event loop, command bus, buffer/window managers, session, palette, stock commands. Single-writer state lives here. Depends on `arx-highlight` (feature-gated behind `syntax`). |
 | `arx-highlight` | Tree-sitter syntax highlighting. `HighlightManager`, per-buffer `Highlighter`, `LanguageRegistry`, `Theme`. Depends on `tree-sitter` + grammar crates (C build via `cc`). |
 | `arx-lsp` | LSP client. JSON-RPC transport over stdio, `LspClient`, position helpers, diagnostic conversion, server config registry. Depends on `lsp-types`. |

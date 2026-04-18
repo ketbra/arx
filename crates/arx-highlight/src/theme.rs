@@ -30,6 +30,16 @@ impl Theme {
         }
     }
 
+    /// Look up a theme by registry name. Returns `None` if the name
+    /// isn't known; callers should surface a warning and fall back
+    /// to [`Theme::default_dark`].
+    pub fn by_name(name: &str) -> Option<Self> {
+        match name {
+            "one-dark" | "default" | "dark" => Some(Self::default_dark()),
+            _ => None,
+        }
+    }
+
     /// The default dark theme. Covers the standard tree-sitter capture
     /// groups with colours loosely inspired by One Dark / VS Code Dark+.
     #[allow(clippy::unreadable_literal)]

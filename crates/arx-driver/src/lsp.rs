@@ -17,7 +17,9 @@ use tracing::{debug, info, warn};
 
 use arx_buffer::{AdjustmentPolicy, BufferId};
 use arx_core::CommandBus;
-use arx_lsp::{LspClient, LspEvent, config_for_extension, diagnostics, find_root};
+use arx_lsp::{
+    LspClient, LspEvent, LspRegistry, ResolvedLspConfig, diagnostics, find_root,
+};
 
 /// Per-buffer bookkeeping for the LSP manager.
 #[derive(Debug)]
@@ -26,7 +28,11 @@ struct TrackedBuffer {
     #[allow(dead_code)]
     extension: String,
     version: i32,
-    language_id: &'static str,
+    /// Owned copy of the resolved server's `languageId`. Owned (not
+    /// `&'static`) because user-config overrides carry heap-owned
+    /// strings; built-ins still work because `ResolvedLspConfig`'s
+    /// accessors normalise to `&str`.
+    language_id: String,
 }
 
 /// A running server and its tracked documents.
@@ -40,8 +46,10 @@ struct ServerEntry {
 #[derive(Debug)]
 pub struct LspManager {
     bus: CommandBus,
-    servers: HashMap<&'static str, ServerEntry>,
+    servers: HashMap<String, ServerEntry>,
     tracked: HashMap<BufferId, TrackedBuffer>,
+    /// Merged registry of built-in + user-override server configs.
+    registry: Arc<LspRegistry>,
     /// Maps absolute path to `BufferId` so the notification task can
     /// resolve `publishDiagnostics` URIs back to buffer ids.
     path_index: Arc<std::sync::Mutex<HashMap<PathBuf, BufferId>>>,
@@ -49,10 +57,17 @@ pub struct LspManager {
 
 impl LspManager {
     pub fn new(bus: CommandBus) -> Self {
+        Self::new_with_registry(bus, Arc::new(LspRegistry::builtin_only()))
+    }
+
+    /// Construct a manager with a specific registry. Used by the
+    /// driver to inject user overrides from the config file.
+    pub fn new_with_registry(bus: CommandBus, registry: Arc<LspRegistry>) -> Self {
         Self {
             bus,
             servers: HashMap::new(),
             tracked: HashMap::new(),
+            registry,
             path_index: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -93,9 +108,12 @@ impl LspManager {
         extension: String,
         text: String,
     ) {
-        let Some(config) = config_for_extension(&extension) else {
+        let registry = self.registry.clone();
+        let Some(config) = registry.config_for_extension(&extension) else {
             return;
         };
+        let language_id: String = config.language_id().to_owned();
+        let name: String = config.name().to_owned();
 
         // Update the path index so the notification task can resolve
         // diagnostic URIs.
@@ -114,29 +132,25 @@ impl LspManager {
                 path: path.clone(),
                 extension,
                 version: 0,
-                language_id: config.language_id,
+                language_id: language_id.clone(),
             },
         );
 
         // Ensure the server for this language is running.
-        if !self.servers.contains_key(config.language_id) {
-            if let Err(err) = self.start_server(config, &path).await {
-                warn!(%err, language = config.name, "failed to start LSP server");
+        if !self.servers.contains_key(&language_id) {
+            if let Err(err) = self.start_server(&config, &language_id, &name, &path).await {
+                warn!(%err, language = %name, "failed to start LSP server");
                 return;
             }
         }
 
-        let Some(entry) = self.servers.get_mut(config.language_id) else {
+        let Some(entry) = self.servers.get_mut(&language_id) else {
             return;
         };
         entry.buffers.push(buffer_id);
 
         let uri = path_to_uri(&path);
-        if let Err(err) = entry
-            .client
-            .did_open(uri, config.language_id, 0, text)
-            .await
-        {
+        if let Err(err) = entry.client.did_open(uri, &language_id, 0, text).await {
             warn!(%err, "didOpen failed");
         }
     }
@@ -148,9 +162,9 @@ impl LspManager {
         tracked.version += 1;
         let version = tracked.version;
         let uri = path_to_uri(&tracked.path);
-        let lang_id = tracked.language_id;
+        let lang_id = tracked.language_id.clone();
 
-        let Some(entry) = self.servers.get(lang_id) else {
+        let Some(entry) = self.servers.get(&lang_id) else {
             return;
         };
         if let Err(err) = entry.client.did_change(uri, version, new_text).await {
@@ -172,7 +186,7 @@ impl LspManager {
         self.path_index.lock().unwrap().remove(&abs);
 
         let uri = path_to_uri(&tracked.path);
-        if let Some(entry) = self.servers.get_mut(tracked.language_id) {
+        if let Some(entry) = self.servers.get_mut(&tracked.language_id) {
             if let Err(err) = entry.client.did_close(uri).await {
                 warn!(%err, "didClose failed");
             }
@@ -182,23 +196,27 @@ impl LspManager {
 
     async fn start_server(
         &mut self,
-        config: &'static arx_lsp::LspServerConfig,
+        config: &ResolvedLspConfig<'_>,
+        language_id: &str,
+        name: &str,
         first_file: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!(
-            language = config.name,
-            command = config.command,
+            language = %name,
+            command = %config.command(),
             "spawning LSP server",
         );
-        let mut client = LspClient::spawn(config)?;
+        let mut client = LspClient::spawn_resolved(config)?;
 
+        let root_markers: Vec<&str> = config.root_markers().collect();
         let root = first_file.parent().map_or_else(
             || PathBuf::from("."),
-            |dir| find_root(dir, config.root_markers),
+            |dir| find_root(dir, &root_markers),
         );
         let root_uri = path_to_uri(&root);
 
-        client.initialize(root_uri).await?;
+        let init_options = config.initialization_options().cloned();
+        client.initialize_with_options(root_uri, init_options).await?;
 
         // Extract the notification receiver and spawn a dedicated
         // task that processes server-initiated messages.
@@ -209,7 +227,7 @@ impl LspManager {
         }
 
         self.servers.insert(
-            config.language_id,
+            language_id.to_owned(),
             ServerEntry {
                 client,
                 buffers: Vec::new(),

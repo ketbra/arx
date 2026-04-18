@@ -433,7 +433,7 @@ pub(crate) fn hit_test_at(
                 .get(data.buffer_id)
                 .map_or(1, |b| b.rope().len_lines().max(1));
             let digits = digit_count(len_lines);
-            let gc = GutterConfig::default();
+            let gc = editor_gutter(editor);
             if gc.line_numbers {
                 (digits.max(gc.min_width as usize) as u16) + 1
             } else {
@@ -492,7 +492,7 @@ fn build_view_state_sync(
     // using the freshly-adjusted WindowData. Terminal panes are
     // identified by the side-table on Editor; everything else is a
     // buffer window.
-    let gutter = GutterConfig::default();
+    let gutter = editor_gutter(editor);
     let mut windows: Vec<WindowState> = Vec::new();
     let mut terminal_panes: Vec<TerminalViewState> = Vec::new();
     for &id in &visible_ids {
@@ -589,7 +589,7 @@ fn write_back_pane_dimensions(
     visible_ids: &[CoreWindowId],
     pane_rects: &[(ViewWindowId, Rect)],
 ) {
-    let gutter = GutterConfig::default();
+    let gutter = editor_gutter(editor);
     for &id in visible_ids {
         let rect = pane_rects
             .iter()
@@ -698,9 +698,10 @@ fn build_global_state(
         let line_start = snapshot.rope().line_to_byte(cursor_line);
         let cursor_col = (active_data.cursor_byte - line_start) as u16;
         // Account for gutter width.
-        let gutter_w = if GutterConfig::default().line_numbers {
+        let gc = editor_gutter(editor);
+        let gutter_w = if gc.line_numbers {
             let digits = digit_count(snapshot.rope().len_lines().max(1));
-            (digits.max(GutterConfig::default().min_width as usize) as u16) + 1
+            (digits.max(gc.min_width as usize) as u16) + 1
         } else {
             0
         };
@@ -727,6 +728,21 @@ fn build_global_state(
         .unwrap_or_default();
     let left = if let Some(status) = editor.status_message() {
         status.to_owned()
+    } else if let Some(template) = editor.status_format() {
+        let line = snapshot.rope().byte_to_line(active_data.cursor_byte) + 1;
+        let total = snapshot.rope().len_lines();
+        let bytes = text.len();
+        let mode = current_mode_label(editor);
+        let body = substitute_status_format(
+            template,
+            &label,
+            modified_tag,
+            line,
+            total,
+            bytes,
+            mode,
+        );
+        format!("{body}{filter_tag}")
     } else {
         format!(
             "{label}{modified_tag}  (ln {}/{}){filter_tag}",
@@ -820,6 +836,117 @@ fn split_axis_to_direction(axis: SplitAxis) -> SplitDirection {
     match axis {
         SplitAxis::Horizontal => SplitDirection::Horizontal,
         SplitAxis::Vertical => SplitDirection::Vertical,
+    }
+}
+
+/// The gutter config the renderer should use for this frame. Honors
+/// the editor's `show_line_numbers` toggle (sourced from user config
+/// via `arx_config::AppearanceSection::line_numbers`); other gutter
+/// geometry falls back to `GutterConfig::default`.
+fn editor_gutter(editor: &arx_core::Editor) -> GutterConfig {
+    GutterConfig {
+        line_numbers: editor.show_line_numbers(),
+        ..GutterConfig::default()
+    }
+}
+
+/// Best-effort single-word mode label for `{mode}` in the user's
+/// `status_format` template. Reads the top keymap layer; returns
+/// `"normal"` / `"insert"` for Vim, `""` for modeless profiles.
+fn current_mode_label(editor: &arx_core::Editor) -> &'static str {
+    match editor.keymap().top_layer() {
+        s if s.contains("insert") => "insert",
+        s if s.contains("visual") => "visual",
+        s if s.contains("normal") => "normal",
+        _ => "",
+    }
+}
+
+/// Substitute `{name}`, `{modified}`, `{line}`, `{total}`,
+/// `{bytes}`, `{mode}` tokens in the user's status-format template.
+/// Unknown tokens render literally. Lenient on purpose — the
+/// modeline is UX-ish, not a programmable language.
+fn substitute_status_format(
+    template: &str,
+    name: &str,
+    modified: &str,
+    line: usize,
+    total: usize,
+    bytes: usize,
+    mode: &str,
+) -> String {
+    let mut out = String::with_capacity(template.len() + 16);
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        if let Some(close) = rest[open..].find('}') {
+            let tok = &rest[open + 1..open + close];
+            match tok {
+                "name" => out.push_str(name),
+                "modified" => out.push_str(modified),
+                "line" => out.push_str(&line.to_string()),
+                "total" => out.push_str(&total.to_string()),
+                "bytes" => out.push_str(&bytes.to_string()),
+                "mode" => out.push_str(mode),
+                // Unknown token — render literally (braces kept).
+                _ => {
+                    out.push('{');
+                    out.push_str(tok);
+                    out.push('}');
+                }
+            }
+            rest = &rest[open + close + 1..];
+        } else {
+            // Unmatched `{` — treat the rest as literal and stop.
+            out.push_str(&rest[open..]);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod status_format_tests {
+    use super::substitute_status_format;
+
+    #[test]
+    fn replaces_all_known_tokens() {
+        let s = substitute_status_format(
+            "{name}{modified} (ln {line}/{total}, {bytes}b, {mode})",
+            "foo.rs",
+            " [+]",
+            3,
+            42,
+            1024,
+            "normal",
+        );
+        assert_eq!(s, "foo.rs [+] (ln 3/42, 1024b, normal)");
+    }
+
+    #[test]
+    fn unknown_tokens_are_literal() {
+        let s = substitute_status_format("{name} {foo}", "x", "", 1, 1, 0, "");
+        assert_eq!(s, "x {foo}");
+    }
+
+    #[test]
+    fn unmatched_brace_is_literal_tail() {
+        let s = substitute_status_format("x {", "n", "", 1, 1, 0, "");
+        assert_eq!(s, "x {");
+    }
+
+    #[test]
+    fn empty_template() {
+        assert_eq!(substitute_status_format("", "n", "", 0, 0, 0, ""), "");
+    }
+
+    #[test]
+    fn no_tokens_is_copy() {
+        assert_eq!(
+            substitute_status_format("plain text", "n", "", 0, 0, 0, ""),
+            "plain text"
+        );
     }
 }
 

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/arx",
     "crates/arx-buffer",
+    "crates/arx-config",
     "crates/arx-core",
     "crates/arx-driver",
     "crates/arx-gui",
@@ -42,8 +43,10 @@ arx-gui = { path = "crates/arx-gui" }
 arx-render = { path = "crates/arx-render" }
 arx-driver = { path = "crates/arx-driver" }
 arx-keymap = { path = "crates/arx-keymap" }
+arx-config = { path = "crates/arx-config" }
 arx-protocol = { path = "crates/arx-protocol" }
 arx-sdk = { path = "crates/arx-sdk" }
+toml = "0.8"
 libloading = "0.8"
 regex = "1"
 notify = { version = "6", default-features = false, features = ["macos_kqueue"] }

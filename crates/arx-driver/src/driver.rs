@@ -69,6 +69,9 @@ pub struct Driver {
     seed: Box<dyn FnOnce(&mut Editor) + Send>,
     async_hook: Option<AsyncHook>,
     profile: Option<arx_keymap::profiles::Profile>,
+    runtime_features: arx_config::RuntimeFeatures,
+    lsp_overrides: Vec<arx_lsp::OwnedLspServerConfig>,
+    startup_status: Option<String>,
 }
 
 impl std::fmt::Debug for Driver {
@@ -91,6 +94,9 @@ impl Driver {
             seed: Box::new(seed),
             async_hook: None,
             profile: None,
+            runtime_features: arx_config::RuntimeFeatures::default(),
+            lsp_overrides: Vec::new(),
+            startup_status: None,
         }
     }
 
@@ -98,6 +104,32 @@ impl Driver {
     #[must_use]
     pub fn with_profile(mut self, profile: arx_keymap::profiles::Profile) -> Self {
         self.profile = Some(profile);
+        self
+    }
+
+    /// Install runtime feature toggles sourced from the user's config
+    /// file. Consulted by `TerminalGuard::enable` (mouse, Kitty
+    /// protocol), the LSP spawn decision, and `Editor` itself (syntax,
+    /// lsp). Defaults to all-on.
+    #[must_use]
+    pub fn with_runtime_features(mut self, features: arx_config::RuntimeFeatures) -> Self {
+        self.runtime_features = features;
+        self
+    }
+
+    /// Install user-specified LSP server overrides. These are merged
+    /// into the built-in registry at `LspManager` construction time.
+    #[must_use]
+    pub fn with_lsp_overrides(mut self, overrides: Vec<arx_lsp::OwnedLspServerConfig>) -> Self {
+        self.lsp_overrides = overrides;
+        self
+    }
+
+    /// Install a startup status message (typically the first config
+    /// warning). Shown until the first keystroke clears it.
+    #[must_use]
+    pub fn with_startup_status(mut self, status: Option<String>) -> Self {
+        self.startup_status = status;
         self
     }
 
@@ -120,7 +152,7 @@ impl Driver {
     /// terminal on exit (even on error / panic).
     pub async fn run(self) -> Result<Editor, DriverError> {
         let mut stdout = io::stdout();
-        let guard = TerminalGuard::enable(&mut stdout)?;
+        let guard = TerminalGuard::enable(&mut stdout, self.runtime_features)?;
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let size = SharedTerminalSize::new(cols, rows);
 
@@ -169,6 +201,10 @@ impl Driver {
             Some(p) => Editor::with_profile(p),
             None => Editor::new(),
         };
+        editor.set_runtime_features(self.runtime_features);
+        if let Some(msg) = self.startup_status.clone() {
+            editor.set_status(msg);
+        }
         let seed = self.seed;
         seed(&mut editor);
         let (event_loop, bus) = EventLoop::with_editor(editor, DEFAULT_BUS_CAPACITY);
@@ -189,17 +225,27 @@ impl Driver {
         let render_handle = tokio::spawn(render_task.run());
 
         // Spawn the LSP manager task and install the notifier on the
-        // editor so buffer events reach it.
-        let (lsp_tx, lsp_rx) = tokio::sync::mpsc::channel(64);
-        let lsp_manager = crate::lsp::LspManager::new(bus.clone());
-        let _lsp_handle = tokio::spawn(lsp_manager.run(lsp_rx));
+        // editor so buffer events reach it. Skipped entirely when the
+        // `lsp` runtime feature is off.
         let terminal_redraw = redraw.clone();
-        bus.invoke(move |editor| {
-            editor.set_lsp_notifier(lsp_tx);
-            editor.set_terminal_redraw(terminal_redraw);
-        })
-        .await
-        .ok();
+        if self.runtime_features.lsp {
+            let (lsp_tx, lsp_rx) = tokio::sync::mpsc::channel(64);
+            let registry = Arc::new(arx_lsp::LspRegistry::with_overrides(self.lsp_overrides));
+            let lsp_manager = crate::lsp::LspManager::new_with_registry(bus.clone(), registry);
+            let _lsp_handle = tokio::spawn(lsp_manager.run(lsp_rx));
+            bus.invoke(move |editor| {
+                editor.set_lsp_notifier(lsp_tx);
+                editor.set_terminal_redraw(terminal_redraw);
+            })
+            .await
+            .ok();
+        } else {
+            bus.invoke(move |editor| {
+                editor.set_terminal_redraw(terminal_redraw);
+            })
+            .await
+            .ok();
+        }
 
         // Run the builder-provided async hook (e.g. "open files") to
         // completion **before** spawning the input task. Otherwise the
@@ -248,30 +294,40 @@ impl Driver {
 /// input task can't leave the user's terminal in a wedged state.
 struct TerminalGuard {
     enabled: bool,
+    mouse_enabled: bool,
     keyboard_enhancements_pushed: bool,
 }
 
 impl TerminalGuard {
-    fn enable(out: &mut Stdout) -> io::Result<Self> {
+    fn enable(
+        out: &mut Stdout,
+        features: arx_config::RuntimeFeatures,
+    ) -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         out.execute(terminal::EnterAlternateScreen)?;
         out.execute(cursor::Hide)?;
-        // Enable mouse reporting so the user can click to move the
-        // cursor, drag to select, and scroll with the wheel.
-        out.execute(EnableMouseCapture)?;
-        // Try to enable the Kitty keyboard protocol so modifier keys
-        // like Ctrl+/, Ctrl+_, and Ctrl+Shift+<char> are reported
-        // unambiguously. The terminal may refuse (e.g. plain xterm);
-        // that's fine — we fall back to legacy reporting.
-        let keyboard_enhancements_pushed = out
-            .execute(PushKeyboardEnhancementFlags(
+        // Mouse and Kitty keyboard protocol are both user-opt-out via
+        // the `[features]` section of the config. We track the
+        // pushed-enhancement state so Drop knows whether to pop.
+        let mouse_enabled = if features.mouse {
+            out.execute(EnableMouseCapture)?;
+            true
+        } else {
+            false
+        };
+        let keyboard_enhancements_pushed = if features.kitty_keyboard_protocol {
+            out.execute(PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
             ))
-            .is_ok();
+            .is_ok()
+        } else {
+            false
+        };
         out.flush()?;
         Ok(Self {
             enabled: true,
+            mouse_enabled,
             keyboard_enhancements_pushed,
         })
     }
@@ -288,8 +344,10 @@ impl Drop for TerminalGuard {
                 warn!(%err, "failed to pop keyboard enhancement flags");
             }
         }
-        if let Err(err) = out.execute(DisableMouseCapture) {
-            warn!(%err, "failed to disable mouse capture");
+        if self.mouse_enabled {
+            if let Err(err) = out.execute(DisableMouseCapture) {
+                warn!(%err, "failed to disable mouse capture");
+            }
         }
         if let Err(err) = out.execute(cursor::Show) {
             warn!(%err, "failed to restore cursor visibility");

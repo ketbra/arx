@@ -65,6 +65,12 @@ impl HighlightManager {
         }
     }
 
+    /// Swap the active theme. Existing attached highlighters keep
+    /// their parse trees; the next edit re-paints with the new theme.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
     /// Attach a highlighter to `buffer`, detecting the language from
     /// `extension` (without the leading dot). Does a full parse and
     /// populates the `"syntax"` property layer.

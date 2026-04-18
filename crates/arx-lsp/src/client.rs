@@ -12,7 +12,7 @@ use lsp_types::{
 };
 use serde_json::Value;
 
-use crate::config::LspServerConfig;
+use crate::config::{LspServerConfig, ResolvedLspConfig};
 use crate::transport::{LspTransport, TransportError};
 
 /// A running LSP client for one language server. Wraps the raw
@@ -36,7 +36,30 @@ impl LspClient {
     /// uninitialised client. Call [`LspClient::initialize`] before
     /// sending any other messages.
     pub fn spawn(config: &LspServerConfig) -> std::io::Result<Self> {
-        let transport = LspTransport::spawn(config.command, config.args)?;
+        Self::spawn_with_command(config.command, config.args.iter().copied())
+    }
+
+    /// Spawn from an arbitrary command + args iterator. Used by the
+    /// driver to start user-configured LSP servers from the config
+    /// file via [`ResolvedLspConfig`].
+    pub fn spawn_with_command<'a, I>(command: &str, args: I) -> std::io::Result<Self>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let args: Vec<&str> = args.into_iter().collect();
+        let transport = LspTransport::spawn(command, &args)?;
+        Ok(Self {
+            transport,
+            capabilities: None,
+        })
+    }
+
+    /// Spawn from a [`ResolvedLspConfig`] borrow. Convenience wrapper
+    /// over [`Self::spawn_with_command`] that also logs the server
+    /// name.
+    pub fn spawn_resolved(config: &ResolvedLspConfig<'_>) -> std::io::Result<Self> {
+        let args: Vec<&str> = config.args().collect();
+        let transport = LspTransport::spawn(config.command(), &args)?;
         Ok(Self {
             transport,
             capabilities: None,
@@ -46,6 +69,17 @@ impl LspClient {
     /// Perform the LSP `initialize` + `initialized` handshake.
     /// Stores the server's capabilities for later feature detection.
     pub async fn initialize(&mut self, root_uri: Uri) -> Result<(), LspClientError> {
+        self.initialize_with_options(root_uri, None).await
+    }
+
+    /// Like [`initialize`] but also sends `initializationOptions` from
+    /// the user's config. Pass `None` when the server has no user-
+    /// supplied options.
+    pub async fn initialize_with_options(
+        &mut self,
+        root_uri: Uri,
+        initialization_options: Option<serde_json::Value>,
+    ) -> Result<(), LspClientError> {
         #[allow(deprecated)] // root_uri is simpler for MVP than workspace_folders
         let params = InitializeParams {
             root_uri: Some(root_uri),
@@ -54,6 +88,7 @@ impl LspClient {
                 text_document: Some(TextDocumentClientCapabilities::default()),
                 ..ClientCapabilities::default()
             },
+            initialization_options,
             ..InitializeParams::default()
         };
         let value = serde_json::to_value(params).map_err(LspClientError::Serde)?;

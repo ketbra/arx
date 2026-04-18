@@ -20,12 +20,16 @@ gui = ["dep:arx-gui"]
 
 [dependencies]
 arx-buffer = { workspace = true }
+arx-config = { workspace = true }
 arx-core = { workspace = true }
 arx-driver = { workspace = true }
 arx-gui = { workspace = true, optional = true }
 arx-keymap = { workspace = true }
+arx-lsp = { workspace = true }
 arx-protocol = { workspace = true }
 clap = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
